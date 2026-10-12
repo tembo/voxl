@@ -1,0 +1,28 @@
+[package]
+name = "selkies-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+axum = { version = "0.8", features = ["ws"] }
+x11rb = { version = "0.13", features = ["shm", "damage", "xfixes", "xtest", "allow-unsafe-code"] }
+libc = "0.2"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+log = "0.4"
+env_logger = "0.11"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+[build-dependencies]
+bindgen = "0.71"
+pkg-config = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+debug = 1
