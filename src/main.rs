@@ -60,9 +60,11 @@ async fn main() {
         threads: a.get("encoder-threads").and_then(|v| v.parse().ok()).unwrap_or((ncpu / 2).clamp(2, 10)),
         convert_threads: a.get("convert-threads").and_then(|v| v.parse().ok()).unwrap_or(4),
         crf: range_max(a.get("crf"), 24.0) as f32,
-        max_kbps: range_max(a.get("max-kbps"), 40000.0) as u32,
-        paintover_qp: range_max(a.get("paintover-qp"), 16.0) as i32,
+        max_kbps: range_max(a.get("max-kbps"), 30000.0) as u32,
+        paintover_crf: range_max(a.get("paintover-crf"), 16.0) as f32,
+        paintover_burst: range_max(a.get("paintover-burst"), 3.0) as u32,
         paintover_delay_ms: range_max(a.get("paintover-delay-ms"), 150.0) as u64,
+        min_kbps: range_max(a.get("min-kbps"), 800.0) as u32,
     };
     let clip = a.get("enable-clipboard").map(|s| s.as_str()).unwrap_or("true");
     let clip_mode = desktop::ClipboardMode { to_server: matches!(clip, "true" | "in"), to_client: matches!(clip, "true" | "out") };
@@ -73,13 +75,16 @@ async fn main() {
         log::error!("video init failed: {e}");
         std::process::exit(1);
     }
-    match input::spawn(display.clone()) {
+    let clipboard = match desktop::spawn(display.clone(), hub.clone(), clip_mode) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            log::error!("cursor/clipboard init failed: {e}");
+            None
+        }
+    };
+    match input::spawn(display.clone(), clipboard) {
         Ok(tx) => *hub.input.lock() = Some(tx),
         Err(e) => log::error!("input init failed: {e}"),
-    }
-    match desktop::spawn(display.clone(), hub.clone(), clip_mode) {
-        Ok(tx) => *hub.clipboard.lock() = Some(tx),
-        Err(e) => log::error!("cursor/clipboard init failed: {e}"),
     }
     if audio_on {
         let dev = a.get("audio-device-name").cloned().unwrap_or_else(|| "output.monitor".into());
@@ -94,6 +99,19 @@ async fn main() {
     use axum::serve::ListenerExt;
     let listener = listener.tap_io(|tcp| {
         let _ = tcp.set_nodelay(true);
+    });
+    let shutdown_hub = hub.clone();
+    tokio::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).unwrap();
+        let mut int = signal(SignalKind::interrupt()).unwrap();
+        tokio::select! { _ = term.recv() => {}, _ = int.recv() => {} }
+        log::info!("shutting down");
+        if let Some(tx) = shutdown_hub.input.lock().as_ref() {
+            let _ = tx.send(input::InputEvent::Shutdown);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        std::process::exit(0);
     });
     axum::serve(listener, app).await.unwrap();
 }

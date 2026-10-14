@@ -19,15 +19,17 @@ pub struct VideoConfig {
     pub convert_threads: usize,
     pub crf: f32,
     pub max_kbps: u32,
-    pub paintover_qp: i32,
+    pub paintover_crf: f32,
+    pub paintover_burst: u32,
     pub paintover_delay_ms: u64,
+    pub min_kbps: u32,
 }
 
 struct Job {
     buf: Box<I420>,
     idx: usize,
     force_idr: bool,
-    qp: Option<i32>,
+    paintover: bool,
     captured_at: Instant,
     marker_ms: i64,
 }
@@ -51,7 +53,8 @@ pub fn spawn(cfg: VideoConfig, hub: Arc<Hub>) -> Result<(), String> {
     let enc_cfg = EncoderConfig { width: w, height: h, fps: cfg.fps, preset: cfg.preset.clone(), threads: cfg.threads, crf: cfg.crf, max_kbps: cfg.max_kbps };
     let mut encoder = Encoder::new(&enc_cfg)?;
     let hub2 = hub.clone();
-    std::thread::Builder::new().name("encode".into()).spawn(move || encode_loop(&mut encoder, job_rx, ret_tx, hub2)).unwrap();
+    let (crf, po_crf) = (cfg.crf, cfg.paintover_crf);
+    std::thread::Builder::new().name("encode".into()).spawn(move || encode_loop(&mut encoder, job_rx, ret_tx, hub2, crf, po_crf)).unwrap();
 
     let hub3 = hub.clone();
     std::thread::Builder::new()
@@ -94,6 +97,64 @@ fn flow_ok(hub: &Hub, interval_ms: f64) -> bool {
     true
 }
 
+/// Delay-based bitrate adaptation: back off toward the measured delivery rate when
+/// acks show queueing, probe upward slowly when the path is clear.
+struct RateCtl {
+    target: f64,
+    max: f64,
+    min: f64,
+    last_eval: Instant,
+    last_dec: Instant,
+    last_inc: Instant,
+}
+
+impl RateCtl {
+    fn update(&mut self, hub: &Hub, clients: &[Arc<crate::hub::Client>]) {
+        if self.last_eval.elapsed() < Duration::from_millis(100) {
+            return;
+        }
+        self.last_eval = Instant::now();
+        let mut congested = false;
+        let mut clear = true;
+        let mut rate = f64::MAX;
+        for c in clients {
+            if !c.started.load(Ordering::Relaxed) {
+                continue;
+            }
+            let q = c.delay.lock().queue_ms;
+            let (_, age) = c.backlog();
+            let rtt = match c.min_rtt_ms.load(Ordering::Relaxed) {
+                0 => 40,
+                r => r,
+            } as f64;
+            if q > 40.0 || age as f64 > rtt + 90.0 {
+                congested = true;
+                let r = c.delivered.lock().rate_bps / 1000.0;
+                if r > 0.0 {
+                    rate = rate.min(r);
+                }
+            }
+            if q > 15.0 {
+                clear = false;
+            }
+        }
+        let now = Instant::now();
+        if congested && self.last_dec.elapsed() >= Duration::from_millis(300) {
+            let mut t = self.target * 0.85;
+            if rate.is_finite() {
+                t = t.min(rate * 0.9);
+            }
+            self.target = t.max(self.min);
+            self.last_dec = now;
+            log::debug!("rate: congested, target {:.0} kbps (delivered {:.0})", self.target, rate);
+        } else if !congested && clear && self.last_dec.elapsed() >= Duration::from_secs(1) && self.last_inc.elapsed() >= Duration::from_millis(200) {
+            self.target = (self.target * 1.06 + 100.0).min(self.max);
+            self.last_inc = now;
+        }
+        hub.target_kbps.store(self.target as u32, Ordering::Relaxed);
+    }
+}
+
 fn wait_fds(fds: &[i32], timeout_ms: i32) {
     let mut p: Vec<libc::pollfd> = fds.iter().map(|&fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 }).collect();
     unsafe {
@@ -112,7 +173,10 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
     let interval_ms = interval.as_secs_f64() * 1000.0;
     let mut last_capture = Instant::now() - interval;
     let mut last_motion = Instant::now();
-    let mut paintover_done = true;
+    let mut paintover_left = 0u32;
+    let start = Instant::now() - Duration::from_secs(10);
+    let mut rc = RateCtl { target: cfg.max_kbps as f64, max: cfg.max_kbps as f64, min: cfg.min_kbps as f64, last_eval: start, last_dec: start, last_inc: start };
+    hub.target_kbps.store(cfg.max_kbps, Ordering::Relaxed);
     let mut had_clients = false;
     let x_fd = cap.fd();
     let debug_marker = std::env::var("SRS_DEBUG_MARKER").is_ok();
@@ -129,6 +193,7 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
             wait_fds(&[x_fd, hub.wake_r], 500);
             continue;
         }
+        rc.update(&hub, &clients);
         let want_key = clients.iter().any(|c| c.needs_keyframe.load(Ordering::Relaxed));
         if !had_clients {
             had_clients = true;
@@ -137,9 +202,9 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
             pending = [Some(cap.full()), Some(cap.full())];
             cap.damaged = true;
         }
-        let paintover_due = !paintover_done && last_motion.elapsed() >= Duration::from_millis(cfg.paintover_delay_ms);
+        let paintover_due = paintover_left > 0 && last_motion.elapsed() >= Duration::from_millis(cfg.paintover_delay_ms);
         if !cap.damaged && !want_key && !paintover_due {
-            let timeout = if paintover_done { 1000 } else { cfg.paintover_delay_ms.saturating_sub(last_motion.elapsed().as_millis() as u64) as i32 + 1 };
+            let timeout = if paintover_left == 0 { 100 } else { cfg.paintover_delay_ms.saturating_sub(last_motion.elapsed().as_millis() as u64) as i32 + 1 };
             wait_fds(&[x_fd, hub.wake_r], timeout);
             continue;
         }
@@ -203,16 +268,16 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
         hub.stats.convert_us.fetch_add((t2 - t1).as_micros() as u64, Ordering::Relaxed);
         hub.stats.captured.fetch_add(1, Ordering::Relaxed);
 
-        let qp = if is_motion {
+        let paintover = if is_motion {
             last_motion = Instant::now();
-            paintover_done = false;
-            None
+            paintover_left = cfg.paintover_burst;
+            false
         } else if paintover_due {
-            paintover_done = true;
+            paintover_left -= 1;
             hub.stats.paintovers.fetch_add(1, Ordering::Relaxed);
-            Some(cfg.paintover_qp)
+            true
         } else {
-            None
+            false
         };
         if want_key {
             for c in &clients {
@@ -221,14 +286,16 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
         }
         last_capture = t0;
         next_idx = 1 - idx;
-        if job_tx.send(Job { buf, idx, force_idr: want_key, qp, captured_at: origin, marker_ms }).is_err() {
+        if job_tx.send(Job { buf, idx, force_idr: want_key, paintover, captured_at: origin, marker_ms }).is_err() {
             return Err("encoder gone".into());
         }
     }
 }
 
-fn encode_loop(enc: &mut Encoder, rx: mpsc::Receiver<Job>, ret: mpsc::Sender<(usize, Box<I420>)>, hub: Arc<Hub>) {
+fn encode_loop(enc: &mut Encoder, rx: mpsc::Receiver<Job>, ret: mpsc::Sender<(usize, Box<I420>)>, hub: Arc<Hub>, crf: f32, po_crf: f32) {
     let epoch = Instant::now();
+    let mut applied_kbps = 0u32;
+    let mut applied_crf = crf;
     let mut frame_id: u32 = 0;
     let mut out = Vec::with_capacity(4 << 20);
     while let Ok(job) = rx.recv() {
@@ -238,7 +305,17 @@ fn encode_loop(enc: &mut Encoder, rx: mpsc::Receiver<Job>, ret: mpsc::Sender<(us
         let suv = job.buf.stride_uv();
         let planes = Planes { y: &job.buf.y, u: &job.buf.u, v: &job.buf.v, stride_y: job.buf.width, stride_uv: suv };
         let ts = job.captured_at.duration_since(epoch).as_millis() as i64;
-        let res = enc.encode(&planes, ts, job.force_idr, job.qp, &mut out);
+        let want_crf = if job.paintover { po_crf } else { crf };
+        let target = hub.target_kbps.load(Ordering::Relaxed);
+        let rate_moved = applied_kbps == 0 || (target as f64 - applied_kbps as f64).abs() > applied_kbps as f64 * 0.04;
+        if want_crf != applied_crf || rate_moved {
+            // Paint-over frames get twice the budget: they only happen on a still screen.
+            let cap = if job.paintover { target.saturating_mul(2) } else { target };
+            enc.set_rate(want_crf, cap);
+            applied_crf = want_crf;
+            applied_kbps = target;
+        }
+        let res = enc.encode(&planes, ts, job.force_idr, None, &mut out);
         let _ = ret.send((job.idx, job.buf));
         let key = match res {
             Ok(k) => k,
@@ -258,7 +335,7 @@ fn encode_loop(enc: &mut Encoder, rx: mpsc::Receiver<Job>, ret: mpsc::Sender<(us
             hub.stats.keyframes.fetch_add(1, Ordering::Relaxed);
         }
         frame_id = frame_id.wrapping_add(1);
-        out[1] = (key as u8) | if job.qp.is_some() { 2 } else { 0 };
+        out[1] = (key as u8) | if job.paintover { 2 } else { 0 };
         out[2..6].copy_from_slice(&frame_id.to_be_bytes());
         // Server-side pipeline latency (capture -> sent) in 1/10 ms, for client stats.
         let pipe = (job.captured_at.elapsed().as_micros() / 100).min(u32::MAX as u128) as u32;

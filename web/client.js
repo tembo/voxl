@@ -244,7 +244,20 @@
     if (text) { lastClip = text; send('c,' + text); }
     flushPaste();
   });
-  kbd.addEventListener('input', () => { kbd.value = ''; });
+  // Text that arrives without usable keydowns (IME, dead-key composition, mobile
+  // keyboards, insertText) is typed as individual keysyms.
+  function typeText(text) {
+    for (const ch of text) {
+      const cp = ch.codePointAt(0);
+      const ks = ch === '\n' ? 0xff0d : (cp >= 0x20 && cp <= 0x7e) || (cp >= 0xa0 && cp <= 0xff) ? cp : 0x01000000 + cp;
+      send(`k,${ks},1`); send(`k,${ks},0`);
+    }
+  }
+  kbd.addEventListener('compositionend', (e) => { if (e.data) typeText(e.data); kbd.value = ''; });
+  kbd.addEventListener('input', (e) => {
+    if (!e.isComposing && e.inputType === 'insertText' && e.data) typeText(e.data);
+    if (!e.isComposing) kbd.value = '';
+  });
   window.addEventListener('blur', releaseAll);
   surface.addEventListener('focus', () => kbd.focus({ preventScroll: true }));
   if (!inIframe) kbd.focus({ preventScroll: true });

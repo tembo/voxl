@@ -17,8 +17,33 @@ pub enum InputEvent {
     /// Wheel ticks: positive dy scrolls down, positive dx scrolls right.
     Scroll { dx: i32, dy: i32 },
     Key { keysym: u32, down: bool },
+    /// Remote clipboard update, ordered with the key events around it.
+    Clipboard(String),
     ReleaseAll,
+    /// Undo keymap changes before exit.
+    Shutdown,
 }
+
+enum ShiftFix {
+    None,
+    /// Symbol lives on the shifted level but no Shift is held.
+    Add,
+    /// Symbol lives on the plain level but Shift is held.
+    Lift,
+}
+
+fn scratch_file(display: Option<&str>) -> std::path::PathBuf {
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    let d = display.unwrap_or(":0").replace([':', '/'], "_");
+    std::path::Path::new(&dir).join(format!("selkies-rs-keymap{d}"))
+}
+
+/// X keycodes (evdev + 8) with no entry in Chromium's DOM code table.
+const SAFE_SCRATCH: &[u8] = &[
+    92, 109, 120, 126, 138, 147, 149, 153, 154, 155, 156, 157, 159, 161, 162, 165, 168, 170, 178, 183, 184, 185, 186, 203, 204, 205, 206,
+    207, 208, 210, 211, 213, 219, 220, 221, 222, 223, 224, 226, 227, 228, 229, 230, 231, 234, 235, 244, 245, 246, 247, 248, 249, 250, 251,
+    253, 254, 255,
+];
 
 const SHIFT_L: u32 = 0xffe1;
 const SHIFT_R: u32 = 0xffe2;
@@ -36,6 +61,9 @@ struct Injector {
     pressed: HashMap<u32, u8>,
     buttons: [bool; 16],
     shift_down: u32,
+    clipboard: Option<crate::desktop::ClipboardHandle>,
+    shift_kc: u8,
+    scratch_path: std::path::PathBuf,
 }
 
 impl Injector {
@@ -56,8 +84,23 @@ impl Injector {
             pressed: HashMap::new(),
             buttons: [false; 16],
             shift_down: 0,
+            clipboard: None,
+            shift_kc: 0,
+            scratch_path: scratch_file(display),
         };
+        // Undo remaps left behind by a previous run that didn't exit cleanly.
+        if let Ok(old) = std::fs::read_to_string(&me.scratch_path) {
+            me.load_keymap(max_kc)?;
+            for kc in old.split_whitespace().filter_map(|k| k.parse::<u8>().ok()) {
+                if kc >= min_kc && kc <= max_kc {
+                    let _ = me.conn.change_keyboard_mapping(1, kc, me.per as u8, &vec![0; me.per]);
+                }
+            }
+            let _ = me.conn.sync();
+            let _ = std::fs::remove_file(&me.scratch_path);
+        }
         me.load_keymap(max_kc)?;
+        me.shift_kc = me.lookup.get(&SHIFT_L).map(|&(k, _)| k).unwrap_or(50);
         Ok(me)
     }
 
@@ -82,8 +125,10 @@ impl Injector {
                 }
             }
         }
-        // Keep the high end free for our remaps; never touch keycodes < 200 if possible.
-        self.scratch.retain(|&k| k >= 8);
+        // Only use keycodes whose evdev code browsers/Electron don't map to a physical key:
+        // apps derive KeyboardEvent.code (and shortcuts like New Tab, Enter, media keys)
+        // from the keycode, so a remapped "New" key would open tabs instead of typing.
+        self.scratch.retain(|k| SAFE_SCRATCH.contains(k));
         self.scratch.reverse();
         log::info!("keymap: {} keysyms, {} scratch keycodes", self.lookup.len(), self.scratch.len());
         Ok(())
@@ -98,23 +143,24 @@ impl Injector {
         let _ = self.conn.xtest_fake_input(ty, detail, x11rb::CURRENT_TIME, self.root, x, y, 0);
     }
 
-    fn resolve(&mut self, keysym: u32) -> u8 {
+    fn resolve(&mut self, keysym: u32) -> (u8, ShiftFix) {
         let want_level = if self.shift_down > 0 { 1 } else { 0 };
         if let Some(&(kc, lvl)) = self.lookup.get(&keysym) {
             let row = self.row(kc);
             let l0 = row[0];
             let l1 = if row.len() > 1 { row[1] } else { 0 };
-            let shift_neutral = l1 == 0 || l0 == l1 || keysym >= 0xfd00 && keysym < 0x10000;
+            let shift_neutral = l1 == 0 || l0 == l1 || (0xfd00..0x10000).contains(&keysym);
             if lvl == want_level || shift_neutral {
-                return kc;
+                return (kc, ShiftFix::None);
             }
+            return (kc, if lvl == 1 { ShiftFix::Add } else { ShiftFix::Lift });
         }
         if let Some((kc, t)) = self.scratch_map.get_mut(&keysym) {
             *t = Instant::now();
-            return *kc;
+            return (*kc, ShiftFix::None);
         }
         if self.scratch.is_empty() {
-            return 0;
+            return (0, ShiftFix::None);
         }
         // Map the keysym onto a spare keycode at every level.
         let kc = if self.scratch_map.len() < self.scratch.len() {
@@ -132,7 +178,17 @@ impl Injector {
         let per = self.per;
         self.syms[i * per..(i + 1) * per].copy_from_slice(&row);
         self.scratch_map.insert(keysym, (kc, Instant::now()));
-        kc
+        let used: Vec<String> = self.scratch_map.values().map(|(k, _)| k.to_string()).collect();
+        let _ = std::fs::write(&self.scratch_path, used.join(" "));
+        (kc, ShiftFix::None)
+    }
+
+    fn restore_keymap(&mut self) {
+        for (_, (kc, _)) in std::mem::take(&mut self.scratch_map) {
+            let _ = self.conn.change_keyboard_mapping(1, kc, self.per as u8, &vec![0; self.per]);
+        }
+        let _ = self.conn.sync();
+        let _ = std::fs::remove_file(&self.scratch_path);
     }
 
     fn handle(&mut self, ev: InputEvent) {
@@ -165,7 +221,7 @@ impl Injector {
                         self.fake(xproto::KEY_PRESS_EVENT, kc, 0, 0);
                         return;
                     }
-                    let kc = self.resolve(keysym);
+                    let (kc, fix) = self.resolve(keysym);
                     if kc == 0 {
                         return;
                     }
@@ -173,13 +229,39 @@ impl Injector {
                         self.shift_down += 1;
                     }
                     self.pressed.insert(keysym, kc);
-                    self.fake(xproto::KEY_PRESS_EVENT, kc, 0, 0);
+                    match fix {
+                        ShiftFix::None => self.fake(xproto::KEY_PRESS_EVENT, kc, 0, 0),
+                        ShiftFix::Add => {
+                            self.fake(xproto::KEY_PRESS_EVENT, self.shift_kc, 0, 0);
+                            self.fake(xproto::KEY_PRESS_EVENT, kc, 0, 0);
+                            self.fake(xproto::KEY_RELEASE_EVENT, self.shift_kc, 0, 0);
+                        }
+                        ShiftFix::Lift => {
+                            let held: Vec<u8> = [SHIFT_L, SHIFT_R].iter().filter_map(|k| self.pressed.get(k).copied()).collect();
+                            for &h in &held {
+                                self.fake(xproto::KEY_RELEASE_EVENT, h, 0, 0);
+                            }
+                            self.fake(xproto::KEY_PRESS_EVENT, kc, 0, 0);
+                            for &h in &held {
+                                self.fake(xproto::KEY_PRESS_EVENT, h, 0, 0);
+                            }
+                        }
+                    }
                 } else if let Some(kc) = self.pressed.remove(&keysym) {
                     if keysym == SHIFT_L || keysym == SHIFT_R {
                         self.shift_down = self.shift_down.saturating_sub(1);
                     }
                     self.fake(xproto::KEY_RELEASE_EVENT, kc, 0, 0);
                 }
+            }
+            InputEvent::Clipboard(text) => {
+                if let Some(c) = &self.clipboard {
+                    c.set_blocking(text);
+                }
+            }
+            InputEvent::Shutdown => {
+                self.handle(InputEvent::ReleaseAll);
+                self.restore_keymap();
             }
             InputEvent::ReleaseAll => {
                 for (_, kc) in std::mem::take(&mut self.pressed) {
@@ -197,8 +279,9 @@ impl Injector {
     }
 }
 
-pub fn spawn(display: Option<String>) -> Result<mpsc::Sender<InputEvent>, String> {
+pub fn spawn(display: Option<String>, clipboard: Option<crate::desktop::ClipboardHandle>) -> Result<mpsc::Sender<InputEvent>, String> {
     let mut inj = Injector::new(display.as_deref())?;
+    inj.clipboard = clipboard;
     let (tx, rx) = mpsc::channel::<InputEvent>();
     std::thread::Builder::new()
         .name("input".into())

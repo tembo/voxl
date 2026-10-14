@@ -12,6 +12,24 @@ use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
+/// Sets the remote CLIPBOARD and returns once the X server has registered us as owner,
+/// so a paste shortcut injected right afterwards sees the new contents.
+#[derive(Clone)]
+pub struct ClipboardHandle {
+    tx: mpsc::Sender<(String, mpsc::SyncSender<()>)>,
+    wake_w: i32,
+}
+
+impl ClipboardHandle {
+    pub fn set_blocking(&self, text: String) {
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        if self.tx.send((text, done_tx)).is_ok() {
+            unsafe { libc::write(self.wake_w, [1u8].as_ptr() as *const _, 1) };
+            let _ = done_rx.recv_timeout(std::time::Duration::from_millis(300));
+        }
+    }
+}
+
 pub struct ClipboardMode {
     pub to_server: bool,
     pub to_client: bool,
@@ -31,7 +49,7 @@ fn atom(c: &RustConnection, name: &str) -> Result<u32, String> {
     Ok(c.intern_atom(false, name.as_bytes()).map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?.atom)
 }
 
-pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Result<mpsc::Sender<String>, String> {
+pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Result<ClipboardHandle, String> {
     let (conn, n) = RustConnection::connect(display.as_deref()).map_err(|e| e.to_string())?;
     let root = conn.setup().roots[n].root;
     conn.xfixes_query_version(5, 0).map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?;
@@ -52,7 +70,10 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
         conn.xfixes_select_selection_input(root, atoms.clipboard, xfixes::SelectionEventMask::SET_SELECTION_OWNER).map_err(|e| e.to_string())?;
     }
     conn.flush().map_err(|e| e.to_string())?;
-    let (tx, rx) = mpsc::channel::<String>();
+    let (tx, rx) = mpsc::channel::<(String, mpsc::SyncSender<()>)>();
+    let mut fds = [0i32; 2];
+    unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
+    let (wake_r, wake_w) = (fds[0], fds[1]);
     std::thread::Builder::new()
         .name("desktop".into())
         .spawn(move || {
@@ -61,20 +82,23 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
             send_cursor(&conn, &hub);
             let fd = conn.stream().as_raw_fd();
             loop {
-                while let Ok(text) = rx.try_recv() {
-                    if !mode.to_server {
-                        continue;
+                let mut drain = [0u8; 64];
+                unsafe { while libc::read(wake_r, drain.as_mut_ptr() as *mut _, 64) > 0 {} }
+                while let Ok((text, done)) = rx.try_recv() {
+                    if mode.to_server {
+                        *hub.last_clipboard.lock() = Some(text.clone());
+                        owned = Some(text.into_bytes());
+                        let _ = conn.set_selection_owner(win, atoms.clipboard, x11rb::CURRENT_TIME);
+                        // Round trip: ownership is in effect once this returns.
+                        let _ = conn.get_selection_owner(atoms.clipboard).map(|c| c.reply());
                     }
-                    *hub.last_clipboard.lock() = Some(text.clone());
-                    owned = Some(text.into_bytes());
-                    let _ = conn.set_selection_owner(win, atoms.clipboard, x11rb::CURRENT_TIME);
-                    let _ = conn.flush();
+                    let _ = done.send(());
                 }
                 let ev = match conn.poll_for_event() {
                     Ok(Some(ev)) => ev,
                     Ok(None) => {
-                        let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-                        unsafe { libc::poll(&mut p, 1, 40) };
+                        let mut p = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }, libc::pollfd { fd: wake_r, events: libc::POLLIN, revents: 0 }];
+                        unsafe { libc::poll(p.as_mut_ptr(), 2, 1000) };
                         continue;
                     }
                     Err(e) => {
@@ -149,7 +173,7 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
             }
         })
         .unwrap();
-    Ok(tx)
+    Ok(ClipboardHandle { tx, wake_w })
 }
 
 fn publish(hub: &Hub, data: Vec<u8>) {

@@ -50,7 +50,7 @@ async fn stats(State(s): State<AppState>) -> Response {
         .map(|c| {
             let (n, age) = c.backlog();
             serde_json::json!({"id": c.id, "video": c.video.load(Ordering::Relaxed), "inflight": n, "oldest_ms": age,
-                "min_rtt_ms": c.min_rtt_ms.load(Ordering::Relaxed), "delivered_kbps": (c.delivered.lock().rate_bps / 1000.0) as u64})
+                "min_rtt_ms": c.min_rtt_ms.load(Ordering::Relaxed), "queue_ms": c.delay.lock().queue_ms as u64, "delivered_kbps": (c.delivered.lock().rate_bps / 1000.0) as u64})
         })
         .collect();
     let body = serde_json::json!({
@@ -63,6 +63,7 @@ async fn stats(State(s): State<AppState>) -> Response {
         "flow_blocked": st.flow_blocked.load(Ordering::Relaxed),
         "paintovers": st.paintovers.load(Ordering::Relaxed),
         "keyframes": st.keyframes.load(Ordering::Relaxed),
+        "target_kbps": s.hub.target_kbps.load(Ordering::Relaxed),
         "damage_wait_us_total": st.damage_wait_us.load(Ordering::Relaxed),
         "send_lat_us_total": st.send_lat_us.load(Ordering::Relaxed),
         "clients": clients,
@@ -171,11 +172,7 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
             }
         }
         "r" => input(InputEvent::ReleaseAll),
-        "c" => {
-            if let Some(tx) = s.hub.clipboard.lock().as_ref() {
-                let _ = tx.send(rest.to_string());
-            }
-        }
+        "c" => input(InputEvent::Clipboard(rest.to_string())),
         "v" => {
             let on = rest == "1";
             c.video.store(on, Ordering::Relaxed);

@@ -32,6 +32,15 @@ pub struct Client {
     pub needs_keyframe: AtomicBool,
     /// Has received a keyframe since (re)starting video.
     pub started: AtomicBool,
+    pub delay: Mutex<DelayEst>,
+}
+
+/// Send->ack delay tracking: `base` is the (slowly expiring) minimum, the excess over
+/// it is queueing somewhere on the path (network buffers or a slow decoder).
+pub struct DelayEst {
+    pub base_ms: f64,
+    pub base_at: Instant,
+    pub queue_ms: f64,
 }
 
 pub struct RateEst {
@@ -48,15 +57,28 @@ impl Client {
     pub fn on_ack(&self, id: u32) {
         let mut q = self.inflight.lock();
         let mut acked = 0;
+        let mut sample = None;
         while let Some(f) = q.front() {
             if wrapping_le(f.id, id) {
                 acked += f.bytes;
+                if f.id == id {
+                    sample = Some(f.sent.elapsed().as_secs_f64() * 1000.0);
+                }
                 q.pop_front();
             } else {
                 break;
             }
         }
         drop(q);
+        if let Some(ms) = sample {
+            let mut e = self.delay.lock();
+            if ms < e.base_ms || e.base_at.elapsed().as_secs() >= 10 {
+                e.base_ms = ms;
+                e.base_at = Instant::now();
+            }
+            let qd = ms - e.base_ms;
+            e.queue_ms = e.queue_ms * 0.7 + qd * 0.3;
+        }
         let mut d = self.delivered.lock();
         d.bytes += acked;
         let el = d.window_start.elapsed().as_secs_f64();
@@ -100,13 +122,14 @@ pub struct Hub {
     pub stats: Stats,
     pub width: AtomicU32,
     pub height: AtomicU32,
+    /// Adaptive bitrate cap applied by the encoder (kbit/s).
+    pub target_kbps: AtomicU32,
     /// Last cursor message, replayed to new clients.
     pub cursor: Mutex<Option<Bytes>>,
     /// Pipe used to wake the capture thread (acks, joins, keyframe requests).
     wake_w: i32,
     pub wake_r: i32,
     pub input: Mutex<Option<std::sync::mpsc::Sender<crate::input::InputEvent>>>,
-    pub clipboard: Mutex<Option<std::sync::mpsc::Sender<String>>>,
     pub last_clipboard: Mutex<Option<String>>,
 }
 
@@ -122,11 +145,11 @@ impl Hub {
             stats: Stats::default(),
             width: AtomicU32::new(0),
             height: AtomicU32::new(0),
+            target_kbps: AtomicU32::new(0),
             cursor: Mutex::new(None),
             wake_w: fds[1],
             wake_r: fds[0],
             input: Mutex::new(None),
-            clipboard: Mutex::new(None),
             last_clipboard: Mutex::new(None),
         })
     }
@@ -153,6 +176,7 @@ impl Hub {
             delivered: Mutex::new(RateEst { window_start: Instant::now(), bytes: 0, rate_bps: 0.0 }),
             needs_keyframe: AtomicBool::new(true),
             started: AtomicBool::new(false),
+            delay: Mutex::new(DelayEst { base_ms: f64::MAX, base_at: Instant::now(), queue_ms: 0.0 }),
         });
         self.clients.lock().push(c.clone());
         c
