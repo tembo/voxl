@@ -15,14 +15,14 @@ def make_ctx():
     c.flags2 |= av.codec.context.Flags2.fast if hasattr(av.codec.context, 'Flags2') else 0
     return c
 
-def read_marker(frame):
+def read_marker(frame, yoff=0):
     p = frame.planes[0]
     ls = p.line_size
     buf = memoryview(p)
     v = 0
     for b in range(40):
         x = mx + (b % 20) * 24 + 12
-        y = my + (b // 20) * 24 + 12
+        y = my + (b // 20) * 24 + 12 - yoff
         if buf[y * ls + x] > 128:
             v |= 1 << b
     return v >> 24, v & 0xffffff
@@ -30,6 +30,8 @@ def read_marker(frame):
 async def main():
     url = f'ws://{hostport}/ws' if mode == 'rs' else f'ws://{hostport}/api/websockets'
     ctx = make_ctx()
+    ctxs, got = {}, {}
+    sy = 0
     seen_per_sec, lat, cur, last = [], [], set(), None
     dec_ms, nbytes, nframes = [], 0, 0
     rlat = []
@@ -51,7 +53,10 @@ async def main():
                 continue
             if mode == 'rs':
                 if msg[0] != 1: continue
-                fid = int.from_bytes(msg[2:6], 'big'); payload = msg[10:]
+                fid = int.from_bytes(msg[2:6], 'big'); payload = msg[16:]
+                si = msg[10]; parts = msg[12]; sy = int.from_bytes(msg[14:16], 'big')
+                if si not in ctxs: ctxs[si] = make_ctx()
+                ctx = ctxs[si]
             else:
                 if msg[0] != 4: continue
                 fid = int.from_bytes(msg[2:4], 'big'); payload = msg[10:]
@@ -62,8 +67,16 @@ async def main():
             if os.environ.get('DUMP'): open(os.environ['DUMP'], 'ab').write(payload)
             frames = ctx.decode(av.Packet(payload))
             dec_ms.append((time.perf_counter() - td) * 1000)
-            await ws.send(f'a,{fid}' if mode == 'rs' else f'CLIENT_FRAME_ACK {fid}')
+            if mode == 'rs':
+                got[fid] = got.get(fid, 0) + 1
+                if got[fid] >= parts:
+                    del got[fid]
+                    await ws.send(f'a,{fid}')
+            else:
+                await ws.send(f'CLIENT_FRAME_ACK {fid}')
             for fr in frames:
+                if mode == 'rs' and not (sy <= my and my + 48 <= sy + fr.height):
+                    continue
                 nframes += 1
                 if os.environ.get('DISTINCT'):
                     pl = fr.planes[0]; mv = memoryview(pl); ls = pl.line_size
@@ -75,7 +88,7 @@ async def main():
                         if now - dsec0 >= 1: dps.append(dcount / (now - dsec0)); dcount = 0; dsec0 = now
                     last_hash = h
                     continue
-                n, ms = read_marker(fr)
+                n, ms = read_marker(fr, sy if mode == 'rs' else 0)
                 now = time.time()
                 if now - t0 < 4:  # warmup
                     continue
@@ -84,6 +97,7 @@ async def main():
                     last = n; cur.add(n)
                     l = (int(now * 1000) & 0xffffff) - ms
                     if l < -1e6: l += 0x1000000
+                    if os.environ.get('DBG') and len(lat) < 3: print('dbg', n, ms, l, file=sys.stderr)
                     if 0 <= l < 10000: lat.append(l); rlat.append(l - (now - trecv) * 1000)
                 if now - sec0 >= 1:
                     seen_per_sec.append(len(cur) / (now - sec0)); cur = set(); sec0 = now

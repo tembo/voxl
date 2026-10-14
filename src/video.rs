@@ -23,6 +23,9 @@ pub struct VideoConfig {
     pub paintover_burst: u32,
     pub paintover_delay_ms: u64,
     pub min_kbps: u32,
+    pub coalesce: Duration,
+    pub stripes: u32,
+    pub adaptive_threads: bool,
 }
 
 struct Job {
@@ -30,6 +33,12 @@ struct Job {
     idx: usize,
     force_idr: bool,
     paintover: bool,
+    /// Last pass of a paint-over burst.
+    paintover_final: bool,
+    /// Rows that changed in this capture.
+    band: Option<Band>,
+    /// Per-macroblock change map for this capture (None: analyse everything).
+    mb_dirty: Option<Arc<Vec<u8>>>,
     captured_at: Instant,
     marker_ms: i64,
 }
@@ -50,11 +59,18 @@ pub fn spawn(cfg: VideoConfig, hub: Arc<Hub>) -> Result<(), String> {
 
     let (job_tx, job_rx) = mpsc::sync_channel::<Job>(1);
     let (ret_tx, ret_rx) = mpsc::channel::<(usize, Box<I420>)>();
-    let enc_cfg = EncoderConfig { width: w, height: h, fps: cfg.fps, preset: cfg.preset.clone(), threads: cfg.threads, crf: cfg.crf, max_kbps: cfg.max_kbps };
-    let mut encoder = Encoder::new(&enc_cfg)?;
+    let layout = stripe_layout(h, cfg.stripes);
+    let mut stripes = Vec::new();
+    for &(y, sh) in &layout {
+        let fixed = if cfg.adaptive_threads { 1 } else { (cfg.threads / layout.len() as u32).max(1) };
+        let ecfg = EncoderConfig { width: w, height: sh, fps: cfg.fps, preset: cfg.preset.clone(), threads: fixed, crf: cfg.crf, max_kbps: cfg.max_kbps };
+        let max_threads = if cfg.adaptive_threads { (cfg.threads / layout.len() as u32).max(1) } else { 1 };
+        stripes.push(Stripe { y: y as usize, h: sh as usize, enc: Encoder::new(&ecfg)?, cfg: ecfg, max_threads, touched: false, applied_kbps: 0, applied_crf: -1.0 });
+    }
+    *hub.stripes.lock() = layout;
     let hub2 = hub.clone();
     let (crf, po_crf) = (cfg.crf, cfg.paintover_crf);
-    std::thread::Builder::new().name("encode".into()).spawn(move || encode_loop(&mut encoder, job_rx, ret_tx, hub2, crf, po_crf)).unwrap();
+    std::thread::Builder::new().name("encode".into()).spawn(move || encode_loop(stripes, job_rx, ret_tx, hub2, crf, po_crf)).unwrap();
 
     let hub3 = hub.clone();
     std::thread::Builder::new()
@@ -178,6 +194,7 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
     let mut rc = RateCtl { target: cfg.max_kbps as f64, max: cfg.max_kbps as f64, min: cfg.min_kbps as f64, last_eval: start, last_dec: start, last_inc: start };
     hub.target_kbps.store(cfg.max_kbps, Ordering::Relaxed);
     let mut had_clients = false;
+    let mut full_next = true;
     let x_fd = cap.fd();
     let debug_marker = std::env::var("SRS_DEBUG_MARKER").is_ok();
 
@@ -201,6 +218,7 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
             cap.grab(cap.full())?;
             pending = [Some(cap.full()), Some(cap.full())];
             cap.damaged = true;
+            full_next = true;
         }
         let paintover_due = paintover_left > 0 && last_motion.elapsed() >= Duration::from_millis(cfg.paintover_delay_ms);
         if !cap.damaged && !want_key && !paintover_due {
@@ -213,6 +231,16 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
             let rem = min_interval - since;
             wait_fds(&[hub.wake_r], (rem.as_micros() as i32 + 999) / 1000);
             continue;
+        }
+        // Apps present a frame as a burst of puts; give the burst a moment to land so
+        // the capture holds one whole frame instead of its first tiles.
+        if let Some(t) = cap.damaged_at {
+            let el = t.elapsed();
+            if el < cfg.coalesce {
+                let rem = cfg.coalesce - el;
+                std::thread::sleep(rem);
+                continue;
+            }
         }
         if !want_key && !flow_ok(&hub, interval_ms) {
             hub.stats.flow_blocked.fetch_add(1, Ordering::Relaxed);
@@ -234,6 +262,11 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
         let origin = cap.damaged_at.unwrap_or(t0);
         hub.stats.damage_wait_us.fetch_add((t0 - origin).as_micros() as u64, Ordering::Relaxed);
         let mut band = None;
+        let mut mb_dirty = (!full_next).then(|| cap.take_mb_map());
+        if full_next {
+            cap.take_mb_map();
+            full_next = false;
+        }
         if cap.damaged {
             band = cap.take_damage()?;
             if let Some(b) = band {
@@ -286,70 +319,255 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
         }
         last_capture = t0;
         next_idx = 1 - idx;
-        if job_tx.send(Job { buf, idx, force_idr: want_key, paintover, captured_at: origin, marker_ms }).is_err() {
+        if job_tx.send(Job { buf, idx, force_idr: want_key, paintover, paintover_final: paintover && paintover_left == 0, mb_dirty: if want_key || paintover { None } else { mb_dirty.take().map(Arc::new) }, band, captured_at: origin, marker_ms }).is_err() {
             return Err("encoder gone".into());
         }
     }
 }
 
-fn encode_loop(enc: &mut Encoder, rx: mpsc::Receiver<Job>, ret: mpsc::Sender<(usize, Box<I420>)>, hub: Arc<Hub>, crf: f32, po_crf: f32) {
-    let epoch = Instant::now();
-    let mut applied_kbps = 0u32;
-    let mut applied_crf = crf;
-    let mut frame_id: u32 = 0;
-    let mut out = Vec::with_capacity(4 << 20);
-    while let Ok(job) = rx.recv() {
-        let t0 = Instant::now();
-        out.clear();
-        out.extend_from_slice(&[0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        let suv = job.buf.stride_uv();
-        let planes = Planes { y: &job.buf.y, u: &job.buf.u, v: &job.buf.v, stride_y: job.buf.width, stride_uv: suv };
-        let ts = job.captured_at.duration_since(epoch).as_millis() as i64;
-        let want_crf = if job.paintover { po_crf } else { crf };
-        let target = hub.target_kbps.load(Ordering::Relaxed);
-        let rate_moved = applied_kbps == 0 || (target as f64 - applied_kbps as f64).abs() > applied_kbps as f64 * 0.04;
-        if want_crf != applied_crf || rate_moved {
-            // Paint-over frames get twice the budget: they only happen on a still screen.
-            let cap = if job.paintover { target.saturating_mul(2) } else { target };
-            enc.set_rate(want_crf, cap);
-            applied_crf = want_crf;
-            applied_kbps = target;
+/// Split the screen into horizontal stripes, each an independent H.264 stream.
+/// x264 pays ~9 ms of CPU per 2560x1600 frame even when nothing changed, and sliced
+/// threading triples that; independent single-threaded stripes are encoded in
+/// parallel (low latency) and only when they changed (low CPU).
+fn stripe_layout(height: u32, n: u32) -> Vec<(u32, u32)> {
+    let n = n.clamp(1, 16);
+    let each = (height.div_ceil(n) + 15) & !15;
+    let mut v = Vec::new();
+    let mut y = 0;
+    while y < height {
+        let h = each.min(height - y);
+        v.push((y, h));
+        y += h;
+    }
+    v
+}
+
+struct Stripe {
+    y: usize,
+    h: usize,
+    enc: Encoder,
+    cfg: EncoderConfig,
+    /// Sliced threads to fan out to under sustained heavy motion (1 = never).
+    max_threads: u32,
+    /// Changed since its last paint-over pass.
+    touched: bool,
+    applied_kbps: u32,
+    applied_crf: f32,
+}
+
+const HDR: usize = 16;
+
+struct SendPtr<T>(*const T);
+unsafe impl<T> Send for SendPtr<T> {}
+impl<T> Clone for SendPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for SendPtr<T> {}
+
+struct StripeJob {
+    /// Valid until the worker replies: the encode loop waits for every stripe.
+    buf: SendPtr<I420>,
+    ts: i64,
+    force_idr: bool,
+    crf: f32,
+    cap: u32,
+    mb_dirty: Option<Arc<Vec<u8>>>,
+    mb_cols: usize,
+}
+
+type StripeResult = (usize, Option<(bool, Vec<u8>)>);
+
+/// x264's sliced threading costs ~3x the CPU of one thread on desktop content, so a
+/// stripe encodes single-threaded and only fans out while sustained heavy motion
+/// would otherwise blow the frame budget.
+struct ThreadGovernor {
+    threads: u32,
+    ewma_ms: f64,
+    heavy: u32,
+    light_since: Option<Instant>,
+    budget_ms: f64,
+}
+
+impl ThreadGovernor {
+    fn want(&mut self, enc_ms: f64, max: u32) -> Option<u32> {
+        self.ewma_ms = self.ewma_ms * 0.8 + enc_ms * 0.2;
+        if self.threads == 1 {
+            // Only when one thread can no longer hold the frame rate.
+            self.heavy = if self.ewma_ms > self.budget_ms * 0.9 { self.heavy + 1 } else { 0 };
+            (self.heavy >= 30).then_some(max)
+        } else if self.ewma_ms < self.budget_ms * 0.45 {
+            // Threaded encode is ~2x faster, so this means one thread would fit again.
+            let since = *self.light_since.get_or_insert_with(Instant::now);
+            (since.elapsed() >= Duration::from_secs(2)).then_some(1)
+        } else {
+            self.light_since = None;
+            None
         }
-        let res = enc.encode(&planes, ts, job.force_idr, None, &mut out);
-        let _ = ret.send((job.idx, job.buf));
-        let key = match res {
-            Ok(k) => k,
+    }
+}
+
+fn stripe_worker(i: usize, mut s: Stripe, rx: mpsc::Receiver<StripeJob>, done: mpsc::Sender<StripeResult>, debug: bool) {
+    let mut gov = ThreadGovernor { threads: 1, ewma_ms: 0.0, heavy: 0, light_since: None, budget_ms: 1000.0 / s.cfg.fps as f64 };
+    while let Ok(job) = rx.recv() {
+        let buf = unsafe { &*job.buf.0 };
+        let moved = s.applied_kbps == 0 || (job.cap as f64 - s.applied_kbps as f64).abs() > s.applied_kbps as f64 * 0.04;
+        if job.crf != s.applied_crf || moved {
+            s.enc.set_rate(job.crf, job.cap);
+            s.applied_crf = job.crf;
+            s.applied_kbps = job.cap;
+        }
+        let suv = buf.stride_uv();
+        let planes = Planes { y: &buf.y[s.y * buf.width..], u: &buf.u[(s.y / 2) * suv..], v: &buf.v[(s.y / 2) * suv..], stride_y: buf.width, stride_uv: suv };
+        let mut out = Vec::with_capacity(64 << 10);
+        out.resize(HDR, 0);
+        static SERIAL: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+        let _g = std::env::var("SRS_SERIAL").is_ok().then(|| SERIAL.lock());
+        // x264 wants X264_MBINFO_CONSTANT (1) on unchanged macroblocks of this stripe.
+        let mut info = job.mb_dirty.as_ref().map(|d| {
+            let rows = s.h.div_ceil(16);
+            let start = (s.y / 16) * job.mb_cols;
+            d[start..start + rows * job.mb_cols].iter().map(|&x| (x == 0) as u8).collect::<Vec<u8>>()
+        });
+        let te = Instant::now();
+        let r = s.enc.encode(&planes, job.ts, job.force_idr, None, info.as_deref_mut(), &mut out);
+        if debug {
+            let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+            let cpu_now = ts.tv_sec as i64 * 1_000_000 + ts.tv_nsec as i64 / 1000;
+            log::info!("stripe y{} encode {} us wall, thread cpu total {} us, {} bytes", s.y, te.elapsed().as_micros(), cpu_now, out.len());
+        }
+        if s.max_threads > 1 {
+            if let Some(t) = gov.want(te.elapsed().as_secs_f64() * 1000.0, s.max_threads) {
+                match Encoder::new(&EncoderConfig { threads: t, ..s.cfg.clone() }) {
+                    Ok(e) => {
+                        log::info!("stripe {i}: encoder now {t} thread(s) (encode {:.1} ms)", gov.ewma_ms);
+                        // A fresh encoder opens with an IDR on its next frame.
+                        s.enc = e;
+                        s.applied_kbps = 0;
+                        gov.threads = t;
+                        gov.heavy = 0;
+                        gov.light_since = None;
+                    }
+                    Err(e) => log::error!("encoder reopen failed: {e}"),
+                }
+            }
+        }
+        let res = match r {
+            Ok(key) if out.len() > HDR => Some((key, out)),
+            Ok(_) => None,
             Err(e) => {
                 log::error!("{e}");
-                continue;
+                None
             }
         };
-        if out.len() <= 10 {
+        if done.send((i, res)).is_err() {
+            return;
+        }
+    }
+}
+
+fn encode_loop(stripes_in: Vec<Stripe>, rx: mpsc::Receiver<Job>, ret: mpsc::Sender<(usize, Box<I420>)>, hub: Arc<Hub>, crf: f32, po_crf: f32) {
+    let epoch = Instant::now();
+    let mut frame_id: u32 = 0;
+    let n = stripes_in.len();
+    let debug_stripes = std::env::var("SRS_DEBUG_STRIPES").is_ok();
+    // Geometry and paint-over bookkeeping stay here; encoders move to their workers.
+    let mut stripes: Vec<(usize, usize, bool)> = stripes_in.iter().map(|s| (s.y, s.h, false)).collect();
+    let (done_tx, done_rx) = mpsc::channel::<StripeResult>();
+    let workers: Vec<(mpsc::Sender<StripeJob>, std::thread::JoinHandle<()>)> = stripes_in
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let (tx, rx) = mpsc::channel();
+            let done = done_tx.clone();
+            let h = std::thread::Builder::new().name(format!("enc-{i}")).spawn(move || stripe_worker(i, s, rx, done, debug_stripes)).unwrap();
+            (tx, h)
+        })
+        .collect();
+    while let Ok(job) = rx.recv() {
+        let t0 = Instant::now();
+        let selected: Vec<bool> = stripes
+            .iter()
+            .map(|&(y, h, touched)| job.force_idr || (job.paintover && touched) || job.band.is_some_and(|b| (b.y0 as usize) < y + h && (b.y1 as usize) > y))
+            .collect();
+        if !selected.iter().any(|&x| x) {
+            let _ = ret.send((job.idx, job.buf));
+            continue;
+        }
+        let target = hub.target_kbps.load(Ordering::Relaxed);
+        let want_crf = if job.paintover { po_crf } else { crf };
+        // Each stripe may use up to twice its area share of the budget; the delay-based
+        // controller reins the total in if several stripes move at once.
+        let share = ((target as u64 * 2) / n as u64).max(target as u64 / n as u64 + 1) as u32;
+        let ts = job.captured_at.duration_since(epoch).as_millis() as i64;
+        // Persistent per-stripe workers keep each encoder's state warm in one core's cache.
+        let buf_ptr = SendPtr(&*job.buf as *const I420);
+        let mut pending = 0;
+        for (i, &on) in selected.iter().enumerate() {
+            if on {
+                let cap = if job.paintover { share.saturating_mul(2) } else { share };
+                let _ = workers[i].0.send(StripeJob { buf: buf_ptr, ts, force_idr: job.force_idr, crf: want_crf, cap, mb_dirty: job.mb_dirty.clone(), mb_cols: job.buf.width.div_ceil(16) });
+                pending += 1;
+            }
+        }
+        let mut results: Vec<Option<(bool, Vec<u8>)>> = (0..n).map(|_| None).collect();
+        for _ in 0..pending {
+            if let Ok((i, r)) = done_rx.recv() {
+                results[i] = r;
+            }
+        }
+        let _ = ret.send((job.idx, job.buf));
+        for (y, h, touched) in stripes.iter_mut() {
+            if job.paintover_final {
+                *touched = false;
+            }
+            if job.band.is_some_and(|b| (b.y0 as usize) < *y + *h && (b.y1 as usize) > *y) {
+                *touched = true;
+            }
+        }
+        let parts: Vec<(usize, bool, Vec<u8>)> = results.into_iter().enumerate().filter_map(|(i, r)| r.map(|(k, o)| (i, k, o))).collect();
+        if parts.is_empty() {
             continue;
         }
         let enc_us = t0.elapsed().as_micros() as u64;
+        let all_key = parts.len() == n && parts.iter().all(|p| p.1);
+        let total: usize = parts.iter().map(|p| p.2.len()).sum();
         hub.stats.encode_us.fetch_add(enc_us, Ordering::Relaxed);
         hub.stats.encoded.fetch_add(1, Ordering::Relaxed);
-        hub.stats.bytes.fetch_add(out.len() as u64, Ordering::Relaxed);
-        if key {
+        hub.stats.bytes.fetch_add(total as u64, Ordering::Relaxed);
+        if all_key {
             hub.stats.keyframes.fetch_add(1, Ordering::Relaxed);
         }
         frame_id = frame_id.wrapping_add(1);
-        out[1] = (key as u8) | if job.paintover { 2 } else { 0 };
-        out[2..6].copy_from_slice(&frame_id.to_be_bytes());
         // Server-side pipeline latency (capture -> sent) in 1/10 ms, for client stats.
-        let pipe = (job.captured_at.elapsed().as_micros() / 100).min(u32::MAX as u128) as u32;
-        out[6..10].copy_from_slice(&pipe.to_be_bytes());
+        let mut pipe = (job.captured_at.elapsed().as_micros() / 100).min(u32::MAX as u128) as u32;
         if job.marker_ms >= 0 {
             // Debug: wall-clock send time instead of pipeline latency.
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u32;
-            out[6..10].copy_from_slice(&now.to_be_bytes());
+            pipe = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u32;
         }
-        let msg = Bytes::copy_from_slice(&out);
+        let nparts = parts.len() as u8;
+        let msgs: Vec<Bytes> = parts
+            .into_iter()
+            .map(|(i, key, mut out)| {
+                // type, flags, frame id, pipe, stripe, stripe count, parts in frame, reserved, y
+                out[0] = 0x01;
+                out[1] = (key as u8) | if job.paintover { 2 } else { 0 };
+                out[2..6].copy_from_slice(&frame_id.to_be_bytes());
+                out[6..10].copy_from_slice(&pipe.to_be_bytes());
+                out[10] = i as u8;
+                out[11] = n as u8;
+                out[12] = nparts;
+                out[13] = 0;
+                out[14..16].copy_from_slice(&(stripes[i].0 as u16).to_be_bytes());
+                Bytes::from(out)
+            })
+            .collect();
         let now = Instant::now();
         for c in hub.video_clients() {
             if !c.started.load(Ordering::Relaxed) {
-                if !key {
+                if !all_key {
                     continue;
                 }
                 c.started.store(true, Ordering::Relaxed);
@@ -363,23 +581,29 @@ fn encode_loop(enc: &mut Encoder, rx: mpsc::Receiver<Job>, ret: mpsc::Sender<(us
                     c.send(Out::Text("{\"t\":\"close\"}".into()));
                     continue;
                 }
-                q.push_back(Inflight { id: frame_id, sent: now, bytes: msg.len() });
+                q.push_back(Inflight { id: frame_id, sent: now, bytes: total });
             }
-            c.send(Out::Bin(msg.clone()));
+            for m in &msgs {
+                c.send(Out::Bin(m.clone()));
+            }
         }
+        hub.stats.send_lat_us.fetch_add(job.captured_at.elapsed().as_micros() as u64, Ordering::Relaxed);
         if job.marker_ms >= 0 {
             log::info!("marker sent age {} ms (encode {} us)", marker_age(job.marker_ms), enc_us);
         }
-        hub.stats.send_lat_us.fetch_add(job.captured_at.elapsed().as_micros() as u64, Ordering::Relaxed);
     }
 }
 
 /// Debug: decode the bench loadgen marker at (300,150) and log its age.
 fn marker_probe(buf: &[u8], stride: usize, what: &str) -> i64 {
     let mut v: u64 = 0;
+    let (mx, my) = std::env::var("SRS_DEBUG_MARKER")
+        .ok()
+        .and_then(|s| s.split_once(',').and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))))
+        .unwrap_or((300, 150));
     for b in 0..40 {
-        let x = 300 + (b % 20) * 24 + 12;
-        let y = 150 + (b / 20) * 24 + 12;
+        let x = mx + (b % 20) * 24 + 12;
+        let y = my + (b / 20) * 24 + 12;
         let i = y * stride + x * 4;
         if buf[i + 2] > 128 {
             v |= 1 << b;

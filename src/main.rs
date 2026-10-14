@@ -60,11 +60,15 @@ async fn main() {
         threads: a.get("encoder-threads").and_then(|v| v.parse().ok()).unwrap_or((ncpu / 2).clamp(2, 10)),
         convert_threads: a.get("convert-threads").and_then(|v| v.parse().ok()).unwrap_or(4),
         crf: range_max(a.get("crf"), 24.0) as f32,
-        max_kbps: range_max(a.get("max-kbps"), 30000.0) as u32,
+        // Selkies' --video-bitrate becomes the ceiling for adaptive bitrate.
+        max_kbps: range_max(a.get("max-kbps").or(a.get("video-bitrate")), 30000.0) as u32,
         paintover_crf: range_max(a.get("paintover-crf"), 16.0) as f32,
         paintover_burst: range_max(a.get("paintover-burst"), 3.0) as u32,
         paintover_delay_ms: range_max(a.get("paintover-delay-ms"), 150.0) as u64,
         min_kbps: range_max(a.get("min-kbps"), 800.0) as u32,
+        stripes: range_max(a.get("stripes"), 1.0) as u32,
+        adaptive_threads: truthy(a.get("adaptive-threads"), true),
+        coalesce: std::time::Duration::from_micros(range_max(a.get("coalesce-us"), 0.0) as u64),
     };
     let clip = a.get("enable-clipboard").map(|s| s.as_str()).unwrap_or("true");
     let clip_mode = desktop::ClipboardMode { to_server: matches!(clip, "true" | "in"), to_client: matches!(clip, "true" | "out") };

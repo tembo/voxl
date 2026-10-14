@@ -8,6 +8,7 @@ mod ffi {
 use std::ffi::CString;
 use std::ptr;
 
+#[derive(Clone)]
 pub struct EncoderConfig {
     pub width: u32,
     pub height: u32,
@@ -57,7 +58,7 @@ impl Encoder {
             // VFR input costs a frame of encoder delay (duration estimation).
             param.b_vfr_input = 0;
             param.i_threads = cfg.threads as i32;
-            param.b_sliced_threads = 1;
+            param.b_sliced_threads = (cfg.threads > 1) as i32;
             param.i_slice_count = cfg.threads as i32;
             param.i_keyint_max = ffi::X264_KEYINT_MAX_INFINITE as i32;
             param.i_keyint_min = 1;
@@ -67,10 +68,12 @@ impl Encoder {
             param.b_annexb = 1;
             param.b_repeat_headers = 1;
             param.b_aud = 0;
-            param.i_log_level = ffi::X264_LOG_WARNING as i32;
+            param.i_log_level = if std::env::var("SRS_X264_INFO").is_ok() { ffi::X264_LOG_INFO } else { ffi::X264_LOG_WARNING } as i32;
             param.rc.i_rc_method = ffi::X264_RC_CRF as i32;
             param.rc.f_rf_constant = cfg.crf;
             param.rc.i_lookahead = 0;
+            // Per-macroblock "unchanged" hints from X damage let x264 skip analysis.
+            param.analyse.b_mb_info = (std::env::var("SRS_NO_MBINFO").is_err()) as i32;
             param.i_sync_lookahead = 0;
             param.rc.b_mb_tree = 0;
             if cfg.max_kbps > 0 {
@@ -112,7 +115,9 @@ impl Encoder {
 
     /// Encode one picture. `force_idr` requests a keyframe, `qp` (if set) forces the frame QP.
     /// Appends Annex-B output to `out` and returns whether it is a keyframe.
-    pub fn encode(&mut self, p: &Planes, ts_ms: i64, force_idr: bool, qp: Option<i32>, out: &mut Vec<u8>) -> Result<bool, String> {
+    /// `mb_info` (one byte per macroblock, X264_MBINFO_CONSTANT for unchanged ones) lets
+    /// x264 skip analysis of static areas; it is consumed before this returns.
+    pub fn encode(&mut self, p: &Planes, ts_ms: i64, force_idr: bool, qp: Option<i32>, mb_info: Option<&mut [u8]>, out: &mut Vec<u8>) -> Result<bool, String> {
         unsafe {
             self.pic.img.plane[0] = p.y.as_ptr() as *mut u8;
             self.pic.img.plane[1] = p.u.as_ptr() as *mut u8;
@@ -122,6 +127,8 @@ impl Encoder {
             self.pic.img.i_stride[2] = p.stride_uv as i32;
             self.pic.i_type = if force_idr { ffi::X264_TYPE_IDR as i32 } else { ffi::X264_TYPE_AUTO as i32 };
             self.pic.i_qpplus1 = qp.map(|q| q + 1).unwrap_or(0);
+            self.pic.prop.mb_info = mb_info.map(|m| m.as_mut_ptr()).unwrap_or(ptr::null_mut());
+            self.pic.prop.mb_info_free = None;
             // Strictly increasing pts even if the wall clock stalls.
             self.pts = ts_ms.max(self.pts + 1);
             self.pic.i_pts = self.pts;

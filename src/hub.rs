@@ -122,6 +122,8 @@ pub struct Hub {
     pub stats: Stats,
     pub width: AtomicU32,
     pub height: AtomicU32,
+    /// Encoded stripes as (y, height).
+    pub stripes: Mutex<Vec<(u32, u32)>>,
     /// Adaptive bitrate cap applied by the encoder (kbit/s).
     pub target_kbps: AtomicU32,
     /// Last cursor message, replayed to new clients.
@@ -146,6 +148,7 @@ impl Hub {
             width: AtomicU32::new(0),
             height: AtomicU32::new(0),
             target_kbps: AtomicU32::new(0),
+            stripes: Mutex::new(Vec::new()),
             cursor: Mutex::new(None),
             wake_w: fds[1],
             wake_r: fds[0],

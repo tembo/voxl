@@ -66,6 +66,10 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
         prop: atom(&conn, "SELKIES_RS_CLIP")?,
     };
     conn.xfixes_select_cursor_input(root, xfixes::CursorNotifyMask::DISPLAY_CURSOR).map_err(|e| e.to_string())?;
+    // Clients draw the cursor locally. Xvfb's software cursor is painted into the
+    // framebuffer we read directly, which would show a second, lagging cursor and
+    // turn every pointer move into an encode, so hide it while we are connected.
+    conn.xfixes_hide_cursor(root).map_err(|e| e.to_string())?;
     if mode.to_client {
         conn.xfixes_select_selection_input(root, atoms.clipboard, xfixes::SelectionEventMask::SET_SELECTION_OWNER).map_err(|e| e.to_string())?;
     }

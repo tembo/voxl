@@ -84,6 +84,11 @@ pub struct Capturer {
     pub damaged: bool,
     /// When the first damage since the last take arrived.
     pub damaged_at: Option<std::time::Instant>,
+    /// Rows touched since the last take (raw damage rectangles, no server round trip).
+    acc: Option<(u32, u32)>,
+    /// Macroblocks (16x16) touched since the last take, row-major.
+    mb_dirty: Vec<u8>,
+    pub mb_cols: usize,
 }
 
 impl Capturer {
@@ -109,6 +114,7 @@ impl Capturer {
                 (buf, offset, true)
             }
             None => {
+                log::warn!("Xvfb framebuffer not found (start Xvfb with -shmem); falling back to GetImage");
                 let buf = ShmBuf::new(stride * height as usize)?;
                 conn.shm_attach(seg, buf.shmid as u32, false).map_err(|e| e.to_string())?.check().map_err(|e| e.to_string())?;
                 // Mark for removal now; it stays alive while attached.
@@ -118,11 +124,11 @@ impl Capturer {
             }
         };
         let damage = conn.generate_id().map_err(|e| e.to_string())?;
-        conn.damage_create(damage, root, damage::ReportLevel::NON_EMPTY).map_err(|e| e.to_string())?;
+        conn.damage_create(damage, root, damage::ReportLevel::RAW_RECTANGLES).map_err(|e| e.to_string())?;
         let region = conn.generate_id().map_err(|e| e.to_string())?;
         conn.xfixes_create_region(region, &[]).map_err(|e| e.to_string())?;
         conn.flush().map_err(|e| e.to_string())?;
-        Ok(Capturer { conn, root, width, height, stride, seg, buf, offset, direct, damage, region, damaged: true, damaged_at: None })
+        Ok(Capturer { conn, root, width, height, stride, seg, buf, offset, direct, damage, region, damaged: true, damaged_at: None, acc: None, mb_dirty: vec![0; (width as usize).div_ceil(16) * (height as usize).div_ceil(16)], mb_cols: (width as usize).div_ceil(16) })
     }
 
     pub fn fd(&self) -> i32 {
@@ -132,36 +138,45 @@ impl Capturer {
     /// Drain queued X events; returns true if damage was reported.
     pub fn pump(&mut self) -> Result<(), String> {
         while let Some(ev) = self.conn.poll_for_event().map_err(|e| e.to_string())? {
-            if let Event::DamageNotify(_) = ev {
+            if let Event::DamageNotify(e) = ev {
                 DAMAGE_EVENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.damaged = true;
-                self.damaged_at.get_or_insert_with(std::time::Instant::now);
+                if std::env::var("SRS_DEBUG_DAMAGE").is_ok() {
+                    log::info!("dmg {:?} x{} y{} {}x{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() % 1_000_000, e.area.x, e.area.y, e.area.width, e.area.height);
+                }
+                let top = e.area.y.max(0) as u32;
+                let bot = (e.area.y as i32 + e.area.height as i32).clamp(0, self.height as i32) as u32;
+                if bot > top {
+                    let x0 = (e.area.x.max(0) as usize) / 16;
+                    let x1 = ((e.area.x as i32 + e.area.width as i32).clamp(0, self.width as i32) as usize).div_ceil(16);
+                    for row in (top as usize / 16)..(bot as usize).div_ceil(16) {
+                        self.mb_dirty[row * self.mb_cols + x0..row * self.mb_cols + x1].fill(1);
+                    }
+                    self.acc = Some(match self.acc {
+                        Some((a, b)) => (a.min(top), b.max(bot)),
+                        None => (top, bot),
+                    });
+                    self.damaged = true;
+                    self.damaged_at.get_or_insert_with(std::time::Instant::now);
+                }
             }
         }
         Ok(())
     }
 
-    /// Take accumulated damage as a row band (re-arms damage reporting).
+    /// Take accumulated damage as a row band. Raw-rectangle reporting delivers the
+    /// areas in the events themselves, so this never waits on the X server.
     pub fn take_damage(&mut self) -> Result<Option<Band>, String> {
-        self.conn.damage_subtract(self.damage, x11rb::NONE, self.region).map_err(|e| e.to_string())?;
-        let reply = self.conn.xfixes_fetch_region(self.region).map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?;
         self.damaged = false;
         self.damaged_at = None;
-        let mut y0 = u32::MAX;
-        let mut y1 = 0u32;
-        for r in &reply.rectangles {
-            let top = r.y.max(0) as u32;
-            let bot = (r.y as i32 + r.height as i32).clamp(0, self.height as i32) as u32;
-            if bot > top {
-                y0 = y0.min(top);
-                y1 = y1.max(bot);
-            }
-        }
-        if y1 <= y0 {
-            return Ok(None);
-        }
+        let Some((y0, y1)) = self.acc.take() else { return Ok(None) };
         // Align to even rows for 4:2:0.
         Ok(Some(Band { y0: y0 & !1, y1: ((y1 + 1) & !1).min(self.height) }))
+    }
+
+    /// Take the dirty-macroblock map accumulated with the current damage.
+    pub fn take_mb_map(&mut self) -> Vec<u8> {
+        let n = self.mb_dirty.len();
+        std::mem::replace(&mut self.mb_dirty, vec![0; n])
     }
 
     pub fn full(&self) -> Band {
@@ -221,14 +236,25 @@ fn find_xvfb_framebuffer(conn: &RustConnection, root: u32, width: u32, height: u
         if offset + bpl * h as usize > size {
             continue;
         }
-        // Compare a strip of real pixels with what the server reports.
+        // Compare a strip of real pixels with what the server reports. The screen may be
+        // animating between the two reads, so retry and accept a near-total match.
         let (sy, sh) = (height / 2, 16u32.min(height / 2));
-        let Ok(Ok(img)) = conn.get_image(ImageFormat::Z_PIXMAP, root, 0, sy as i16, width as u16, sh as u16, !0).map(|c| c.reply()) else { continue };
-        let ok = (0..sh as usize).all(|r| {
-            let fb = &b[offset + (sy as usize + r) * bpl..][..width as usize * 4];
-            let im = &img.data[r * width as usize * 4..][..width as usize * 4];
-            fb.chunks_exact(4).zip(im.chunks_exact(4)).all(|(a, c)| a[..3] == c[..3])
-        });
+        let mut ok = false;
+        for _ in 0..10 {
+            let Ok(Ok(img)) = conn.get_image(ImageFormat::Z_PIXMAP, root, 0, sy as i16, width as u16, sh as u16, !0).map(|c| c.reply()) else { break };
+            let mut same = 0usize;
+            let total = (width * sh) as usize;
+            for r in 0..sh as usize {
+                let fb = &b[offset + (sy as usize + r) * bpl..][..width as usize * 4];
+                let im = &img.data[r * width as usize * 4..][..width as usize * 4];
+                same += fb.chunks_exact(4).zip(im.chunks_exact(4)).filter(|(a, c)| a[..3] == c[..3]).count();
+            }
+            if same * 100 >= total * 98 {
+                ok = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
         if ok {
             return Some((buf, offset, bpl));
         }

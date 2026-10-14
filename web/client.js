@@ -4,7 +4,6 @@
 (() => {
   const surface = document.getElementById('surface');
   const canvas = document.getElementById('screen');
-  const video = document.getElementById('video');
   const kbd = document.getElementById('kbd');
   const statusEl = document.getElementById('status');
   const statsEl = document.getElementById('stats');
@@ -29,22 +28,40 @@
   // Prefer handing decoded frames to a <video> via MediaStreamTrackGenerator: the
   // compositor scans YUV out directly instead of rasterizing into a 2D canvas.
   const useVideo = params.get('present') !== 'canvas' && typeof MediaStreamTrackGenerator !== 'undefined';
-  let writer = null, writing = false, nextFrame = null;
-  if (useVideo) {
-    const gen = new MediaStreamTrackGenerator({ kind: 'video' });
-    writer = gen.writable.getWriter();
-    video.srcObject = new MediaStream([gen]);
-    video.style.display = 'block';
-    canvas.style.display = 'none';
-    video.play().catch(() => {});
+  // One <video> per encoded stripe, stacked; the worker hands over every stripe of a
+  // frame in one message so they are written to their tracks together.
+  let stripeOut = [], stripeLayout = [[0, 1]];
+  if (useVideo) canvas.style.display = 'none';
+  function buildStripes(list) {
+    for (const s of stripeOut) s.video.remove();
+    stripeOut = [];
+    if (!useVideo) return;
+    for (const [y, h] of list) {
+      const gen = new MediaStreamTrackGenerator({ kind: 'video' });
+      const video = document.createElement('video');
+      video.className = 'stripe';
+      video.muted = true; video.autoplay = true; video.playsInline = true; video.disablePictureInPicture = true;
+      video.style.top = `${(y / dh) * 100}%`;
+      video.style.height = `${(h / dh) * 100}%`;
+      video.srcObject = new MediaStream([gen]);
+      surface.appendChild(video);
+      video.play().catch(() => {});
+      stripeOut.push({ video, writer: gen.writable.getWriter(), writing: false, next: null });
+    }
   }
-  function present(frame) {
-    if (writing) { if (nextFrame) nextFrame.close(); nextFrame = frame; return; }
-    writing = true;
-    writer.write(frame).catch(() => {}).finally(() => {
-      writing = false;
-      if (nextFrame) { const f = nextFrame; nextFrame = null; present(f); }
+  function writeStripe(o, frame) {
+    if (o.writing) { if (o.next) o.next.close(); o.next = frame; return; }
+    o.writing = true;
+    o.writer.write(frame).catch(() => {}).finally(() => {
+      o.writing = false;
+      if (o.next) { const f = o.next; o.next = null; writeStripe(o, f); }
     });
+  }
+  function present(parts) {
+    for (const p of parts) {
+      const o = stripeOut[p.i];
+      if (o) writeStripe(o, p.frame); else p.frame.close();
+    }
   }
   const offscreen = canvas.transferControlToOffscreen();
   worker.postMessage({ t: 'init', canvas: offscreen, url: wsUrl.href, presentToMain: useVideo }, [offscreen]);
@@ -53,9 +70,11 @@
   worker.onmessage = (e) => {
     const m = e.data;
     switch (m.t) {
-      case 'frame': present(m.frame); break;
+      case 'frames': present(m.parts); break;
       case 'hello':
         dw = m.w; dh = m.h; connected = true;
+        stripeLayout = m.stripes && m.stripes.length ? m.stripes : [[0, m.h]];
+        buildStripes(stripeLayout);
         layout();
         statusEl.style.display = 'none';
         break;
@@ -83,7 +102,13 @@
   function layout() {
     if (!dw) return;
     const vw = window.innerWidth, vh = window.innerHeight;
-    scale = Math.min(vw / dw, vh / dh) || 1;
+    const dpr = window.devicePixelRatio || 1;
+    // Snap the height so every stripe boundary lands on a whole device pixel;
+    // otherwise the stacked stripe layers show hairline seams.
+    const gcd = (a, b) => (b ? gcd(b, a % b) : a);
+    const q = dh / stripeLayout.reduce((g, [y]) => gcd(g, y), dh);
+    const devH = Math.max(q, Math.floor((Math.min(vw / dw, vh / dh) || 1) * dh * dpr / q) * q);
+    scale = devH / dpr / dh;
     surface.style.width = `${dw * scale}px`;
     surface.style.height = `${dh * scale}px`;
     applyCursor();

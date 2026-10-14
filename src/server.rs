@@ -82,7 +82,8 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
     let client = s.hub.add_client(tx);
     log::info!("client {} connected", client.id);
-    let hello = serde_json::json!({"t": "hello", "w": s.hub.width.load(Ordering::Relaxed), "h": s.hub.height.load(Ordering::Relaxed), "audio": s.audio});
+    let stripes = s.hub.stripes.lock().clone();
+    let hello = serde_json::json!({"t": "hello", "w": s.hub.width.load(Ordering::Relaxed), "h": s.hub.height.load(Ordering::Relaxed), "audio": s.audio, "stripes": stripes});
     client.send(Out::Text(hello.to_string()));
     if let Some(c) = s.hub.cursor.lock().clone() {
         client.send(Out::Bin(c));
