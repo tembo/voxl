@@ -34,6 +34,7 @@ async def main():
     dec_ms, nbytes, nframes = [], 0, 0
     rlat = []
     netlat = []
+    dps, dcount, dsec0, last_hash = [], 0, None, None
     t_start = None
     async with websockets.connect(url, max_size=None, compression=None) as ws:
         if mode == 'rs':
@@ -64,6 +65,16 @@ async def main():
             await ws.send(f'a,{fid}' if mode == 'rs' else f'CLIENT_FRAME_ACK {fid}')
             for fr in frames:
                 nframes += 1
+                if os.environ.get('DISTINCT'):
+                    pl = fr.planes[0]; mv = memoryview(pl); ls = pl.line_size
+                    h = hash(b''.join(bytes(mv[y * ls: y * ls + fr.width:7]) for y in range(0, fr.height, 9)))
+                    now = time.time()
+                    if now - t0 >= 4:
+                        if h != last_hash: dcount += 1
+                        if dsec0 is None: dsec0 = now
+                        if now - dsec0 >= 1: dps.append(dcount / (now - dsec0)); dcount = 0; dsec0 = now
+                    last_hash = h
+                    continue
                 n, ms = read_marker(fr)
                 now = time.time()
                 if now - t0 < 4:  # warmup
@@ -81,6 +92,6 @@ async def main():
     el = time.time() - t_start if t_start else 1
     print(json.dumps({"mode": mode, "uniqueFps": {"avg": round(sum(s) / max(len(s), 1), 1), "min": q(s, 0), "p10": q(s, .1), "med": q(s, .5)},
         "latencyMs": {"p50": q(l, .5), "p90": q(l, .9), "p99": q(l, .99), "max": q(l, 1)}, "decodeMs": {"p50": q(d, .5), "p99": q(d, .99)},
-        "recvLatMs": {"p50": q(sorted(rlat), .5), "p90": q(sorted(rlat), .9)}, "netLat": {"p50": q(sorted(netlat), .5), "p90": q(sorted(netlat), .9)}, "mbps": round(nbytes * 8 / el / 1e6, 2)}))
+        "recvLatMs": {"p50": q(sorted(rlat), .5), "p90": q(sorted(rlat), .9)}, "netLat": {"p50": q(sorted(netlat), .5), "p90": q(sorted(netlat), .9)}, "distinctFps": {"avg": round(sum(dps)/max(len(dps),1),1), "min": q(sorted(dps),0), "p10": q(sorted(dps),.1), "med": q(sorted(dps),.5)}, "mbps": round(nbytes * 8 / el / 1e6, 2)}))
 
 asyncio.run(main())

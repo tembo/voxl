@@ -9,6 +9,8 @@ use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
+pub static DAMAGE_EVENTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub struct ShmBuf {
     pub ptr: *mut u8,
     pub len: usize,
@@ -131,6 +133,7 @@ impl Capturer {
     pub fn pump(&mut self) -> Result<(), String> {
         while let Some(ev) = self.conn.poll_for_event().map_err(|e| e.to_string())? {
             if let Event::DamageNotify(_) = ev {
+                DAMAGE_EVENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.damaged = true;
                 self.damaged_at.get_or_insert_with(std::time::Instant::now);
             }
