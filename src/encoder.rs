@@ -79,7 +79,7 @@ impl Encoder {
             if cfg.max_kbps > 0 {
                 param.rc.i_vbv_max_bitrate = cfg.max_kbps as i32;
                 // ~2 frames of buffer keeps single-frame spikes bounded.
-                param.rc.i_vbv_buffer_size = (cfg.max_kbps / cfg.fps.max(1) * 2) as i32;
+                param.rc.i_vbv_buffer_size = (cfg.max_kbps / cfg.fps.max(1) * 5 / 4) as i32;
             }
             // BT.601 limited range, matching libyuv ARGBToI420.
             param.vui.i_colorprim = 1;
@@ -107,7 +107,7 @@ impl Encoder {
             self.param.rc.f_rf_constant = crf;
             if max_kbps > 0 {
                 self.param.rc.i_vbv_max_bitrate = max_kbps as i32;
-                self.param.rc.i_vbv_buffer_size = (max_kbps / self.param.i_fps_num.max(1) * 2) as i32;
+                self.param.rc.i_vbv_buffer_size = (max_kbps / self.param.i_fps_num.max(1) * 5 / 4) as i32;
             }
             ffi::x264_encoder_reconfig(self.h, &mut self.param);
         }

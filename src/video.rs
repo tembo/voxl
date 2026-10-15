@@ -122,9 +122,22 @@ struct RateCtl {
     last_eval: Instant,
     last_dec: Instant,
     last_inc: Instant,
+    /// Ramp multiplicatively until the first sign of congestion (like TCP slow start),
+    /// so a session neither starts by flooding a slow link nor crawls up on a fast one.
+    slow_start: bool,
+    /// Delivery rate observed at the last congestion: the path's likely capacity.
+    ceiling: f64,
 }
 
+/// Starting point for a new session's bitrate cap (kbit/s).
+const START_KBPS: f64 = 8000.0;
+
 impl RateCtl {
+    fn new(max: f64, min: f64) -> Self {
+        let past = Instant::now() - Duration::from_secs(10);
+        RateCtl { target: START_KBPS.min(max), max, min, last_eval: past, last_dec: past, last_inc: past, slow_start: true, ceiling: f64::MAX }
+    }
+
     fn update(&mut self, hub: &Hub, clients: &[Arc<crate::hub::Client>]) {
         if self.last_eval.elapsed() < Duration::from_millis(100) {
             return;
@@ -133,6 +146,7 @@ impl RateCtl {
         let mut congested = false;
         let mut clear = true;
         let mut rate = f64::MAX;
+        let mut delivered = 0f64;
         for c in clients {
             if !c.started.load(Ordering::Relaxed) {
                 continue;
@@ -143,7 +157,7 @@ impl RateCtl {
                 0 => 40,
                 r => r,
             } as f64;
-            if q > 40.0 || age as f64 > rtt + 90.0 {
+            if q > 30.0 || age as f64 > rtt + 80.0 {
                 congested = true;
                 let r = c.delivered.lock().rate_bps / 1000.0;
                 if r > 0.0 {
@@ -153,19 +167,36 @@ impl RateCtl {
             if q > 15.0 {
                 clear = false;
             }
+            delivered = delivered.max(c.delivered.lock().rate_bps / 1000.0);
         }
         let now = Instant::now();
         if congested && self.last_dec.elapsed() >= Duration::from_millis(300) {
             let mut t = self.target * 0.85;
             if rate.is_finite() {
-                t = t.min(rate * 0.9);
+                self.ceiling = rate;
+                t = t.min(rate * 0.85);
             }
             self.target = t.max(self.min);
             self.last_dec = now;
+            self.slow_start = false;
             log::debug!("rate: congested, target {:.0} kbps (delivered {:.0})", self.target, rate);
-        } else if !congested && clear && self.last_dec.elapsed() >= Duration::from_secs(1) && self.last_inc.elapsed() >= Duration::from_millis(200) {
-            self.target = (self.target * 1.06 + 100.0).min(self.max);
-            self.last_inc = now;
+        } else if self.slow_start && !congested && clear && self.last_inc.elapsed() >= Duration::from_millis(250) {
+            // Only probe upward once the content actually presses against the cap.
+            if delivered >= self.target * 0.5 {
+                self.target = (self.target * 1.5).min(self.max);
+                self.last_inc = now;
+                log::debug!("rate: slow start, target {:.0} kbps (delivered {:.0})", self.target, delivered);
+            }
+        } else if !congested && clear && self.last_dec.elapsed() >= Duration::from_secs(1) {
+            // Recover quickly to just under the known capacity, then probe past it gently
+            // so a busy link isn't driven into the queue every couple of seconds.
+            if self.target < self.ceiling * 0.9 && self.last_inc.elapsed() >= Duration::from_millis(200) {
+                self.target = (self.target * 1.06 + 100.0).min(self.ceiling * 0.9).min(self.max);
+                self.last_inc = now;
+            } else if self.target >= self.ceiling * 0.9 && self.last_inc.elapsed() >= Duration::from_millis(1000) {
+                self.target = (self.target * 1.02).min(self.max);
+                self.last_inc = now;
+            }
         }
         hub.target_kbps.store(self.target as u32, Ordering::Relaxed);
     }
@@ -190,9 +221,8 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
     let mut last_capture = Instant::now() - interval;
     let mut last_motion = Instant::now();
     let mut paintover_left = 0u32;
-    let start = Instant::now() - Duration::from_secs(10);
-    let mut rc = RateCtl { target: cfg.max_kbps as f64, max: cfg.max_kbps as f64, min: cfg.min_kbps as f64, last_eval: start, last_dec: start, last_inc: start };
-    hub.target_kbps.store(cfg.max_kbps, Ordering::Relaxed);
+    let mut rc = RateCtl::new(cfg.max_kbps as f64, cfg.min_kbps as f64);
+    hub.target_kbps.store(rc.target as u32, Ordering::Relaxed);
     let mut had_clients = false;
     let mut full_next = true;
     let x_fd = cap.fd();
@@ -206,6 +236,10 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
         }
         let clients = hub.video_clients();
         if clients.is_empty() {
+            if had_clients {
+                rc = RateCtl::new(cfg.max_kbps as f64, cfg.min_kbps as f64);
+                hub.target_kbps.store(rc.target as u32, Ordering::Relaxed);
+            }
             had_clients = false;
             wait_fds(&[x_fd, hub.wake_r], 500);
             continue;
