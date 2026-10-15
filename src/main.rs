@@ -57,7 +57,9 @@ async fn main() {
         display: display.clone(),
         fps: range_max(a.get("framerate"), 60.0) as u32,
         preset: a.get("preset").cloned().unwrap_or_else(|| "superfast".into()),
-        threads: a.get("encoder-threads").and_then(|v| v.parse().ok()).unwrap_or((ncpu / 2).clamp(2, 10)),
+        // Four sliced threads: lower latency than one, and x264's slicing overhead grows
+        // with thread count, so more threads only add CPU (measured on 2560x1600).
+        threads: a.get("encoder-threads").and_then(|v| v.parse().ok()).unwrap_or((ncpu / 4).clamp(1, 4)),
         convert_threads: a.get("convert-threads").and_then(|v| v.parse().ok()).unwrap_or(4),
         crf: range_max(a.get("crf"), 24.0) as f32,
         // Selkies' --video-bitrate becomes the ceiling for adaptive bitrate.
@@ -67,7 +69,7 @@ async fn main() {
         paintover_delay_ms: range_max(a.get("paintover-delay-ms"), 150.0) as u64,
         min_kbps: range_max(a.get("min-kbps"), 800.0) as u32,
         stripes: range_max(a.get("stripes"), 1.0) as u32,
-        adaptive_threads: truthy(a.get("adaptive-threads"), true),
+        adaptive_threads: truthy(a.get("adaptive-threads"), false),
         coalesce: std::time::Duration::from_micros(range_max(a.get("coalesce-us"), 0.0) as u64),
     };
     let clip = a.get("enable-clipboard").map(|s| s.as_str()).unwrap_or("true");
