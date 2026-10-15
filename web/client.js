@@ -14,7 +14,7 @@
 
   let dw = 0, dh = 0, cursorMsg = null, connected = false;
   window.fps = 0;
-  window.selkiesStats = {};
+  window.voxlStats = {};
 
   if (!('VideoDecoder' in window) || !canvas.transferControlToOffscreen) {
     statusEl.textContent = 'This browser lacks WebCodecs/OffscreenCanvas support.';
@@ -86,14 +86,14 @@
       case 'clip': onRemoteClipboard(m.d); break;
       case 'stats':
         window.fps = Math.round(m.fps);
-        window.selkiesStats = m;
+        window.voxlStats = m;
         if (showStats) {
           statsEl.style.display = 'block';
           statsEl.textContent = `${m.fps.toFixed(1)} fps  ${(m.kbps / 1000).toFixed(2)} Mbps\n` +
             `decode ${m.decodeMs.toFixed(1)} ms  server ${m.pipeMs.toFixed(1)} ms\n${m.codec || ''} q=${m.queue}`;
         }
         break;
-      case 'log': console.warn('[selkies-rs]', m.s); break;
+      case 'log': console.warn('[voxl]', m.s); break;
     }
   };
 
@@ -318,7 +318,7 @@
       worker.postMessage({ t: 'audioPort', port: ch.port1 }, [ch.port1]);
       if (ac.state !== 'running') ac.resume().catch(() => {});
     } catch (err) {
-      console.warn('[selkies-rs] audio unavailable', err);
+      console.warn('[voxl] audio unavailable', err);
     }
   }
   // Autoplay may be allowed (iframe allow="autoplay"); try right away.

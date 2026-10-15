@@ -1,4 +1,4 @@
-// Drives the desktop through the selkies-rs web client and checks the result on X.
+// Drives the desktop through the voxl web client and checks the result on X.
 import { createRequire } from 'module';
 import { execSync } from 'child_process';
 const require = createRequire(process.env.PLAYWRIGHT_NODE_MODULES || process.cwd() + '/node_modules/');

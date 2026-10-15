@@ -79,8 +79,8 @@ pub struct Capturer {
     offset: usize,
     /// Reading Xvfb's framebuffer in place: no GetImage needed.
     pub direct: bool,
-    damage: u32,
-    region: u32,
+    /// Kept for the connection's lifetime; raw-rectangle events need no further requests.
+    _damage: u32,
     pub damaged: bool,
     /// When the first damage since the last take arrived.
     pub damaged_at: Option<std::time::Instant>,
@@ -125,10 +125,8 @@ impl Capturer {
         };
         let damage = conn.generate_id().map_err(|e| e.to_string())?;
         conn.damage_create(damage, root, damage::ReportLevel::RAW_RECTANGLES).map_err(|e| e.to_string())?;
-        let region = conn.generate_id().map_err(|e| e.to_string())?;
-        conn.xfixes_create_region(region, &[]).map_err(|e| e.to_string())?;
         conn.flush().map_err(|e| e.to_string())?;
-        Ok(Capturer { conn, root, width, height, stride, seg, buf, offset, direct, damage, region, damaged: true, damaged_at: None, acc: None, mb_dirty: vec![0; (width as usize).div_ceil(16) * (height as usize).div_ceil(16)], mb_cols: (width as usize).div_ceil(16) })
+        Ok(Capturer { conn, root, width, height, stride, seg, buf, offset, direct, _damage: damage, damaged: true, damaged_at: None, acc: None, mb_dirty: vec![0; (width as usize).div_ceil(16) * (height as usize).div_ceil(16)], mb_cols: (width as usize).div_ceil(16) })
     }
 
     pub fn fd(&self) -> i32 {
@@ -140,7 +138,7 @@ impl Capturer {
         while let Some(ev) = self.conn.poll_for_event().map_err(|e| e.to_string())? {
             if let Event::DamageNotify(e) = ev {
                 DAMAGE_EVENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if std::env::var("SRS_DEBUG_DAMAGE").is_ok() {
+                if std::env::var("VOXL_DEBUG_DAMAGE").is_ok() {
                     log::info!("dmg {:?} x{} y{} {}x{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() % 1_000_000, e.area.x, e.area.y, e.area.width, e.area.height);
                 }
                 let top = e.area.y.max(0) as u32;
@@ -212,7 +210,7 @@ fn be32(b: &[u8], i: usize) -> u32 {
 /// Xvfb started with `-shmem` keeps each screen as an XWD image in a SysV segment.
 /// Find it, check the header and verify pixels against the server before trusting it.
 fn find_xvfb_framebuffer(conn: &RustConnection, root: u32, width: u32, height: u32) -> Option<(ShmBuf, usize, usize)> {
-    if std::env::var("SRS_NO_DIRECT_FB").is_ok() {
+    if std::env::var("VOXL_NO_DIRECT_FB").is_ok() {
         return None;
     }
     let table = std::fs::read_to_string("/proc/sysvipc/shm").ok()?;

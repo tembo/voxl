@@ -63,7 +63,7 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
         text: atom(&conn, "TEXT")?,
         text_plain: atom(&conn, "text/plain;charset=utf-8")?,
         incr: atom(&conn, "INCR")?,
-        prop: atom(&conn, "SELKIES_RS_CLIP")?,
+        prop: atom(&conn, "VOXL_CLIP")?,
     };
     conn.xfixes_select_cursor_input(root, xfixes::CursorNotifyMask::DISPLAY_CURSOR).map_err(|e| e.to_string())?;
     // Clients draw the cursor locally. Xvfb's software cursor is painted into the

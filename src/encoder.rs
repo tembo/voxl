@@ -68,12 +68,12 @@ impl Encoder {
             param.b_annexb = 1;
             param.b_repeat_headers = 1;
             param.b_aud = 0;
-            param.i_log_level = if std::env::var("SRS_X264_INFO").is_ok() { ffi::X264_LOG_INFO } else { ffi::X264_LOG_WARNING } as i32;
+            param.i_log_level = if std::env::var("VOXL_X264_INFO").is_ok() { ffi::X264_LOG_INFO } else { ffi::X264_LOG_WARNING } as i32;
             param.rc.i_rc_method = ffi::X264_RC_CRF as i32;
             param.rc.f_rf_constant = cfg.crf;
             param.rc.i_lookahead = 0;
             // Per-macroblock "unchanged" hints from X damage let x264 skip analysis.
-            param.analyse.b_mb_info = (std::env::var("SRS_NO_MBINFO").is_err()) as i32;
+            param.analyse.b_mb_info = (std::env::var("VOXL_NO_MBINFO").is_err()) as i32;
             param.i_sync_lookahead = 0;
             param.rc.b_mb_tree = 0;
             if cfg.max_kbps > 0 {
@@ -144,7 +144,7 @@ impl Encoder {
                 let first = &*nals;
                 out.extend_from_slice(std::slice::from_raw_parts(first.p_payload, size as usize));
             }
-            if std::env::var("SRS_DEBUG_MARKER").is_ok() {
+            if std::env::var("VOXL_DEBUG_MARKER").is_ok() {
                 log::info!("x264 out {} bytes, delayed {}, pts in {} out {}", size, ffi::x264_encoder_delayed_frames(self.h), self.pts, pic_out.i_pts);
             }
             Ok(pic_out.b_keyframe != 0)

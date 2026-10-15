@@ -12,7 +12,6 @@ extern "C" {
 
 pub struct I420 {
     pub width: usize,
-    pub height: usize,
     pub y: Vec<u8>,
     pub u: Vec<u8>,
     pub v: Vec<u8>,
@@ -22,7 +21,7 @@ impl I420 {
     pub fn new(width: usize, height: usize) -> Self {
         let cw = width.div_ceil(2);
         let ch = height.div_ceil(2);
-        I420 { width, height, y: vec![16; width * height], u: vec![128; cw * ch], v: vec![128; cw * ch] }
+        I420 { width, y: vec![16; width * height], u: vec![128; cw * ch], v: vec![128; cw * ch] }
     }
     pub fn stride_uv(&self) -> usize {
         self.width.div_ceil(2)

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# suite.sh : selkies (python) vs selkies-rs across configs, workloads and links. Appends JSON lines to $OUT.
+# suite.sh : selkies (python) vs voxl across configs, workloads and links on the benchmark display.
+# Appends JSON lines to $OUT. Start env/xvfb.sh, env/openbox.sh, env/voxl.sh and env/selkies.sh first.
 cd "$(dirname "$(readlink -f "$0")")"
 OUT=${OUT:-/tmp/suite.jsonl}
 SECS=${SECS:-20}
@@ -21,10 +22,10 @@ run_one() { # config server port workload net
   echo "{\"config\":\"$cfg\",\"workload\":\"$wl\",\"net\":\"$net\",\"r\":${res:-null}}" | tee -a $OUT
   sleep 9
 }
-for cfg in ${CONFIGS:-py_picom py_nopicom rs_nopicom}; do
-  case $cfg in py_picom) /tmp/picom2-start.sh ;; *) /tmp/picom2-stop.sh ;; esac
+for cfg in ${CONFIGS:-py_picom py_nopicom voxl}; do
+  case $cfg in py_picom) env/picom-start.sh ;; *) env/picom-stop.sh ;; esac
   sleep 2
-  case $cfg in rs*) srv=rs; port=6902 ;; *) srv=selkies; port=6912 ;; esac
+  case $cfg in voxl*) srv=voxl; port=6902 ;; *) srv=selkies; port=6912 ;; esac
   for wl in ${WORKLOADS:-scroll anim1080 animfull}; do
     for net in ${NETS:-lan 10/40 5/60}; do
       [ $wl = animfull ] && [ $net != lan ] && continue
@@ -32,4 +33,4 @@ for cfg in ${CONFIGS:-py_picom py_nopicom rs_nopicom}; do
     done
   done
 done
-/tmp/picom2-stop.sh
+env/picom-stop.sh

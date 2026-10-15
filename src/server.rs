@@ -89,7 +89,7 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
         client.send(Out::Bin(c));
     }
     let writer = tokio::spawn(async move {
-        let dbg = std::env::var("SRS_DEBUG_MARKER").is_ok();
+        let dbg = std::env::var("VOXL_DEBUG_MARKER").is_ok();
         while let Some(m) = rx.recv().await {
             let t = Instant::now();
             let big = matches!(&m, Out::Bin(b) if b.len() > 2000);

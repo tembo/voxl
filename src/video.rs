@@ -65,7 +65,7 @@ pub fn spawn(cfg: VideoConfig, hub: Arc<Hub>) -> Result<(), String> {
         let fixed = if cfg.adaptive_threads { 1 } else { (cfg.threads / layout.len() as u32).max(1) };
         let ecfg = EncoderConfig { width: w, height: sh, fps: cfg.fps, preset: cfg.preset.clone(), threads: fixed, crf: cfg.crf, max_kbps: cfg.max_kbps };
         let max_threads = if cfg.adaptive_threads { (cfg.threads / layout.len() as u32).max(1) } else { 1 };
-        stripes.push(Stripe { y: y as usize, h: sh as usize, enc: Encoder::new(&ecfg)?, cfg: ecfg, max_threads, touched: false, applied_kbps: 0, applied_crf: -1.0 });
+        stripes.push(Stripe { y: y as usize, h: sh as usize, enc: Encoder::new(&ecfg)?, cfg: ecfg, max_threads, applied_kbps: 0, applied_crf: -1.0 });
     }
     *hub.stripes.lock() = layout;
     let hub2 = hub.clone();
@@ -226,7 +226,7 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
     let mut had_clients = false;
     let mut full_next = true;
     let x_fd = cap.fd();
-    let debug_marker = std::env::var("SRS_DEBUG_MARKER").is_ok();
+    let debug_marker = std::env::var("VOXL_DEBUG_MARKER").is_ok();
 
     loop {
         cap.pump()?;
@@ -383,8 +383,6 @@ struct Stripe {
     cfg: EncoderConfig,
     /// Sliced threads to fan out to under sustained heavy motion (1 = never).
     max_threads: u32,
-    /// Changed since its last paint-over pass.
-    touched: bool,
     applied_kbps: u32,
     applied_crf: f32,
 }
@@ -456,8 +454,6 @@ fn stripe_worker(i: usize, mut s: Stripe, rx: mpsc::Receiver<StripeJob>, done: m
         let planes = Planes { y: &buf.y[s.y * buf.width..], u: &buf.u[(s.y / 2) * suv..], v: &buf.v[(s.y / 2) * suv..], stride_y: buf.width, stride_uv: suv };
         let mut out = Vec::with_capacity(64 << 10);
         out.resize(HDR, 0);
-        static SERIAL: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
-        let _g = std::env::var("SRS_SERIAL").is_ok().then(|| SERIAL.lock());
         // x264 wants X264_MBINFO_CONSTANT (1) on unchanged macroblocks of this stripe.
         let mut info = job.mb_dirty.as_ref().map(|d| {
             let rows = s.h.div_ceil(16);
@@ -506,7 +502,7 @@ fn encode_loop(stripes_in: Vec<Stripe>, rx: mpsc::Receiver<Job>, ret: mpsc::Send
     let epoch = Instant::now();
     let mut frame_id: u32 = 0;
     let n = stripes_in.len();
-    let debug_stripes = std::env::var("SRS_DEBUG_STRIPES").is_ok();
+    let debug_stripes = std::env::var("VOXL_DEBUG_STRIPES").is_ok();
     // Geometry and paint-over bookkeeping stay here; encoders move to their workers.
     let mut stripes: Vec<(usize, usize, bool)> = stripes_in.iter().map(|s| (s.y, s.h, false)).collect();
     let (done_tx, done_rx) = mpsc::channel::<StripeResult>();
@@ -631,7 +627,7 @@ fn encode_loop(stripes_in: Vec<Stripe>, rx: mpsc::Receiver<Job>, ret: mpsc::Send
 /// Debug: decode the bench loadgen marker at (300,150) and log its age.
 fn marker_probe(buf: &[u8], stride: usize, what: &str) -> i64 {
     let mut v: u64 = 0;
-    let (mx, my) = std::env::var("SRS_DEBUG_MARKER")
+    let (mx, my) = std::env::var("VOXL_DEBUG_MARKER")
         .ok()
         .and_then(|s| s.split_once(',').and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))))
         .unwrap_or((300, 150));

@@ -48,7 +48,7 @@ pub fn spawn(device: String, bitrate: i32, hub: Arc<Hub>) {
                 return;
             }
             opus_encoder_ctl(enc, 4002, bitrate as c_int);
-            let name = CString::new("selkies-rs").unwrap();
+            let name = CString::new("voxl").unwrap();
             let dev = CString::new(device).unwrap();
             let ss = PaSampleSpec { format: 3, rate: RATE, channels: 2 };
             let frag = (FRAME * 4) as u32;

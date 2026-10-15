@@ -55,7 +55,7 @@ await page.evaluate(([mx, my]) => {
   requestAnimationFrame(tick);
 }, [+mx, +my]);
 await page.waitForTimeout(+secs * 1000);
-const r = await page.evaluate(() => ({ st: window.selkiesStats, perSec: window.__m.perSec, lat: window.__m.lat, ticks: window.__m.ticks, errs: window.__m.errs, selkiesFps: window.fps }));
+const r = await page.evaluate(() => ({ st: (window.voxlStats || window.selkiesStats), perSec: window.__m.perSec, lat: window.__m.lat, ticks: window.__m.ticks, errs: window.__m.errs, selkiesFps: window.fps }));
 const s = [...r.perSec].sort((a, b) => a - b), l = [...r.lat].sort((a, b) => a - b);
 const q = (a, p) => a.length ? +a[Math.min(a.length - 1, Math.floor(a.length * p))].toFixed(1) : null;
 console.log(JSON.stringify({ label, uniqueFps: { avg: +(s.reduce((a, b) => a + b, 0) / s.length).toFixed(1), min: q(s, 0), p10: q(s, 0.1), med: q(s, 0.5) }, latencyMs: { p50: q(l, 0.5), p90: q(l, 0.9), p99: q(l, 0.99) }, client: r.st, rafHz: +(r.ticks / (+secs + 0)).toFixed(1), errs: r.errs, reportedFps: r.selkiesFps }));

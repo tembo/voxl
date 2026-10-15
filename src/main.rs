@@ -1,4 +1,4 @@
-//! selkies-rs: low-latency X11 desktop streaming (H.264 over WebSocket) for the browser.
+//! voxl: low-latency X11 desktop streaming (H.264 over WebSocket) for the browser.
 
 mod audio;
 mod capture;
@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 /// Parses `--key=value` / `--key value` / `--flag`; unknown options are accepted so the
-/// binary can take the same argument list as the Python selkies service.
+/// binary can take the same argument list as the Python selkies service it replaces.
 fn parse_args() -> HashMap<String, String> {
     let mut m = HashMap::new();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -56,7 +56,7 @@ async fn main() {
     let vcfg = video::VideoConfig {
         display: display.clone(),
         fps: range_max(a.get("framerate"), 60.0) as u32,
-        preset: a.get("preset").cloned().unwrap_or_else(|| "superfast".into()),
+        preset: a.get("preset").cloned().unwrap_or_else(|| "ultrafast".into()),
         // Four sliced threads: lower latency than one, and x264's slicing overhead grows
         // with thread count, so more threads only add CPU (measured on 2560x1600).
         threads: a.get("encoder-threads").and_then(|v| v.parse().ok()).unwrap_or((ncpu / 4).clamp(1, 4)),

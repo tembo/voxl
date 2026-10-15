@@ -1,6 +1,6 @@
 """Native benchmark client: decodes the stream with FFmpeg (PyAV) and reads the loadgen
 pixel marker, reporting unique displayed frames/s and capture->decode latency.
-Usage: nclient.py rs|selkies <host:port> <secs> [markerX markerY]"""
+Usage: nclient.py voxl|selkies <host:port> <secs> [markerX markerY]"""
 import asyncio, json, os, sys, time
 import av, websockets
 
@@ -28,7 +28,7 @@ def read_marker(frame, yoff=0):
     return v >> 24, v & 0xffffff
 
 async def main():
-    url = f'ws://{hostport}/ws' if mode == 'rs' else f'ws://{hostport}/api/websockets'
+    url = f'ws://{hostport}/ws' if mode == 'voxl' else f'ws://{hostport}/api/websockets'
     ctx = make_ctx()
     ctxs, got = {}, {}
     sy = 0
@@ -39,7 +39,7 @@ async def main():
     dps, dcount, dsec0, last_hash = [], 0, None, None
     t_start = None
     async with websockets.connect(url, max_size=None, compression=None) as ws:
-        if mode == 'rs':
+        if mode == 'voxl':
             await ws.send('v,1')
         else:
             await ws.send('SETTINGS,' + json.dumps({"is_manual_resolution_mode": False, "initialClientWidth": 2560, "initialClientHeight": 1600, "scaling_dpi": 96, "keyboardLayout": "us", "useCssScaling": True, "displayId": "primary"}))
@@ -48,10 +48,10 @@ async def main():
         while time.time() - t0 < secs + 4:
             msg = await ws.recv()
             if isinstance(msg, str):
-                if mode == 'rs' and msg.startswith('{"t":"ping"'):
+                if mode == 'voxl' and msg.startswith('{"t":"ping"'):
                     await ws.send('po,' + str(json.loads(msg)['s']))
                 continue
-            if mode == 'rs':
+            if mode == 'voxl':
                 if msg[0] != 1: continue
                 fid = int.from_bytes(msg[2:6], 'big'); payload = msg[16:]
                 si = msg[10]; parts = msg[12]; sy = int.from_bytes(msg[14:16], 'big')
@@ -62,12 +62,12 @@ async def main():
                 fid = int.from_bytes(msg[2:4], 'big'); payload = msg[10:]
             nbytes += len(msg)
             trecv = time.time()
-            if mode == 'rs' and os.environ.get('NETLAT'): netlat.append((int(trecv*1000) & 0xffffffff) - int.from_bytes(msg[6:10], 'big'))
+            if mode == 'voxl' and os.environ.get('NETLAT'): netlat.append((int(trecv*1000) & 0xffffffff) - int.from_bytes(msg[6:10], 'big'))
             td = time.perf_counter()
             if os.environ.get('DUMP'): open(os.environ['DUMP'], 'ab').write(payload)
             frames = ctx.decode(av.Packet(payload))
             dec_ms.append((time.perf_counter() - td) * 1000)
-            if mode == 'rs':
+            if mode == 'voxl':
                 got[fid] = got.get(fid, 0) + 1
                 if got[fid] >= parts:
                     del got[fid]
@@ -75,7 +75,7 @@ async def main():
             else:
                 await ws.send(f'CLIENT_FRAME_ACK {fid}')
             for fr in frames:
-                if mode == 'rs' and not (sy <= my and my + 48 <= sy + fr.height):
+                if mode == 'voxl' and not (sy <= my and my + 48 <= sy + fr.height):
                     continue
                 nframes += 1
                 if os.environ.get('DISTINCT'):
@@ -88,7 +88,7 @@ async def main():
                         if now - dsec0 >= 1: dps.append(dcount / (now - dsec0)); dcount = 0; dsec0 = now
                     last_hash = h
                     continue
-                n, ms = read_marker(fr, sy if mode == 'rs' else 0)
+                n, ms = read_marker(fr, sy if mode == 'voxl' else 0)
                 now = time.time()
                 if now - t0 < 4:  # warmup
                     continue

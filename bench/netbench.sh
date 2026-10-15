@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# netbench.sh <mbps> <rtt_ms> [secs] [w h x y] : selkies vs rs through a shaped link (SERVERS="rs selkies")
+# netbench.sh <mbps> <rtt_ms> [secs] [w h x y] : selkies vs voxl through a shaped link (SERVERS="voxl selkies")
 MBPS=$1; RTT=$2; SECS=${3:-20}; W=${4:-1920}; H=${5:-1080}; X=${6:-300}; Y=${7:-150}
 cd "$(dirname "$(readlink -f "$0")")"
-for name in ${SERVERS:-selkies rs}; do
-  if [ $name = rs ]; then port=6902; sport=7902; else port=6901; sport=7901; fi
+for name in ${SERVERS:-selkies voxl}; do
+  if [ $name = voxl ]; then port=6902; sport=7902; else port=6901; sport=7901; fi
   ./py.sh shaper.py $sport localhost:$port $MBPS $RTT >/dev/null 2>&1 &
   sleep 3
   (DISPLAY=:1 ./loadgen $W $H 60 $((SECS+12)) $X $Y >/dev/null 2>&1 &)

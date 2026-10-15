@@ -35,7 +35,7 @@ enum ShiftFix {
 fn scratch_file(display: Option<&str>) -> std::path::PathBuf {
     let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
     let d = display.unwrap_or(":0").replace([':', '/'], "_");
-    std::path::Path::new(&dir).join(format!("selkies-rs-keymap{d}"))
+    std::path::Path::new(&dir).join(format!("voxl-keymap{d}"))
 }
 
 /// X keycodes (evdev + 8) with no entry in Chromium's DOM code table.
@@ -204,7 +204,7 @@ impl Injector {
                 self.fake(if down { xproto::BUTTON_PRESS_EVENT } else { xproto::BUTTON_RELEASE_EVENT }, button, 0, 0)
             }
             InputEvent::Scroll { dx, dy } => {
-                let mut click = |b: u8, n: i32| {
+                let click = |b: u8, n: i32| {
                     for _ in 0..n.min(20) {
                         self.fake(xproto::BUTTON_PRESS_EVENT, b, 0, 0);
                         self.fake(xproto::BUTTON_RELEASE_EVENT, b, 0, 0);
