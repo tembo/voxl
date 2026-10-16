@@ -152,7 +152,7 @@ nix-build -E 'with import <nixpkgs> {}; callPackage ./xvfb.nix {}'
 CI runs these on every pull request (`.github/workflows/ci.yml`):
 
 ```sh
-npm ci && npm run check      # oxfmt --check, oxlint, tsc for web/src and bench/
+npm ci && npm run check      # oxfmt --check, oxlint and tsc for the web client
 nix-shell --arg withRust true --run 'cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings'
 ```
 

@@ -15,6 +15,6 @@
 		"*.rs",
 		"*.nix",
 		"patches/**",
-		"bench/scroll.html"
+		"bench/**"
 	]
 }

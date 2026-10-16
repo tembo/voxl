@@ -1,46 +1,17 @@
 import { createRequire } from 'module';
 import { execSync, spawn } from 'child_process';
-const require = createRequire(
-	process.env.PLAYWRIGHT_NODE_MODULES || process.cwd() + '/node_modules/'
-);
+const require = createRequire(process.env.PLAYWRIGHT_NODE_MODULES || process.cwd() + '/node_modules/');
 const { chromium } = require('playwright');
-const b = await chromium.launch({
-	executablePath: process.env.CHROMIUM || 'chromium',
-	args: ['--no-sandbox'],
-});
+const b = await chromium.launch({ executablePath: process.env.CHROMIUM || 'chromium', args: ['--no-sandbox'] });
 const ctx = await b.newContext({ viewport: { width: 1280, height: 800 } });
-await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], {
-	origin: 'http://localhost:' + (process.env.VOXL_PORT || '6903') + '',
-});
+await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'http://localhost:' + (process.env.VOXL_PORT || '6903') + '' });
 const p = await ctx.newPage();
-await p.goto('http://localhost:' + (process.env.VOXL_PORT || '6903') + '/');
-await p.waitForTimeout(2500);
+await p.goto('http://localhost:' + (process.env.VOXL_PORT || '6903') + '/'); await p.waitForTimeout(2500);
 await p.evaluate(() => navigator.clipboard.writeText('hello from local ✓'));
-await p.mouse.click(1200, 700);
-await p.waitForTimeout(200);
-await p.keyboard.press('Control+v');
-await p.waitForTimeout(1000);
-console.log(
-	'local text -> remote:',
-	JSON.stringify(
-		execSync(
-			`nix-shell -p xclip --run 'DISPLAY=${process.env.BENCH_DISPLAY || ':3'} xclip -selection clipboard -o'`
-		).toString()
-	)
-);
-spawn(
-	'nix-shell',
-	[
-		'-p',
-		'xclip',
-		'--run',
-		`printf 'hello from remote ✓' | DISPLAY=${process.env.BENCH_DISPLAY || ':3'} xclip -selection clipboard -i -loops 2`,
-	],
-	{ stdio: 'ignore' }
-);
+await p.mouse.click(1200, 700); await p.waitForTimeout(200);
+await p.keyboard.press('Control+v'); await p.waitForTimeout(1000);
+console.log('local text -> remote:', JSON.stringify(execSync(`nix-shell -p xclip --run 'DISPLAY=${process.env.BENCH_DISPLAY || ':3'} xclip -selection clipboard -o'`).toString()));
+spawn('nix-shell', ['-p', 'xclip', '--run', `printf 'hello from remote ✓' | DISPLAY=${process.env.BENCH_DISPLAY || ':3'} xclip -selection clipboard -i -loops 2`], { stdio: 'ignore' });
 await p.waitForTimeout(5000);
-console.log(
-	'remote text -> local:',
-	JSON.stringify(await p.evaluate(() => navigator.clipboard.readText()))
-);
+console.log('remote text -> local:', JSON.stringify(await p.evaluate(() => navigator.clipboard.readText())));
 await b.close();

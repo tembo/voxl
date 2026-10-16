@@ -10,19 +10,5 @@
 		"browser": true,
 		"es2022": true
 	},
-	"ignorePatterns": ["target/**", "node_modules/**"],
-	"overrides": [
-		{
-			"files": ["bench/**"],
-			"env": {
-				"node": true
-			},
-			"rules": {
-				"no-await-in-loop": "off",
-				"no-underscore-dangle": "off",
-				"no-shadow": "off",
-				"promise/always-return": "off"
-			}
-		}
-	]
+	"ignorePatterns": ["target/**", "node_modules/**", "bench/**"]
 }
