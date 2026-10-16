@@ -104,7 +104,7 @@ adds ~15 ms).
 | `--encoder-threads` | `min(4, ncpu/4)` | x264 sliced threads |
 | `--crf` | `24` | base quality |
 | `--max-kbps` / `--video-bitrate` | `30000` | adaptive bitrate ceiling |
-| `--min-kbps` | `800` | adaptive bitrate floor |
+| `--min-kbps` | `2000` | adaptive bitrate floor |
 | `--paintover-crf`, `--paintover-burst`, `--paintover-delay-ms` | `16`, `3`, `150` | sharpening when the screen goes still |
 | `--enable-clipboard` | `true` | `true`, `in`, `out` or `false` |
 | `--audio-enabled`, `--audio-device-name`, `--audio-bitrate` | `true`, `output.monitor`, `128000` | desktop audio |
@@ -119,7 +119,7 @@ Other selkies flags are accepted and ignored. `GET /stats` returns server counte
 and `GET /healthz` returns `ok`.
 
 Debug environment variables: `VOXL_NO_DIRECT_FB`, `VOXL_NO_MBINFO`, `VOXL_X264_INFO`,
-`VOXL_DEBUG_DAMAGE`, `VOXL_DEBUG_STRIPES`, `VOXL_DEBUG_MARKER=x,y`.
+`VOXL_DEBUG_DAMAGE`, `VOXL_DEBUG_CORNERS`, `VOXL_DEBUG_STRIPES`, `VOXL_DEBUG_MARKER=x,y`.
 
 ## Protocol
 

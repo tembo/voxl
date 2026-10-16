@@ -79,6 +79,9 @@ impl State {
         if self.shaped.get(&win) == Some(&want) {
             return;
         }
+        if std::env::var("VOXL_DEBUG_CORNERS").is_ok() {
+            log::info!("corners: window {win:#x} {width}x{height} -> {want:?} (was {:?})", self.shaped.get(&win));
+        }
         if let Some((w, h, r)) = want {
             let rects = rounded_rect(w, h, r);
             let _ = self.conn.shape_rectangles(shape::SO::SET, shape::SK::BOUNDING, x11rb::protocol::xproto::ClipOrdering::YX_BANDED, win, 0, 0, &rects);
@@ -134,7 +137,12 @@ pub fn spawn(display: Option<String>, radius: u16, named: Vec<(String, u16)>) ->
                             st.update(e.window, g.width, g.height);
                         }
                     }
-                    Ok(Event::ConfigureNotify(e)) if e.event == st.root => st.update(e.window, e.width, e.height),
+                    Ok(Event::ConfigureNotify(e)) if e.event == st.root => {
+                        if std::env::var("VOXL_DEBUG_CORNERS").is_ok() {
+                            log::info!("configure {:#x} {}x{} at {},{}", e.window, e.width, e.height, e.x, e.y);
+                        }
+                        st.update(e.window, e.width, e.height)
+                    }
                     Ok(Event::DestroyNotify(e)) => {
                         st.shaped.remove(&e.window);
                         st.seen.remove(&e.window);

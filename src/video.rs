@@ -127,6 +127,7 @@ struct RateCtl {
     slow_start: bool,
     /// Delivery rate observed at the last congestion: the path's likely capacity.
     ceiling: f64,
+    ceiling_at: Instant,
 }
 
 /// Starting point for a new session's bitrate cap (kbit/s).
@@ -135,7 +136,7 @@ const START_KBPS: f64 = 8000.0;
 impl RateCtl {
     fn new(max: f64, min: f64) -> Self {
         let past = Instant::now() - Duration::from_secs(10);
-        RateCtl { target: START_KBPS.min(max), max, min, last_eval: past, last_dec: past, last_inc: past, slow_start: true, ceiling: f64::MAX }
+        RateCtl { target: START_KBPS.min(max), max, min, last_eval: past, last_dec: past, last_inc: past, slow_start: true, ceiling: f64::MAX, ceiling_at: past }
     }
 
     fn update(&mut self, hub: &Hub, clients: &[Arc<crate::hub::Client>]) {
@@ -172,8 +173,12 @@ impl RateCtl {
         let now = Instant::now();
         if congested && self.last_dec.elapsed() >= Duration::from_millis(300) {
             let mut t = self.target * 0.85;
-            if rate.is_finite() {
+            // Delivery rate only says something about capacity when we were actually
+            // pushing near the target; congestion from one big frame on an idle screen
+            // would otherwise pin the ceiling at a few kbps.
+            if rate.is_finite() && rate >= self.target * 0.5 {
                 self.ceiling = rate;
+                self.ceiling_at = now;
                 t = t.min(rate * 0.85);
             }
             self.target = t.max(self.min);
@@ -187,7 +192,13 @@ impl RateCtl {
                 self.last_inc = now;
                 log::debug!("rate: slow start, target {:.0} kbps (delivered {:.0})", self.target, delivered);
             }
-        } else if !congested && clear && self.last_dec.elapsed() >= Duration::from_secs(1) {
+        } else if !congested && clear && self.last_dec.elapsed() >= Duration::from_secs(1) && delivered >= self.target * 0.5 {
+            // Only raise the cap while the content actually uses it: an idle screen says
+            // nothing about the path, and an inflated cap overshoots the next burst.
+            // Paths change; forget a capacity estimate that hasn't been confirmed lately.
+            if self.ceiling_at.elapsed() >= Duration::from_secs(15) {
+                self.ceiling = f64::MAX;
+            }
             // Recover quickly to just under the known capacity, then probe past it gently
             // so a busy link isn't driven into the queue every couple of seconds.
             if self.target < self.ceiling * 0.9 && self.last_inc.elapsed() >= Duration::from_millis(200) {
@@ -247,6 +258,23 @@ impl Refiner {
     }
     fn clear_all(&mut self) {
         self.pending.fill(false);
+    }
+    /// Every block not yet sharpened (1 = encode) and the row band they span.
+    fn pending_map(&self) -> Option<(Vec<u8>, Band)> {
+        let (mut r0, mut r1) = (usize::MAX, 0);
+        let map: Vec<u8> = self
+            .pending
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| {
+                if p {
+                    r0 = r0.min(i / self.cols);
+                    r1 = r1.max(i / self.cols + 1);
+                }
+                p as u8
+            })
+            .collect();
+        (r1 > r0).then(|| (map, Band { y0: (r0 * 16) as u32, y1: (r1 * 16) as u32 }))
     }
     /// Blocks due for sharpening (1 = refine) and the row band they span.
     fn due(&mut self) -> Option<(Vec<u8>, Band)> {
@@ -387,6 +415,18 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
             // Damage was empty after all.
             continue;
         }
+        // Sharpen only what was sent at motion quality; nothing pending, nothing to send.
+        let paint_map = if paintover_due && !is_motion && !want_key {
+            match refiner.pending_map() {
+                Some(m) => Some(m),
+                None => {
+                    paintover_left = 0;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         let idx = next_idx;
         let mut buf = pool[idx].take().unwrap();
         let todo = match (pending[idx], band) {
@@ -431,8 +471,16 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
             refiner.clear_all();
         }
         // A refinement frame encodes what moved plus what is due; everything else stays skipped.
-        let mb_map = if want_key || frame_paintover {
+        let mb_map = if want_key {
             None
+        } else if frame_paintover {
+            paint_map.map(|(m, b)| {
+                band = Some(match band {
+                    Some(x) => union(Some(x), b),
+                    None => b,
+                });
+                Arc::new(m)
+            })
         } else if let Some((rmap, rband)) = refine.take() {
             band = Some(match band {
                 Some(b) => union(Some(b), rband),
