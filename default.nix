@@ -7,6 +7,8 @@
   libopus,
   libpulseaudio,
   xorg,
+  esbuild,
+  typescript,
 }:
 rustPlatform.buildRustPackage {
   pname = "voxl";
@@ -28,7 +30,16 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     pkg-config
     rustPlatform.bindgenHook
+    esbuild
+    typescript
   ];
+
+  # build.rs bundles web/src with esbuild; type-check it first.
+  preBuild = ''
+    tsc -p web
+    tsc -p web/tsconfig.worker.json
+    tsc -p web/tsconfig.worklet.json
+  '';
 
   buildInputs = [
     x264

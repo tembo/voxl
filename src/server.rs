@@ -28,6 +28,13 @@ macro_rules! asset {
     };
 }
 
+/// Scripts bundled from web/src by build.rs.
+macro_rules! bundled {
+    ($name:literal) => {
+        get(|| async { ([(header::CONTENT_TYPE, "text/javascript"), (header::CACHE_CONTROL, "no-cache")], include_bytes!(concat!(env!("OUT_DIR"), "/web/", $name)).as_slice()) })
+    };
+}
+
 pub fn router(state: AppState) -> Router {
     use crate::files;
     let file_routes = Router::new()
@@ -38,10 +45,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", asset!("index.html", "text/html; charset=utf-8"))
         .route("/index.html", asset!("index.html", "text/html; charset=utf-8"))
-        .route("/client.js", asset!("client.js", "text/javascript"))
-        .route("/worker.js", asset!("worker.js", "text/javascript"))
-        .route("/audio.js", asset!("audio.js", "text/javascript"))
-        .route("/mic.js", asset!("mic.js", "text/javascript"))
+        .route("/client.js", bundled!("client.js"))
+        .route("/worker.js", bundled!("worker.js"))
+        .route("/audio.js", bundled!("audio.js"))
+        .route("/mic.js", bundled!("mic.js"))
         .route("/favicon.ico", asset!("favicon.ico", "image/x-icon"))
         .route("/inter.woff2", asset!("inter.woff2", "font/woff2"))
         .route("/healthz", get(|| async { "ok" }))
