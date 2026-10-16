@@ -17,7 +17,7 @@ use nix::sys::stat::Mode;
 use nix::unistd::write;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::ffi::{c_int, c_void, CString};
+use std::ffi::{c_int, c_void, CStr, CString};
 use std::os::fd::OwnedFd;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -55,8 +55,8 @@ struct Queue {
 /// Opens the FIFO without blocking (fails until PulseAudio has it open for reading)
 /// and shrinks its buffer, so audio that piles up while nobody records is at most
 /// ~40 ms stale when someone starts.
-fn open_fifo(path: &CString) -> Option<OwnedFd> {
-    let fd = open(path.as_c_str(), OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC, Mode::empty()).ok()?;
+fn open_fifo(path: &CStr) -> Option<OwnedFd> {
+    let fd = open(path, OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC, Mode::empty()).ok()?;
     let _ = fcntl(&fd, FcntlArg::F_SETPIPE_SZ(4096));
     Some(fd)
 }
