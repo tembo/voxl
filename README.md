@@ -122,11 +122,23 @@ the full-screen animation).
 
 ## Build
 
-Needs Rust, pkg-config, clang (bindgen), x264, libyuv, libopus and libpulse.
+Needs Rust, pkg-config, clang (bindgen), x264, libyuv, libopus and libpulse, plus
+esbuild and TypeScript for the web client.
 
 ```sh
-nix-shell          # or provide the libraries yourself
+nix-shell          # or provide the tools and libraries yourself
 cargo build --release
+```
+
+The web client is TypeScript in `web/src`, with no npm dependencies. `build.rs`
+bundles it with esbuild (`ESBUILD` to point at a specific binary) and the binary
+embeds the result, along with the static files in `web/` (`index.html`, the font
+and the icon). `protocol.ts` defines the wire format and the page/worker messages.
+The page, the worker and the audio worklets run in different browser environments,
+so each has its own type-check config (the Nix build runs all three):
+
+```sh
+tsc -p web && tsc -p web/tsconfig.worker.json && tsc -p web/tsconfig.worklet.json
 ```
 
 Smooth scrolling needs the patched Xvfb:

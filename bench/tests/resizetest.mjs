@@ -12,7 +12,7 @@ const report = async (frame, label) => {
 // 1) Embedded in a sidebar iframe, resized live
 const p = await b.newPage({ viewport: { width: 1600, height: 900 } });
 await p.goto('file://' + new URL('embed.html', import.meta.url).pathname); await p.waitForTimeout(4000);
-const f = p.frames().find(fr => fr.url().includes('6902'));
+const f = await (await p.$('#f')).contentFrame();
 for (const w of [640, 420, 960]) {
   await p.evaluate((w) => { document.getElementById('sb').style.width = w + 'px'; }, w);
   await p.waitForTimeout(1500);
