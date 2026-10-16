@@ -19,6 +19,7 @@ pub struct AppState {
     pub audio: bool,
     pub epoch: Instant,
     pub files: Arc<crate::files::Files>,
+    pub mic: Option<std::sync::mpsc::Sender<crate::mic::MicMsg>>,
 }
 
 macro_rules! asset {
@@ -40,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         .route("/client.js", asset!("client.js", "text/javascript"))
         .route("/worker.js", asset!("worker.js", "text/javascript"))
         .route("/audio.js", asset!("audio.js", "text/javascript"))
+        .route("/mic.js", asset!("mic.js", "text/javascript"))
         .route("/favicon.ico", asset!("favicon.ico", "image/x-icon"))
         .route("/inter.woff2", asset!("inter.woff2", "font/woff2"))
         .route("/healthz", get(|| async { "ok" }))
@@ -93,7 +95,7 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     let client = s.hub.add_client(tx);
     log::info!("client {} connected", client.id);
     let stripes = s.hub.stripes.lock().clone();
-    let hello = serde_json::json!({"t": "hello", "w": s.hub.width.load(Ordering::Relaxed), "h": s.hub.height.load(Ordering::Relaxed), "audio": s.audio, "stripes": stripes,
+    let hello = serde_json::json!({"t": "hello", "w": s.hub.width.load(Ordering::Relaxed), "h": s.hub.height.load(Ordering::Relaxed), "audio": s.audio, "mic": s.mic.is_some(), "stripes": stripes,
         "files": {"upload": s.files.upload, "download": s.files.download, "dir": s.files.default_dir}});
     client.send(Out::Text(hello.to_string()));
     if let Some(c) = s.hub.cursor.lock().clone() {
@@ -138,6 +140,13 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
                     let _ = tx.send(InputEvent::Clipboard(crate::desktop::ClipContent::Image(b[1..].to_vec())));
                 }
             }
+            // 0x12: microphone Opus packet, 0x13: microphone PCM (s16le mono 48 kHz).
+            Message::Binary(b) if matches!(b.first(), Some(0x12 | 0x13)) && b.len() > 1 => {
+                if let Some(tx) = &s.mic {
+                    let data = b.slice(1..);
+                    let _ = tx.send(if b[0] == 0x12 { crate::mic::MicMsg::Opus(client.id, data) } else { crate::mic::MicMsg::Pcm(client.id, data) });
+                }
+            }
             Message::Close(_) => break,
             _ => {}
         }
@@ -146,6 +155,9 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     writer.abort();
     if let Some(tx) = s.hub.input.lock().as_ref() {
         let _ = tx.send(InputEvent::ReleaseAll);
+    }
+    if let Some(tx) = &s.mic {
+        let _ = tx.send(crate::mic::MicMsg::Stop(client.id));
     }
     s.hub.remove_client(client.id);
     log::info!("client {} disconnected", client.id);
@@ -208,6 +220,11 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
             s.hub.wake();
         }
         "au" => c.audio.store(rest == "1" && s.audio, Ordering::Relaxed),
+        "mi" => {
+            if let Some(tx) = &s.mic {
+                let _ = tx.send(if rest == "1" { crate::mic::MicMsg::Start(c.id) } else { crate::mic::MicMsg::Stop(c.id) });
+            }
+        }
         "kf" => {
             c.started.store(false, Ordering::Relaxed);
             c.needs_keyframe.store(true, Ordering::Relaxed);

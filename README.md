@@ -97,6 +97,19 @@ the full-screen animation).
 - **Clipboard:** CLIPBOARD sync both ways for text and PNG images, including INCR
   transfers and paste ordering.
 - **Audio:** PulseAudio monitor audio is sent as Opus.
+- **Microphone:** with `--microphone-enabled`, a mic button in the toolbar captures the
+  browser's microphone (echo cancellation and noise suppression on), encodes it as
+  Opus with WebCodecs (16-bit PCM where that's missing) and sends it on the same
+  socket. voxl writes it into a FIFO that PulseAudio reads as the VM's microphone:
+  ```
+  load-module module-pipe-source source_name=microphone file=/tmp/voxl-mic.fifo format=s16le rate=48000 channels=1
+  set-default-source microphone
+  ```
+  voxl paces the FIFO with its own 20 ms clock and writes silence while the mic is
+  off, so apps recording it never stall, and a 40–120 ms jitter queue keeps delay
+  bounded. One viewer holds the mic at a time; turning it on elsewhere takes it over.
+  The toolbar stays visible while the mic is live. An embedding page must allow
+  `microphone` on the iframe.
 - **Files:** a Files button (top-right on hover) opens a panel to browse the
   desktop user's home folder and download files, newest first. Files dropped
   anywhere on the screen, or picked with Upload, go to the open folder
@@ -145,6 +158,7 @@ adds ~15 ms).
 | `--paintover-crf`, `--paintover-burst`, `--paintover-delay-ms` | `16`, `3`, `150` | sharpening when the screen goes still |
 | `--enable-clipboard` | `true` | `true`, `in`, `out` or `false` |
 | `--audio-enabled`, `--audio-device-name`, `--audio-bitrate` | `true`, `output.monitor`, `128000` | desktop audio |
+| `--microphone-enabled`, `--microphone-fifo` | `false`, `/tmp/voxl-mic.fifo` | browser microphone into the FIFO a PulseAudio pipe source reads |
 | `--round-corners` | `0` (off) | corner radius in pixels for top-level windows (Tembo uses `12`) |
 | `--round-windows` | none | `title:radius,...` rounds windows with that title, docks included |
 | `--adaptive-threads` | `false` | encode on one thread, fanning out only under sustained heavy motion |
@@ -171,7 +185,8 @@ image (RGBA), `0x04` clipboard image (PNG). Text messages are JSON (`hello`, `cl
 short comma-separated commands: `a,<frame>` ack, `m,x,y` move, `b,btn,0|1`,
 `s,dx,dy` wheel clicks, `sp,dx,dy` scroll in desktop pixels, `k,keysym,0|1`,
 `c,<text>` clipboard text, binary `0x11`+PNG clipboard image, `v,0|1` video on/off,
-`au,0|1` audio, `kf` keyframe request, `po,<t>` pong.
+`au,0|1` audio, `mi,0|1` microphone off/on, binary `0x12`+Opus or `0x13`+PCM (s16le
+mono 48 kHz) microphone audio, `kf` keyframe request, `po,<t>` pong.
 
 Files are plain HTTP: `GET /files/list?path=<dir>` returns JSON entries (`name`, `dir`, `size`, `mtime` in ms),
 `GET /files/download?path=<file>` streams a file as an attachment, and
@@ -183,5 +198,5 @@ outside it are refused.
 
 ## Limitations
 
-X11 only, single display, fixed resolution, H.264 4:2:0, desktop audio out only (no
-microphone), single files only (no folder upload or download).
+X11 only, single display, fixed resolution, H.264 4:2:0, single files only (no folder
+upload or download).

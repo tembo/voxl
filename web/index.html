@@ -51,8 +51,15 @@
   .ib.sm { width: 24px; height: 24px; }
   #tools.touch .ib { width: 40px; height: 40px; }
   #tools.touch .ib svg.i { width: 20px; height: 20px; }
-  #kb-btn, #files-btn { display: none !important; }
-  #tools.touch #kb-btn, #tools.files #files-btn { display: inline-grid !important; }
+  #kb-btn, #files-btn, #mic-btn { display: none !important; }
+  #tools.touch #kb-btn, #tools.files #files-btn, #tools.mic #mic-btn { display: inline-grid !important; }
+  /* While the microphone is live the toolbar stays up as a recording indicator. */
+  #tools.mic-on { opacity: 1; pointer-events: auto; }
+  #mic-btn .on, #mic-btn.on .off { display: none; }
+  #mic-btn.on .on { display: block; }
+  #mic-btn.on, #mic-btn.on:hover { background: color-mix(in srgb, var(--negative) 18%, transparent); }
+  #mic-btn.on svg.i, #mic-btn.on:hover svg.i { color: var(--negative); }
+  #mic-btn.err svg.i { color: var(--negative); }
 
   #status { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-weak);
     font: 520 14px/20px var(--font); letter-spacing: -.1px; pointer-events: none; }
@@ -123,6 +130,7 @@
 <textarea id="kbd" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" tabindex="-1" aria-hidden="true"></textarea>
 <div id="tools">
   <button id="kb-btn" class="ib" type="button" title="Keyboard" aria-label="Show keyboard"><svg class="i" viewBox="0 0 24 24" fill="none"><path d="M6 16.125C6.48325 16.125 6.875 16.5168 6.875 17C6.875 17.4832 6.48325 17.875 6 17.875C5.51675 17.875 5.125 17.4832 5.125 17C5.125 16.5168 5.51675 16.125 6 16.125ZM18 16.125C18.4832 16.125 18.875 16.5168 18.875 17C18.875 17.4832 18.4832 17.875 18 17.875C17.5168 17.875 17.125 17.4832 17.125 17C17.125 16.5168 17.5168 16.125 18 16.125ZM6 12.125C6.48325 12.125 6.875 12.5168 6.875 13C6.875 13.4832 6.48325 13.875 6 13.875C5.51675 13.875 5.125 13.4832 5.125 13C5.125 12.5168 5.51675 12.125 6 12.125ZM10 12.125C10.4832 12.125 10.875 12.5168 10.875 13C10.875 13.4832 10.4832 13.875 10 13.875C9.51675 13.875 9.125 13.4832 9.125 13C9.125 12.5168 9.51675 12.125 10 12.125ZM14 12.125C14.4832 12.125 14.875 12.5168 14.875 13C14.875 13.4832 14.4832 13.875 14 13.875C13.5168 13.875 13.125 13.4832 13.125 13C13.125 12.5168 13.5168 12.125 14 12.125ZM18 12.125C18.4832 12.125 18.875 12.5168 18.875 13C18.875 13.4832 18.4832 13.875 18 13.875C17.5168 13.875 17.125 13.4832 17.125 13C17.125 12.5168 17.5168 12.125 18 12.125Z" fill="currentColor" stroke="currentColor" stroke-width="0.75" stroke-linecap="square"/><path d="M10 17H14M14 5L12 3L10 5M4 9H20C21.1046 9 22 9.89543 22 11V19C22 20.1046 21.1046 21 20 21H4C2.89543 21 2 20.1046 2 19V11C2 9.89543 2.89543 9 4 9Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  <button id="mic-btn" class="ib" type="button" title="Turn microphone on" aria-label="Microphone" aria-pressed="false"><svg class="i on" viewBox="0 0 24 24" fill="none"><path d="M12.0013 19V21M12.0013 19C8.32307 19 6.14811 16.7451 5.01562 15M12.0013 19C15.6795 19 17.8545 16.7451 18.987 15M16.0013 7V11C16.0013 13.2091 14.2104 15 12.0013 15C9.79215 15 8.00129 13.2091 8.00129 11V7C8.00129 4.79086 9.79215 3 12.0013 3C14.2104 3 16.0013 4.79086 16.0013 7Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><svg class="i off" viewBox="0 0 24 24" fill="none"><path d="M12 21V19M12 19C8.32179 19 6.14683 16.7451 5.01434 15M12 19C14.2282 19 15.9048 18.1725 17.1321 17.1321M9.51896 3.86222C10.2008 3.32235 11.0628 3 12 3C14.2092 3 16 4.79086 16 7V10.3433M3 3L8.00001 8.00001M8.00001 8.00001V11C8.00001 13.2091 9.79087 15 12 15C12.8492 15 13.6365 14.7354 14.2841 14.2841M8.00001 8.00001L14.2841 14.2841M14.2841 14.2841L17.1321 17.1321M17.1321 17.1321L21 21" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
   <button id="files-btn" class="ib" type="button" title="Files" aria-label="Files"><svg class="i" viewBox="0 0 24 24" fill="none"><path d="M3 6V17C3 18.1046 3.89543 19 5 19H19C20.1046 19 21 18.1046 21 17V9C21 7.89543 20.1046 7 19 7H12.5352C12.2008 7 11.8886 6.8329 11.7031 6.5547L10.5937 4.8906C10.2228 4.3342 9.59834 4 8.92963 4H5C3.89543 4 3 4.89543 3 6Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
   <button id="fs-btn" class="ib" type="button" title="Fullscreen (captures browser shortcuts)" aria-label="Toggle fullscreen"><svg class="i" viewBox="0 0 24 24" fill="none"><path d="M7 5H5C3.89543 5 3 5.89543 3 7V9M17 5H19C20.1046 5 21 5.89543 21 7V9M21 15V17C21 18.1046 20.1046 19 19 19H17M7 19H5C3.89543 19 3 18.1046 3 17V15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
 </div>

@@ -56,3 +56,6 @@ For smooth scrolling, start that display with the patched server:
   (`TEST_PNG`, needs `xclip`).
 - `fstest.mjs`, `fsiframe.mjs`: fullscreen toolbar and Keyboard Lock, top level and embedded.
 - `resizetest.mjs`: re-fit in a resizable sidebar iframe and at several tab sizes.
+- `filestest.mjs`: file panel, uploads (button and drag and drop) and downloads; starts its own voxl.
+- `mictest.mjs`: microphone end to end with a fake 440 Hz microphone, a private PulseAudio
+  pipe source and its own voxl (`PULSEAUDIO`: the pulseaudio package).
