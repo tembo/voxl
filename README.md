@@ -11,20 +11,20 @@ command-line flags, so it drops into the same service definition.
 Measured on a Tembo VM (16 vCPU AMD EPYC 9334, no GPU, 2560x1600 Xvfb desktop), same
 apps, same decoding client, against selkies as deployed (picom on):
 
-| Test | selkies: FPS (worst second), latency p50/p99, Mbps | voxl |
-|---|---|---|
-| Chromium scroll, LAN | 56.8 (54.0), 85/106 ms, 8.6 | **60.1 (59.7), 55/60 ms, 3.6** |
-| Scroll, 10 Mbps / 40 ms RTT | 55.6 (47.7), 152/261 ms, 8.7 | **60.0 (59.4), 82/94 ms, 3.6** |
-| Scroll, 5 Mbps / 60 ms RTT | 27.9 (19.6), 2.7 s / 3.7 s | **60.1 (59.7), 99/109 ms** |
-| 1080p animation, LAN | 58.7 (55.9), 31/48 ms, 13.0 | **60.0 (59.7), 14/18 ms, 7.3** |
-| Animation, 10 Mbps / 40 ms RTT | 39.3 (31.8), 2.3 s / 3.1 s | **60.1 (59.5), 47/80 ms** |
-| Animation, 5 Mbps / 60 ms RTT | 18.4 (15.3), 2.2 s / 4.3 s | **59.9 (57.4), 66/93 ms** |
-| Full-screen animation, LAN | 54.8 (49.8), 54/79 ms, 13.4 | **59.2–60.1, 19–21/25–27 ms, 5.2** |
+| Test                           | selkies: FPS (worst second), latency p50/p99, Mbps | voxl                               |
+| ------------------------------ | -------------------------------------------------- | ---------------------------------- |
+| Chromium scroll, LAN           | 56.8 (54.0), 85/106 ms, 8.6                        | **60.1 (59.7), 55/60 ms, 3.6**     |
+| Scroll, 10 Mbps / 40 ms RTT    | 55.6 (47.7), 152/261 ms, 8.7                       | **60.0 (59.4), 82/94 ms, 3.6**     |
+| Scroll, 5 Mbps / 60 ms RTT     | 27.9 (19.6), 2.7 s / 3.7 s                         | **60.1 (59.7), 99/109 ms**         |
+| 1080p animation, LAN           | 58.7 (55.9), 31/48 ms, 13.0                        | **60.0 (59.7), 14/18 ms, 7.3**     |
+| Animation, 10 Mbps / 40 ms RTT | 39.3 (31.8), 2.3 s / 3.1 s                         | **60.1 (59.5), 47/80 ms**          |
+| Animation, 5 Mbps / 60 ms RTT  | 18.4 (15.3), 2.2 s / 4.3 s                         | **59.9 (57.4), 66/93 ms**          |
+| Full-screen animation, LAN     | 54.8 (49.8), 54/79 ms, 13.4                        | **59.2–60.1, 19–21/25–27 ms, 5.2** |
 
-| Server CPU (cores) | idle | small update | scroll | full screen |
-|---|---|---|---|---|
-| selkies | 1.29 | 1.38 | 1.54 | 1.80 |
-| voxl | **0.00** | **0.98** | **1.33** | **1.68** |
+| Server CPU (cores) | idle     | small update | scroll   | full screen |
+| ------------------ | -------- | ------------ | -------- | ----------- |
+| selkies            | 1.29     | 1.38         | 1.54     | 1.80        |
+| voxl               | **0.00** | **0.98**     | **1.33** | **1.68**    |
 
 FPS counts unique frames displayed (read from a pixel marker drawn into the content),
 and latency runs from the moment the content was drawn to the decoded frame. See
@@ -37,15 +37,15 @@ backend (60 FPS cap, JPEG/WebP quality 8–9, video mode). KasmVNC is its own X 
 so it runs the apps on its own display; both are measured without a compositor, with
 a native client that reads the marker like the one above.
 
-| Test | KasmVNC: FPS (worst second), latency p50/p99, Mbps | voxl |
-|---|---|---|
-| Chromium scroll, LAN | 51.7 (39.5), 99/135 ms, 32.7 | **60.1 (59.7), 72/81 ms, 3.6** |
-| Scroll, 10 Mbps / 40 ms RTT | 8.3 (7.4), 229/249 ms | **60.0 (59.1), 98/107 ms** |
-| Scroll, 5 Mbps / 60 ms RTT | 4.9 (3.6), 306/415 ms | **60.1 (59.5), 129/154 ms** |
-| 1080p animation, LAN | 56.7 (51.6), 51/82 ms, 2.0 | **60.1 (59.9), 12/16 ms**, 7.3 |
-| Animation, 10 Mbps / 40 ms RTT | 52.9 (49.2), 76/115 ms | **60.1 (59.5), 46/71 ms** |
-| Animation, 5 Mbps / 60 ms RTT | 34.1 (26.4), 104/156 ms | **60.0 (58.8), 66/92 ms** |
-| Full-screen animation, LAN | 34.2 (32.5), 83/102 ms, 1.9 | **59.8 (54.0), 18/25 ms**, 5.1 |
+| Test                           | KasmVNC: FPS (worst second), latency p50/p99, Mbps | voxl                           |
+| ------------------------------ | -------------------------------------------------- | ------------------------------ |
+| Chromium scroll, LAN           | 51.7 (39.5), 99/135 ms, 32.7                       | **60.1 (59.7), 72/81 ms, 3.6** |
+| Scroll, 10 Mbps / 40 ms RTT    | 8.3 (7.4), 229/249 ms                              | **60.0 (59.1), 98/107 ms**     |
+| Scroll, 5 Mbps / 60 ms RTT     | 4.9 (3.6), 306/415 ms                              | **60.1 (59.5), 129/154 ms**    |
+| 1080p animation, LAN           | 56.7 (51.6), 51/82 ms, 2.0                         | **60.1 (59.9), 12/16 ms**, 7.3 |
+| Animation, 10 Mbps / 40 ms RTT | 52.9 (49.2), 76/115 ms                             | **60.1 (59.5), 46/71 ms**      |
+| Animation, 5 Mbps / 60 ms RTT  | 34.1 (26.4), 104/156 ms                            | **60.0 (58.8), 66/92 ms**      |
+| Full-screen animation, LAN     | 34.2 (32.5), 83/102 ms, 1.9                        | **59.8 (54.0), 18/25 ms**, 5.1 |
 
 KasmVNC spots the animation's scrolling and sends it as copies of pixels the client
 already has, which is why it needs less bandwidth there. Its own web client shows the
@@ -53,10 +53,10 @@ same picture (42.7 FPS for the LAN scroll, 8 FPS at 10 Mbps). With picom running
 the Computer preview, KasmVNC falls to 25–36 FPS on LAN, while voxl holds 60 (51 for
 the full-screen animation).
 
-| Server CPU, X server + streamer (cores) | idle | 1080p animation | scroll | full screen |
-|---|---|---|---|---|
-| KasmVNC | 0.00 | 1.97 | 2.07 | 1.82 (at 34 FPS) |
-| voxl | 0.00 | **1.39** | **1.38** | 1.83 (at 60 FPS) |
+| Server CPU, X server + streamer (cores) | idle | 1080p animation | scroll   | full screen      |
+| --------------------------------------- | ---- | --------------- | -------- | ---------------- |
+| KasmVNC                                 | 0.00 | 1.97            | 2.07     | 1.82 (at 34 FPS) |
+| voxl                                    | 0.00 | **1.39**        | **1.38** | 1.83 (at 60 FPS) |
 
 ## How it works
 
@@ -70,7 +70,7 @@ the full-screen animation).
   hints from damage let x264 skip static areas. When the screen goes still, a short
   paint-over burst at higher quality sharpens text.
 - **Flow control:** clients ack each frame once it is decoded. Frames are dropped
-  *before* encoding when acks fall behind, so latency stays bounded instead of
+  _before_ encoding when acks fall behind, so latency stays bounded instead of
   queueing.
 - **Adaptive bitrate:** delay-based control. It starts at 8 Mbps, ramps quickly
   while the path is clear, remembers the throughput where queueing began, and probes
@@ -147,6 +147,18 @@ Smooth scrolling needs the patched Xvfb:
 nix-build -E 'with import <nixpkgs> {}; callPackage ./xvfb.nix {}'
 ```
 
+### Formatting and linting
+
+CI runs these on every pull request (`.github/workflows/ci.yml`):
+
+```sh
+npm ci && npm run check      # oxfmt --check, oxlint and tsc for the web client
+nix-shell --arg withRust true --run 'cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings'
+```
+
+`npm run fmt` and `cargo fmt` fix formatting. The npm packages are dev tools only;
+the build doesn't use them.
+
 ## Run
 
 ```sh
@@ -158,29 +170,29 @@ Open `http://host:6901/` (add `?stats` for an FPS/bitrate overlay). Start Xvfb w
 screen on every change (picom's xrender backend on Xvfb caps apps at ~40 FPS and
 adds ~15 ms).
 
-| Flag | Default | |
-|---|---|---|
-| `--addr`, `--port` | `0.0.0.0`, `6901` | listen address |
-| `--framerate` | `60` | max frames per second (`60-60` style ranges accepted) |
-| `--preset` | `ultrafast` | x264 preset |
-| `--encoder-threads` | `min(4, ncpu/4)` | x264 sliced threads |
-| `--crf` | `24` | base quality |
-| `--max-kbps` / `--video-bitrate` | `30000` | adaptive bitrate ceiling |
-| `--min-kbps` | `2000` | adaptive bitrate floor |
-| `--paintover-crf`, `--paintover-burst`, `--paintover-delay-ms` | `16`, `3`, `150` | sharpening when the screen goes still |
-| `--enable-clipboard` | `true` | `true`, `in`, `out` or `false` |
-| `--audio-enabled`, `--audio-device-name`, `--audio-bitrate` | `true`, `output.monitor`, `128000` | desktop audio |
-| `--microphone-enabled`, `--microphone-fifo` | `false`, `/tmp/voxl-mic.fifo` | browser microphone into the FIFO a PulseAudio pipe source reads |
-| `--round-corners` | `0` (off) | corner radius in pixels for top-level windows (Tembo uses `12`) |
-| `--round-windows` | none | `title:radius,...` rounds windows with that title, docks included |
-| `--adaptive-threads` | `false` | encode on one thread, fanning out only under sustained heavy motion |
-| `--stripes` | `1` | encode the screen as N independent horizontal streams (experimental) |
-| `--scroll-px-per-notch` | `180` | desktop pixels one wheel notch scrolls (calibrates smooth scrolling) |
-| `--file-transfers` | `upload,download` | `upload`, `download`, both, or `none` |
-| `--files-root` | `$HOME` | folder the Files panel can see; nothing outside it is reachable |
-| `--upload-dir` | `Downloads` | folder (under the root) the panel opens and uploads into; created on first upload |
-| `--max-upload-mb` | `0` (no limit) | largest accepted upload |
-| `--convert-threads`, `--coalesce-us` | `4`, `0` | tuning |
+| Flag                                                           | Default                            |                                                                                   |
+| -------------------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------- |
+| `--addr`, `--port`                                             | `0.0.0.0`, `6901`                  | listen address                                                                    |
+| `--framerate`                                                  | `60`                               | max frames per second (`60-60` style ranges accepted)                             |
+| `--preset`                                                     | `ultrafast`                        | x264 preset                                                                       |
+| `--encoder-threads`                                            | `min(4, ncpu/4)`                   | x264 sliced threads                                                               |
+| `--crf`                                                        | `24`                               | base quality                                                                      |
+| `--max-kbps` / `--video-bitrate`                               | `30000`                            | adaptive bitrate ceiling                                                          |
+| `--min-kbps`                                                   | `2000`                             | adaptive bitrate floor                                                            |
+| `--paintover-crf`, `--paintover-burst`, `--paintover-delay-ms` | `16`, `3`, `150`                   | sharpening when the screen goes still                                             |
+| `--enable-clipboard`                                           | `true`                             | `true`, `in`, `out` or `false`                                                    |
+| `--audio-enabled`, `--audio-device-name`, `--audio-bitrate`    | `true`, `output.monitor`, `128000` | desktop audio                                                                     |
+| `--microphone-enabled`, `--microphone-fifo`                    | `false`, `/tmp/voxl-mic.fifo`      | browser microphone into the FIFO a PulseAudio pipe source reads                   |
+| `--round-corners`                                              | `0` (off)                          | corner radius in pixels for top-level windows (Tembo uses `12`)                   |
+| `--round-windows`                                              | none                               | `title:radius,...` rounds windows with that title, docks included                 |
+| `--adaptive-threads`                                           | `false`                            | encode on one thread, fanning out only under sustained heavy motion               |
+| `--stripes`                                                    | `1`                                | encode the screen as N independent horizontal streams (experimental)              |
+| `--scroll-px-per-notch`                                        | `180`                              | desktop pixels one wheel notch scrolls (calibrates smooth scrolling)              |
+| `--file-transfers`                                             | `upload,download`                  | `upload`, `download`, both, or `none`                                             |
+| `--files-root`                                                 | `$HOME`                            | folder the Files panel can see; nothing outside it is reachable                   |
+| `--upload-dir`                                                 | `Downloads`                        | folder (under the root) the panel opens and uploads into; created on first upload |
+| `--max-upload-mb`                                              | `0` (no limit)                     | largest accepted upload                                                           |
+| `--convert-threads`, `--coalesce-us`                           | `4`, `0`                           | tuning                                                                            |
 
 Other selkies flags are accepted and ignored. `GET /stats` returns server counters,
 and `GET /healthz` returns `ok`.

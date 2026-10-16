@@ -1,6 +1,11 @@
 //! Thin safe wrapper around libx264 tuned for low-latency desktop streaming.
 
-#![allow(non_camel_case_types, non_upper_case_globals, non_snake_case, dead_code)]
+#![allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    non_snake_case,
+    dead_code
+)]
 mod ffi {
     include!(concat!(env!("OUT_DIR"), "/x264.rs"));
 }
@@ -68,7 +73,11 @@ impl Encoder {
             param.b_annexb = 1;
             param.b_repeat_headers = 1;
             param.b_aud = 0;
-            param.i_log_level = if std::env::var("VOXL_X264_INFO").is_ok() { ffi::X264_LOG_INFO } else { ffi::X264_LOG_WARNING } as i32;
+            param.i_log_level = if std::env::var("VOXL_X264_INFO").is_ok() {
+                ffi::X264_LOG_INFO
+            } else {
+                ffi::X264_LOG_WARNING
+            } as i32;
             param.rc.i_rc_method = ffi::X264_RC_CRF as i32;
             param.rc.f_rf_constant = cfg.crf;
             param.rc.i_lookahead = 0;
@@ -97,13 +106,24 @@ impl Encoder {
             ffi::x264_picture_init(&mut pic);
             pic.img.i_csp = ffi::X264_CSP_I420 as i32;
             pic.img.i_plane = 3;
-            Ok(Encoder { h, param, pic, pts: 0, width: cfg.width, height: cfg.height })
+            Ok(Encoder {
+                h,
+                param,
+                pic,
+                pts: 0,
+                width: cfg.width,
+                height: cfg.height,
+            })
         }
     }
 
     /// Reconfigure rate control on the fly (buffer of ~1.25 frames at `max_kbps`).
     pub fn set_rate(&mut self, crf: f32, max_kbps: u32) {
-        self.set_rate_buf(crf, max_kbps, max_kbps / self.param.i_fps_num.max(1) * 5 / 4);
+        self.set_rate_buf(
+            crf,
+            max_kbps,
+            max_kbps / self.param.i_fps_num.max(1) * 5 / 4,
+        );
     }
 
     /// Reconfigure rate control with an explicit VBV buffer (kbit).
@@ -122,7 +142,15 @@ impl Encoder {
     /// Appends Annex-B output to `out` and returns whether it is a keyframe.
     /// `mb_info` (one byte per macroblock, X264_MBINFO_CONSTANT for unchanged ones) lets
     /// x264 skip analysis of static areas; it is consumed before this returns.
-    pub fn encode(&mut self, p: &Planes, ts_ms: i64, force_idr: bool, qp: Option<i32>, mb_info: Option<&mut [u8]>, out: &mut Vec<u8>) -> Result<bool, String> {
+    pub fn encode(
+        &mut self,
+        p: &Planes,
+        ts_ms: i64,
+        force_idr: bool,
+        qp: Option<i32>,
+        mb_info: Option<&mut [u8]>,
+        out: &mut Vec<u8>,
+    ) -> Result<bool, String> {
         unsafe {
             self.pic.img.plane[0] = p.y.as_ptr() as *mut u8;
             self.pic.img.plane[1] = p.u.as_ptr() as *mut u8;
@@ -130,7 +158,11 @@ impl Encoder {
             self.pic.img.i_stride[0] = p.stride_y as i32;
             self.pic.img.i_stride[1] = p.stride_uv as i32;
             self.pic.img.i_stride[2] = p.stride_uv as i32;
-            self.pic.i_type = if force_idr { ffi::X264_TYPE_IDR as i32 } else { ffi::X264_TYPE_AUTO as i32 };
+            self.pic.i_type = if force_idr {
+                ffi::X264_TYPE_IDR as i32
+            } else {
+                ffi::X264_TYPE_AUTO as i32
+            };
             self.pic.i_qpplus1 = qp.map(|q| q + 1).unwrap_or(0);
             self.pic.prop.mb_info = mb_info.map(|m| m.as_mut_ptr()).unwrap_or(ptr::null_mut());
             self.pic.prop.mb_info_free = None;
@@ -140,7 +172,8 @@ impl Encoder {
             let mut nals: *mut ffi::x264_nal_t = ptr::null_mut();
             let mut n: i32 = 0;
             let mut pic_out: ffi::x264_picture_t = std::mem::zeroed();
-            let size = ffi::x264_encoder_encode(self.h, &mut nals, &mut n, &mut self.pic, &mut pic_out);
+            let size =
+                ffi::x264_encoder_encode(self.h, &mut nals, &mut n, &mut self.pic, &mut pic_out);
             if size < 0 {
                 return Err("x264_encoder_encode failed".into());
             }
@@ -150,7 +183,13 @@ impl Encoder {
                 out.extend_from_slice(std::slice::from_raw_parts(first.p_payload, size as usize));
             }
             if std::env::var("VOXL_DEBUG_MARKER").is_ok() {
-                log::info!("x264 out {} bytes, delayed {}, pts in {} out {}", size, ffi::x264_encoder_delayed_frames(self.h), self.pts, pic_out.i_pts);
+                log::info!(
+                    "x264 out {} bytes, delayed {}, pts in {} out {}",
+                    size,
+                    ffi::x264_encoder_delayed_frames(self.h),
+                    self.pts,
+                    pic_out.i_pts
+                );
             }
             Ok(pic_out.b_keyframe != 0)
         }

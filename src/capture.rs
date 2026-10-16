@@ -32,7 +32,12 @@ impl ShmBuf {
             if ptr as isize == -1 {
                 return Err("shmat failed".into());
             }
-            Ok(ShmBuf { ptr: ptr as *mut u8, len, shmid, foreign: false })
+            Ok(ShmBuf {
+                ptr: ptr as *mut u8,
+                len,
+                shmid,
+                foreign: false,
+            })
         }
     }
 
@@ -42,7 +47,12 @@ impl ShmBuf {
             if ptr as isize == -1 {
                 return None;
             }
-            Some(ShmBuf { ptr: ptr as *mut u8, len, shmid, foreign: true })
+            Some(ShmBuf {
+                ptr: ptr as *mut u8,
+                len,
+                shmid,
+                foreign: true,
+            })
         }
     }
     pub fn as_slice(&self) -> &[u8] {
@@ -93,7 +103,8 @@ pub struct Capturer {
 
 impl Capturer {
     pub fn new(display: Option<&str>) -> Result<Self, String> {
-        let (conn, screen_num) = RustConnection::connect(display).map_err(|e| format!("X connect: {e}"))?;
+        let (conn, screen_num) =
+            RustConnection::connect(display).map_err(|e| format!("X connect: {e}"))?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
         let width = screen.width_in_pixels as u32;
@@ -101,22 +112,41 @@ impl Capturer {
         if screen.root_depth != 24 && screen.root_depth != 32 {
             return Err(format!("unsupported root depth {}", screen.root_depth));
         }
-        conn.extension_information(shm::X11_EXTENSION_NAME).map_err(|e| e.to_string())?.ok_or("no MIT-SHM")?;
-        conn.shm_query_version().map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?;
-        conn.damage_query_version(1, 1).map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?;
-        conn.xfixes_query_version(5, 0).map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?;
+        conn.extension_information(shm::X11_EXTENSION_NAME)
+            .map_err(|e| e.to_string())?
+            .ok_or("no MIT-SHM")?;
+        conn.shm_query_version()
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?;
+        conn.damage_query_version(1, 1)
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?;
+        conn.xfixes_query_version(5, 0)
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?;
         let mut stride = width as usize * 4;
         let seg = conn.generate_id().map_err(|e| e.to_string())?;
         let (buf, offset, direct) = match find_xvfb_framebuffer(&conn, root, width, height) {
             Some((buf, offset, fb_stride)) => {
-                log::info!("capturing directly from the Xvfb framebuffer (shmid {})", buf.shmid);
+                log::info!(
+                    "capturing directly from the Xvfb framebuffer (shmid {})",
+                    buf.shmid
+                );
                 stride = fb_stride;
                 (buf, offset, true)
             }
             None => {
-                log::warn!("Xvfb framebuffer not found (start Xvfb with -shmem); falling back to GetImage");
+                log::warn!(
+                    "Xvfb framebuffer not found (start Xvfb with -shmem); falling back to GetImage"
+                );
                 let buf = ShmBuf::new(stride * height as usize)?;
-                conn.shm_attach(seg, buf.shmid as u32, false).map_err(|e| e.to_string())?.check().map_err(|e| e.to_string())?;
+                conn.shm_attach(seg, buf.shmid as u32, false)
+                    .map_err(|e| e.to_string())?
+                    .check()
+                    .map_err(|e| e.to_string())?;
                 // Mark for removal now; it stays alive while attached.
                 unsafe { libc::shmctl(buf.shmid, libc::IPC_RMID, std::ptr::null_mut()) };
                 log::info!("capturing via MIT-SHM GetImage");
@@ -124,9 +154,26 @@ impl Capturer {
             }
         };
         let damage = conn.generate_id().map_err(|e| e.to_string())?;
-        conn.damage_create(damage, root, damage::ReportLevel::RAW_RECTANGLES).map_err(|e| e.to_string())?;
+        conn.damage_create(damage, root, damage::ReportLevel::RAW_RECTANGLES)
+            .map_err(|e| e.to_string())?;
         conn.flush().map_err(|e| e.to_string())?;
-        Ok(Capturer { conn, root, width, height, stride, seg, buf, offset, direct, _damage: damage, damaged: true, damaged_at: None, acc: None, mb_dirty: vec![0; (width as usize).div_ceil(16) * (height as usize).div_ceil(16)], mb_cols: (width as usize).div_ceil(16) })
+        Ok(Capturer {
+            conn,
+            root,
+            width,
+            height,
+            stride,
+            seg,
+            buf,
+            offset,
+            direct,
+            _damage: damage,
+            damaged: true,
+            damaged_at: None,
+            acc: None,
+            mb_dirty: vec![0; (width as usize).div_ceil(16) * (height as usize).div_ceil(16)],
+            mb_cols: (width as usize).div_ceil(16),
+        })
     }
 
     pub fn fd(&self) -> BorrowedFd<'_> {
@@ -139,13 +186,27 @@ impl Capturer {
             if let Event::DamageNotify(e) = ev {
                 DAMAGE_EVENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if std::env::var("VOXL_DEBUG_DAMAGE").is_ok() {
-                    log::info!("dmg {:?} x{} y{} {}x{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() % 1_000_000, e.area.x, e.area.y, e.area.width, e.area.height);
+                    log::info!(
+                        "dmg {:?} x{} y{} {}x{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_micros()
+                            % 1_000_000,
+                        e.area.x,
+                        e.area.y,
+                        e.area.width,
+                        e.area.height
+                    );
                 }
                 let top = e.area.y.max(0) as u32;
-                let bot = (e.area.y as i32 + e.area.height as i32).clamp(0, self.height as i32) as u32;
+                let bot =
+                    (e.area.y as i32 + e.area.height as i32).clamp(0, self.height as i32) as u32;
                 if bot > top {
                     let x0 = (e.area.x.max(0) as usize) / 16;
-                    let x1 = ((e.area.x as i32 + e.area.width as i32).clamp(0, self.width as i32) as usize).div_ceil(16);
+                    let x1 = ((e.area.x as i32 + e.area.width as i32).clamp(0, self.width as i32)
+                        as usize)
+                        .div_ceil(16);
                     for row in (top as usize / 16)..(bot as usize).div_ceil(16) {
                         self.mb_dirty[row * self.mb_cols + x0..row * self.mb_cols + x1].fill(1);
                     }
@@ -166,9 +227,14 @@ impl Capturer {
     pub fn take_damage(&mut self) -> Result<Option<Band>, String> {
         self.damaged = false;
         self.damaged_at = None;
-        let Some((y0, y1)) = self.acc.take() else { return Ok(None) };
+        let Some((y0, y1)) = self.acc.take() else {
+            return Ok(None);
+        };
         // Align to even rows for 4:2:0.
-        Ok(Some(Band { y0: y0 & !1, y1: ((y1 + 1) & !1).min(self.height) }))
+        Ok(Some(Band {
+            y0: y0 & !1,
+            y1: ((y1 + 1) & !1).min(self.height),
+        }))
     }
 
     /// Take the dirty-macroblock map accumulated with the current damage.
@@ -178,7 +244,10 @@ impl Capturer {
     }
 
     pub fn full(&self) -> Band {
-        Band { y0: 0, y1: self.height }
+        Band {
+            y0: 0,
+            y1: self.height,
+        }
     }
 
     /// Current frame pixels (BGRX, `stride` bytes per row).
@@ -194,13 +263,22 @@ impl Capturer {
         }
         let off = band.y0 as usize * self.stride;
         self.conn
-            .shm_get_image(self.root, 0, band.y0 as i16, self.width as u16, h as u16, !0, ImageFormat::Z_PIXMAP.into(), self.seg, off as u32)
+            .shm_get_image(
+                self.root,
+                0,
+                band.y0 as i16,
+                self.width as u16,
+                h as u16,
+                !0,
+                ImageFormat::Z_PIXMAP.into(),
+                self.seg,
+                off as u32,
+            )
             .map_err(|e| e.to_string())?
             .reply()
             .map_err(|e| e.to_string())?;
         Ok(())
     }
-
 }
 
 fn be32(b: &[u8], i: usize) -> u32 {
@@ -209,7 +287,12 @@ fn be32(b: &[u8], i: usize) -> u32 {
 
 /// Xvfb started with `-shmem` keeps each screen as an XWD image in a SysV segment.
 /// Find it, check the header and verify pixels against the server before trusting it.
-fn find_xvfb_framebuffer(conn: &RustConnection, root: u32, width: u32, height: u32) -> Option<(ShmBuf, usize, usize)> {
+fn find_xvfb_framebuffer(
+    conn: &RustConnection,
+    root: u32,
+    width: u32,
+    height: u32,
+) -> Option<(ShmBuf, usize, usize)> {
     if std::env::var("VOXL_NO_DIRECT_FB").is_ok() {
         return None;
     }
@@ -219,14 +302,25 @@ fn find_xvfb_framebuffer(conn: &RustConnection, root: u32, width: u32, height: u
         if f.len() < 4 {
             continue;
         }
-        let (Ok(shmid), Ok(size)) = (f[1].parse::<i32>(), f[3].parse::<usize>()) else { continue };
-        if size < (width * height * 4) as usize || size > (width * height * 4) as usize + (1 << 16) {
+        let (Ok(shmid), Ok(size)) = (f[1].parse::<i32>(), f[3].parse::<usize>()) else {
+            continue;
+        };
+        if size < (width * height * 4) as usize || size > (width * height * 4) as usize + (1 << 16)
+        {
             continue;
         }
-        let Some(buf) = ShmBuf::attach_readonly(shmid, size) else { continue };
+        let Some(buf) = ShmBuf::attach_readonly(shmid, size) else {
+            continue;
+        };
         let b = buf.as_slice();
         let header_size = be32(b, 0) as usize;
-        let (w, h, bpp, bpl, ncolors) = (be32(b, 4), be32(b, 5), be32(b, 11), be32(b, 12) as usize, be32(b, 19) as usize);
+        let (w, h, bpp, bpl, ncolors) = (
+            be32(b, 4),
+            be32(b, 5),
+            be32(b, 11),
+            be32(b, 12) as usize,
+            be32(b, 19) as usize,
+        );
         if be32(b, 1) != 7 || w != width || h != height || bpp != 32 || bpl < (w * 4) as usize {
             continue;
         }
@@ -239,13 +333,30 @@ fn find_xvfb_framebuffer(conn: &RustConnection, root: u32, width: u32, height: u
         let (sy, sh) = (height / 2, 16u32.min(height / 2));
         let mut ok = false;
         for _ in 0..10 {
-            let Ok(Ok(img)) = conn.get_image(ImageFormat::Z_PIXMAP, root, 0, sy as i16, width as u16, sh as u16, !0).map(|c| c.reply()) else { break };
+            let Ok(Ok(img)) = conn
+                .get_image(
+                    ImageFormat::Z_PIXMAP,
+                    root,
+                    0,
+                    sy as i16,
+                    width as u16,
+                    sh as u16,
+                    !0,
+                )
+                .map(|c| c.reply())
+            else {
+                break;
+            };
             let mut same = 0usize;
             let total = (width * sh) as usize;
             for r in 0..sh as usize {
                 let fb = &b[offset + (sy as usize + r) * bpl..][..width as usize * 4];
                 let im = &img.data[r * width as usize * 4..][..width as usize * 4];
-                same += fb.chunks_exact(4).zip(im.chunks_exact(4)).filter(|(a, c)| a[..3] == c[..3]).count();
+                same += fb
+                    .chunks_exact(4)
+                    .zip(im.chunks_exact(4))
+                    .filter(|(a, c)| a[..3] == c[..3])
+                    .count();
             }
             if same * 100 >= total * 98 {
                 ok = true;
@@ -259,4 +370,3 @@ fn find_xvfb_framebuffer(conn: &RustConnection, root: u32, width: u32, height: u
     }
     None
 }
-

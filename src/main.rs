@@ -41,29 +41,44 @@ fn parse_args() -> HashMap<String, String> {
 
 /// Selkies ranges look like "60-60"; take the upper bound.
 fn range_max(v: Option<&String>, default: f64) -> f64 {
-    v.and_then(|s| s.rsplit('-').next()?.trim().parse().ok()).unwrap_or(default)
+    v.and_then(|s| s.rsplit('-').next()?.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 fn truthy(v: Option<&String>, default: bool) -> bool {
-    v.map(|s| matches!(s.as_str(), "true" | "1" | "yes" | "on")).unwrap_or(default)
+    v.map(|s| matches!(s.as_str(), "true" | "1" | "yes" | "on"))
+        .unwrap_or(default)
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let a = parse_args();
-    let display = std::env::var("DISPLAY").ok().or_else(|| a.get("display").cloned());
+    let display = std::env::var("DISPLAY")
+        .ok()
+        .or_else(|| a.get("display").cloned());
     let addr = a.get("addr").cloned().unwrap_or_else(|| "0.0.0.0".into());
     let port: u16 = a.get("port").and_then(|p| p.parse().ok()).unwrap_or(6901);
-    let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+    let ncpu = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4) as u32;
     let vcfg = video::VideoConfig {
         display: display.clone(),
         fps: range_max(a.get("framerate"), 60.0) as u32,
-        preset: a.get("preset").cloned().unwrap_or_else(|| "ultrafast".into()),
+        preset: a
+            .get("preset")
+            .cloned()
+            .unwrap_or_else(|| "ultrafast".into()),
         // Four sliced threads: lower latency than one, and x264's slicing overhead grows
         // with thread count, so more threads only add CPU (measured on 2560x1600).
-        threads: a.get("encoder-threads").and_then(|v| v.parse().ok()).unwrap_or((ncpu / 4).clamp(1, 4)),
-        convert_threads: a.get("convert-threads").and_then(|v| v.parse().ok()).unwrap_or(4),
+        threads: a
+            .get("encoder-threads")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or((ncpu / 4).clamp(1, 4)),
+        convert_threads: a
+            .get("convert-threads")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4),
         crf: range_max(a.get("crf"), 24.0) as f32,
         // Selkies' --video-bitrate becomes the ceiling for adaptive bitrate.
         max_kbps: range_max(a.get("max-kbps").or(a.get("video-bitrate")), 30000.0) as u32,
@@ -75,8 +90,14 @@ async fn main() {
         adaptive_threads: truthy(a.get("adaptive-threads"), false),
         coalesce: std::time::Duration::from_micros(range_max(a.get("coalesce-us"), 0.0) as u64),
     };
-    let clip = a.get("enable-clipboard").map(|s| s.as_str()).unwrap_or("true");
-    let clip_mode = desktop::ClipboardMode { to_server: matches!(clip, "true" | "in"), to_client: matches!(clip, "true" | "out") };
+    let clip = a
+        .get("enable-clipboard")
+        .map(|s| s.as_str())
+        .unwrap_or("true");
+    let clip_mode = desktop::ClipboardMode {
+        to_server: matches!(clip, "true" | "in"),
+        to_client: matches!(clip, "true" | "out"),
+    };
     let audio_on = truthy(a.get("audio-enabled"), true);
 
     let hub = hub::Hub::new();
@@ -88,7 +109,14 @@ async fn main() {
     // --round-windows=title:radius,...: round specific windows (docks included) by title.
     let named: Vec<(String, u16)> = a
         .get("round-windows")
-        .map(|v| v.split(',').filter_map(|e| e.rsplit_once(':').and_then(|(n, r)| Some((n.to_string(), r.parse().ok()?)))).collect())
+        .map(|v| {
+            v.split(',')
+                .filter_map(|e| {
+                    e.rsplit_once(':')
+                        .and_then(|(n, r)| Some((n.to_string(), r.parse().ok()?)))
+                })
+                .collect()
+        })
         .unwrap_or_default();
     if radius > 0 || !named.is_empty() {
         if let Err(e) = corners::spawn(display.clone(), radius, named) {
@@ -108,32 +136,58 @@ async fn main() {
         Err(e) => log::error!("input init failed: {e}"),
     }
     if audio_on {
-        let dev = a.get("audio-device-name").cloned().unwrap_or_else(|| "output.monitor".into());
+        let dev = a
+            .get("audio-device-name")
+            .cloned()
+            .unwrap_or_else(|| "output.monitor".into());
         let br = range_max(a.get("audio-bitrate"), 128000.0) as i32;
         audio::spawn(dev, br, hub.clone());
     }
 
     // --file-transfers=upload,download (as in selkies); "none" turns both off.
-    let transfers = a.get("file-transfers").cloned().unwrap_or_else(|| "upload,download".into());
-    let root = a.get("files-root").cloned().or_else(|| std::env::var("HOME").ok()).unwrap_or_else(|| "/".into());
+    let transfers = a
+        .get("file-transfers")
+        .cloned()
+        .unwrap_or_else(|| "upload,download".into());
+    let root = a
+        .get("files-root")
+        .cloned()
+        .or_else(|| std::env::var("HOME").ok())
+        .unwrap_or_else(|| "/".into());
     let root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.into());
     let files = std::sync::Arc::new(files::Files {
         root,
         upload: transfers.split(',').any(|t| t.trim() == "upload"),
         download: transfers.split(',').any(|t| t.trim() == "download"),
-        default_dir: a.get("upload-dir").cloned().unwrap_or_else(|| "Downloads".into()).trim_matches('/').to_string(),
+        default_dir: a
+            .get("upload-dir")
+            .cloned()
+            .unwrap_or_else(|| "Downloads".into())
+            .trim_matches('/')
+            .to_string(),
         max_upload_bytes: (range_max(a.get("max-upload-mb"), 0.0) * 1048576.0) as u64,
     });
     log::info!("file transfer: {transfers} under {}", files.root.display());
     // --microphone-enabled (as in selkies): browser microphone -> a FIFO that a
     // PulseAudio module-pipe-source reads as the VM's microphone.
     let mic = truthy(a.get("microphone-enabled"), false).then(|| {
-        let fifo = a.get("microphone-fifo").cloned().unwrap_or_else(|| "/tmp/voxl-mic.fifo".into());
+        let fifo = a
+            .get("microphone-fifo")
+            .cloned()
+            .unwrap_or_else(|| "/tmp/voxl-mic.fifo".into());
         mic::spawn(fifo, hub.clone())
     });
-    let state = server::AppState { hub: hub.clone(), audio: audio_on, epoch: Instant::now(), files, mic };
+    let state = server::AppState {
+        hub: hub.clone(),
+        audio: audio_on,
+        epoch: Instant::now(),
+        files,
+        mic,
+    };
     let app = server::router(state);
-    let listener = tokio::net::TcpListener::bind((addr.as_str(), port)).await.expect("bind");
+    let listener = tokio::net::TcpListener::bind((addr.as_str(), port))
+        .await
+        .expect("bind");
     log::info!("listening on http://{addr}:{port}");
     use axum::serve::ListenerExt;
     let listener = listener.tap_io(|tcp| {
