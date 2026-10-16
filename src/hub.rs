@@ -112,6 +112,7 @@ pub struct Stats {
     pub flow_blocked: AtomicU64,
     pub paintovers: AtomicU64,
     pub keyframes: AtomicU64,
+    pub refines: AtomicU64,
     pub damage_wait_us: AtomicU64,
     pub send_lat_us: AtomicU64,
 }

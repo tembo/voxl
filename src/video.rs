@@ -209,6 +209,71 @@ fn wait_fds(fds: &[i32], timeout_ms: i32) {
     }
 }
 
+/// Regional sharpening. Blocks encoded while they changed carry motion-level quality;
+/// once a block has been still for a while it is re-encoded at paint-over quality,
+/// even while other parts of the screen keep moving (a playing video would otherwise
+/// keep the frame-level paint-over from ever running).
+struct Refiner {
+    epoch: Instant,
+    changed_ms: Vec<u32>,
+    pending: Vec<bool>,
+    last_refine: Instant,
+    cols: usize,
+}
+
+const REFINE_STILL_MS: u32 = 300;
+const REFINE_EVERY: Duration = Duration::from_millis(250);
+
+impl Refiner {
+    fn new(blocks: usize, cols: usize) -> Self {
+        Refiner { epoch: Instant::now(), changed_ms: vec![0; blocks], pending: vec![false; blocks], last_refine: Instant::now(), cols }
+    }
+    fn now(&self) -> u32 {
+        self.epoch.elapsed().as_millis() as u32
+    }
+    fn mark(&mut self, dirty: &[u8]) {
+        let now = self.now();
+        for (i, &d) in dirty.iter().enumerate() {
+            if d != 0 {
+                self.pending[i] = true;
+                self.changed_ms[i] = now;
+            }
+        }
+    }
+    fn mark_all(&mut self) {
+        let now = self.now();
+        self.pending.fill(true);
+        self.changed_ms.fill(now);
+    }
+    fn clear_all(&mut self) {
+        self.pending.fill(false);
+    }
+    /// Blocks due for sharpening (1 = refine) and the row band they span.
+    fn due(&mut self) -> Option<(Vec<u8>, Band)> {
+        if self.last_refine.elapsed() < REFINE_EVERY {
+            return None;
+        }
+        let now = self.now();
+        let mut map = vec![0u8; self.pending.len()];
+        let (mut r0, mut r1, mut any) = (usize::MAX, 0, false);
+        for i in 0..map.len() {
+            if self.pending[i] && now.saturating_sub(self.changed_ms[i]) >= REFINE_STILL_MS {
+                map[i] = 1;
+                self.pending[i] = false;
+                let row = i / self.cols;
+                r0 = r0.min(row);
+                r1 = r1.max(row + 1);
+                any = true;
+            }
+        }
+        if !any {
+            return None;
+        }
+        self.last_refine = Instant::now();
+        Some((map, Band { y0: (r0 * 16) as u32, y1: (r1 * 16) as u32 }))
+    }
+}
+
 fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mpsc::SyncSender<Job>, ret_rx: mpsc::Receiver<(usize, Box<I420>)>) -> Result<(), String> {
     let (w, h) = (cap.width as usize, cap.height as usize);
     let mut pool: Vec<Option<Box<I420>>> = vec![Some(Box::new(I420::new(w, h))), Some(Box::new(I420::new(w, h)))];
@@ -225,6 +290,7 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
     hub.target_kbps.store(rc.target as u32, Ordering::Relaxed);
     let mut had_clients = false;
     let mut full_next = true;
+    let mut refiner = Refiner::new(w.div_ceil(16) * h.div_ceil(16), w.div_ceil(16));
     let x_fd = cap.fd();
     let debug_marker = std::env::var("VOXL_DEBUG_MARKER").is_ok();
 
@@ -301,6 +367,10 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
             cap.take_mb_map();
             full_next = false;
         }
+        match &mb_dirty {
+            Some(m) => refiner.mark(m),
+            None => refiner.mark_all(),
+        }
         if cap.damaged {
             band = cap.take_damage()?;
             if let Some(b) = band {
@@ -335,10 +405,13 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
         hub.stats.convert_us.fetch_add((t2 - t1).as_micros() as u64, Ordering::Relaxed);
         hub.stats.captured.fetch_add(1, Ordering::Relaxed);
 
+        let mut refine = None;
         let paintover = if is_motion {
             last_motion = Instant::now();
             paintover_left = cfg.paintover_burst;
-            false
+            // Piggyback sharpening of blocks that have gone still on this frame.
+            refine = if want_key { None } else { refiner.due() };
+            refine.is_some()
         } else if paintover_due {
             paintover_left -= 1;
             hub.stats.paintovers.fetch_add(1, Ordering::Relaxed);
@@ -350,10 +423,33 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
             for c in &clients {
                 c.needs_keyframe.store(false, Ordering::Relaxed);
             }
+            // A keyframe is squeezed into the rate cap; sharpen all of it once still.
+            refiner.mark_all();
         }
+        let frame_paintover = paintover && refine.is_none();
+        if frame_paintover && paintover_left == 0 {
+            refiner.clear_all();
+        }
+        // A refinement frame encodes what moved plus what is due; everything else stays skipped.
+        let mb_map = if want_key || frame_paintover {
+            None
+        } else if let Some((rmap, rband)) = refine.take() {
+            band = Some(match band {
+                Some(b) => union(Some(b), rband),
+                None => rband,
+            });
+            let mut m = mb_dirty.take().unwrap_or_else(|| vec![1; rmap.len()]);
+            for (d, r) in m.iter_mut().zip(rmap) {
+                *d |= r;
+            }
+            hub.stats.refines.fetch_add(1, Ordering::Relaxed);
+            Some(Arc::new(m))
+        } else {
+            mb_dirty.take().map(Arc::new)
+        };
         last_capture = t0;
         next_idx = 1 - idx;
-        if job_tx.send(Job { buf, idx, force_idr: want_key, paintover, paintover_final: paintover && paintover_left == 0, mb_dirty: if want_key || paintover { None } else { mb_dirty.take().map(Arc::new) }, band, captured_at: origin, marker_ms }).is_err() {
+        if job_tx.send(Job { buf, idx, force_idr: want_key, paintover, paintover_final: frame_paintover && paintover_left == 0, mb_dirty: mb_map, band, captured_at: origin, marker_ms }).is_err() {
             return Err("encoder gone".into());
         }
     }
@@ -444,11 +540,19 @@ fn stripe_worker(i: usize, mut s: Stripe, rx: mpsc::Receiver<StripeJob>, done: m
     let mut gov = ThreadGovernor { threads: 1, ewma_ms: 0.0, heavy: 0, light_since: None, budget_ms: 1000.0 / s.cfg.fps as f64 };
     while let Ok(job) = rx.recv() {
         let buf = unsafe { &*job.buf.0 };
-        let moved = s.applied_kbps == 0 || (job.cap as f64 - s.applied_kbps as f64).abs() > s.applied_kbps as f64 * 0.04;
-        if job.crf != s.applied_crf || moved {
-            s.enc.set_rate(job.crf, job.cap);
-            s.applied_crf = job.crf;
-            s.applied_kbps = job.cap;
+        if job.force_idr {
+            // A keyframe is what a new viewer sees first; don't starve it to the
+            // steady-state frame budget (up to ~8 frames' worth at 4x the cap).
+            let boost = job.cap.saturating_mul(4).max(16_000);
+            s.enc.set_rate_buf(job.crf, boost, boost / s.cfg.fps.max(1) * 8);
+            s.applied_kbps = 0;
+        } else {
+            let moved = s.applied_kbps == 0 || (job.cap as f64 - s.applied_kbps as f64).abs() > s.applied_kbps as f64 * 0.04;
+            if job.crf != s.applied_crf || moved {
+                s.enc.set_rate(job.crf, job.cap);
+                s.applied_crf = job.crf;
+                s.applied_kbps = job.cap;
+            }
         }
         let suv = buf.stride_uv();
         let planes = Planes { y: &buf.y[s.y * buf.width..], u: &buf.u[(s.y / 2) * suv..], v: &buf.v[(s.y / 2) * suv..], stride_y: buf.width, stride_uv: suv };

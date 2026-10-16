@@ -63,6 +63,7 @@ async fn stats(State(s): State<AppState>) -> Response {
         "flow_blocked": st.flow_blocked.load(Ordering::Relaxed),
         "paintovers": st.paintovers.load(Ordering::Relaxed),
         "keyframes": st.keyframes.load(Ordering::Relaxed),
+        "refines": st.refines.load(Ordering::Relaxed),
         "target_kbps": s.hub.target_kbps.load(Ordering::Relaxed),
         "damage_events": crate::capture::DAMAGE_EVENTS.load(Ordering::Relaxed),
         "damage_wait_us_total": st.damage_wait_us.load(Ordering::Relaxed),
