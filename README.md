@@ -30,6 +30,34 @@ FPS counts unique frames displayed (read from a pixel marker drawn into the cont
 and latency runs from the moment the content was drawn to the decoded frame. See
 [`bench/`](bench/README.md) to reproduce.
 
+### Against KasmVNC
+
+Same VM and workloads, against KasmVNC 1.4.0 with the settings of Tembo's `kasmvnc`
+backend (60 FPS cap, JPEG/WebP quality 8–9, video mode). KasmVNC is its own X server,
+so it runs the apps on its own display; both are measured without a compositor, with
+a native client that reads the marker like the one above.
+
+| Test | KasmVNC: FPS (worst second), latency p50/p99, Mbps | voxl |
+|---|---|---|
+| Chromium scroll, LAN | 51.7 (39.5), 99/135 ms, 32.7 | **60.1 (59.7), 72/81 ms, 3.6** |
+| Scroll, 10 Mbps / 40 ms RTT | 8.3 (7.4), 229/249 ms | **60.0 (59.1), 98/107 ms** |
+| Scroll, 5 Mbps / 60 ms RTT | 4.9 (3.6), 306/415 ms | **60.1 (59.5), 129/154 ms** |
+| 1080p animation, LAN | 56.7 (51.6), 51/82 ms, 2.0 | **60.1 (59.9), 12/16 ms**, 7.3 |
+| Animation, 10 Mbps / 40 ms RTT | 52.9 (49.2), 76/115 ms | **60.1 (59.5), 46/71 ms** |
+| Animation, 5 Mbps / 60 ms RTT | 34.1 (26.4), 104/156 ms | **60.0 (58.8), 66/92 ms** |
+| Full-screen animation, LAN | 34.2 (32.5), 83/102 ms, 1.9 | **59.8 (54.0), 18/25 ms**, 5.1 |
+
+KasmVNC spots the animation's scrolling and sends it as copies of pixels the client
+already has, which is why it needs less bandwidth there. Its own web client shows the
+same picture (42.7 FPS for the LAN scroll, 8 FPS at 10 Mbps). With picom running, as in
+the Computer preview, KasmVNC falls to 25–36 FPS on LAN, while voxl holds 60 (51 for
+the full-screen animation).
+
+| Server CPU, X server + streamer (cores) | idle | 1080p animation | scroll | full screen |
+|---|---|---|---|---|
+| KasmVNC | 0.00 | 1.97 | 2.07 | 1.82 (at 34 FPS) |
+| voxl | 0.00 | **1.39** | **1.38** | 1.83 (at 60 FPS) |
+
 ## How it works
 
 - **Capture:** voxl attaches Xvfb's `-shmem` framebuffer directly (zero copy, no X

@@ -1,6 +1,6 @@
 # Benchmarks
 
-Tools used to compare voxl with selkies. Everything runs on a separate Xvfb display
+Tools used to compare voxl with selkies and KasmVNC. Everything runs on a separate Xvfb display
 (`:2` by default, `BENCH_DISPLAY` to change it), so a live desktop isn't disturbed.
 
 ## Setup
@@ -11,7 +11,13 @@ cc -O2 -o rootlat rootlat.c -lX11             # marker latency on the root windo
 env/xvfb.sh & sleep 1; env/openbox.sh &       # 2560x1600 @ 144 DPI, like production
 env/voxl.sh                                   # voxl on :6902 (VOXL_BIN to override)
 SELKIES_BIN=/path/to/selkies env/selkies.sh & # selkies on :6912
+KASMVNC=/path/to/kasmvncserver XKB_DIR=/path/to/xkb env/kasmvnc.sh &  # KasmVNC (own X server) :5, port 6922
+sleep 1; BENCH_DISPLAY=:5 env/openbox.sh &
 ```
+
+`KASMVNC` is the monorepo's `nix/packages/kasmvnc` build; `XKB_DIR` is
+`xkeyboard_config`'s `share/X11/xkb`. `env/kasmvnc.sh` passes the flags Tembo's
+`kasmvnc.yaml` expands to.
 
 `*.mjs` need Playwright (`PLAYWRIGHT_NODE_MODULES`) and Chromium (`CHROMIUM`).
 `py.sh` runs Python with PyAV and websockets through nix-shell.
@@ -20,10 +26,18 @@ SELKIES_BIN=/path/to/selkies env/selkies.sh & # selkies on :6912
 
 - `nclient.py voxl|selkies host:port secs [x y]`: native client (FFmpeg decode)
   that reads the marker at (x, y). Reports unique FPS, latency and Mbps.
-- `suite.sh`: every config (selkies with and without picom, voxl) x workload
+- `kclient.py host:port secs [x y]`: native KasmVNC client. Speaks RFB over its
+  WebSocket the way KasmVNC's web client does (same pixel format and encodings,
+  including JPEG, WebP and CopyRect, continuous updates and fences), keeps a full
+  framebuffer, decodes images in parallel and reads the marker after each update.
+  Same JSON as `nclient.py`.
+- `suite.sh`: every config (`CONFIGS`: selkies with and without picom, voxl and
+  KasmVNC with and without picom) x workload
   (Chromium scroll, 1080p and full-screen animation) x link (LAN, 10 Mbps/40 ms,
   5 Mbps/60 ms) via `shaper.py`, a userspace bottleneck proxy.
 - `ab.sh <workload> <reps>`: interleaved voxl vs selkies runs.
+- `cpusuite.sh`: server CPU (X server + streamer) per workload with one client connected.
+- `scroll.html`: the long page `scrolltarget.mjs` smooth-scrolls, with a marker drawn every frame.
 - `cpu.sh <pid> <secs>`, `rate.sh <secs>` (voxl `/stats`), `srcfps.py` (true
   source frame rate from the Xvfb framebuffer), `measure.mjs` (in-browser unique FPS).
 - `inputtest.mjs`, `keytest.sh`: input and clipboard checks through the web client.
