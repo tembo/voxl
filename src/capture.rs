@@ -1,6 +1,6 @@
 //! X11 screen capture: MIT-SHM GetImage into a persistent BGRX frame, driven by XDamage.
 
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::damage::{self, ConnectionExt as _};
 use x11rb::protocol::shm::{self, ConnectionExt as _};
@@ -129,8 +129,8 @@ impl Capturer {
         Ok(Capturer { conn, root, width, height, stride, seg, buf, offset, direct, _damage: damage, damaged: true, damaged_at: None, acc: None, mb_dirty: vec![0; (width as usize).div_ceil(16) * (height as usize).div_ceil(16)], mb_cols: (width as usize).div_ceil(16) })
     }
 
-    pub fn fd(&self) -> i32 {
-        self.conn.stream().as_raw_fd()
+    pub fn fd(&self) -> BorrowedFd<'_> {
+        self.conn.stream().as_fd()
     }
 
     /// Drain queued X events; returns true if damage was reported.

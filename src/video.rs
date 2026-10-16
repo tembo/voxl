@@ -5,6 +5,10 @@ use crate::convert::{convert_band, I420};
 use crate::encoder::{Encoder, EncoderConfig, Planes};
 use crate::hub::{Hub, Inflight, Out};
 use bytes::Bytes;
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+use nix::sys::time::TimeSpec;
+use nix::time::{clock_gettime, ClockId};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -213,11 +217,9 @@ impl RateCtl {
     }
 }
 
-fn wait_fds(fds: &[i32], timeout_ms: i32) {
-    let mut p: Vec<libc::pollfd> = fds.iter().map(|&fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 }).collect();
-    unsafe {
-        libc::poll(p.as_mut_ptr(), p.len() as _, timeout_ms);
-    }
+fn wait_fds(fds: &[BorrowedFd], timeout_ms: i32) {
+    let mut p: Vec<PollFd> = fds.iter().map(|&fd| PollFd::new(fd, PollFlags::POLLIN)).collect();
+    let _ = poll(&mut p, PollTimeout::try_from(timeout_ms).unwrap_or(PollTimeout::NONE));
 }
 
 /// Regional sharpening. Blocks encoded while they changed carry motion-level quality;
@@ -319,7 +321,6 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
     let mut had_clients = false;
     let mut full_next = true;
     let mut refiner = Refiner::new(w.div_ceil(16) * h.div_ceil(16), w.div_ceil(16));
-    let x_fd = cap.fd();
     let debug_marker = std::env::var("VOXL_DEBUG_MARKER").is_ok();
 
     loop {
@@ -335,7 +336,7 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
                 hub.target_kbps.store(rc.target as u32, Ordering::Relaxed);
             }
             had_clients = false;
-            wait_fds(&[x_fd, hub.wake_r], 500);
+            wait_fds(&[cap.fd(), hub.wake_r.as_fd()], 500);
             continue;
         }
         rc.update(&hub, &clients);
@@ -351,13 +352,13 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
         let paintover_due = paintover_left > 0 && last_motion.elapsed() >= Duration::from_millis(cfg.paintover_delay_ms);
         if !cap.damaged && !want_key && !paintover_due {
             let timeout = if paintover_left == 0 { 100 } else { cfg.paintover_delay_ms.saturating_sub(last_motion.elapsed().as_millis() as u64) as i32 + 1 };
-            wait_fds(&[x_fd, hub.wake_r], timeout);
+            wait_fds(&[cap.fd(), hub.wake_r.as_fd()], timeout);
             continue;
         }
         let since = last_capture.elapsed();
         if since < min_interval {
             let rem = min_interval - since;
-            wait_fds(&[hub.wake_r], (rem.as_micros() as i32 + 999) / 1000);
+            wait_fds(&[hub.wake_r.as_fd()], (rem.as_micros() as i32 + 999) / 1000);
             continue;
         }
         // Apps present a frame as a burst of puts; give the burst a moment to land so
@@ -372,7 +373,7 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
         }
         if !want_key && !flow_ok(&hub, interval_ms) {
             hub.stats.flow_blocked.fetch_add(1, Ordering::Relaxed);
-            wait_fds(&[x_fd, hub.wake_r], 4);
+            wait_fds(&[cap.fd(), hub.wake_r.as_fd()], 4);
             continue;
         }
         // Need a free buffer (the encoder may still hold the other).
@@ -615,9 +616,8 @@ fn stripe_worker(i: usize, mut s: Stripe, rx: mpsc::Receiver<StripeJob>, done: m
         let te = Instant::now();
         let r = s.enc.encode(&planes, job.ts, job.force_idr, None, info.as_deref_mut(), &mut out);
         if debug {
-            let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
-            let cpu_now = ts.tv_sec as i64 * 1_000_000 + ts.tv_nsec as i64 / 1000;
+            let ts = clock_gettime(ClockId::CLOCK_THREAD_CPUTIME_ID).unwrap_or(TimeSpec::new(0, 0));
+            let cpu_now = ts.tv_sec() as i64 * 1_000_000 + ts.tv_nsec() as i64 / 1000;
             log::info!("stripe y{} encode {} us wall, thread cpu total {} us, {} bytes", s.y, te.elapsed().as_micros(), cpu_now, out.len());
         }
         if s.max_threads > 1 {

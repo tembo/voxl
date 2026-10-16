@@ -11,9 +11,14 @@
 
 use crate::hub::{Hub, Out};
 use bytes::Bytes;
+use nix::errno::Errno;
+use nix::fcntl::{fcntl, open, FcntlArg, OFlag};
+use nix::sys::stat::Mode;
+use nix::unistd::write;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::ffi::{c_int, c_void, CString};
+use std::os::fd::OwnedFd;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -50,17 +55,14 @@ struct Queue {
 /// Opens the FIFO without blocking (fails until PulseAudio has it open for reading)
 /// and shrinks its buffer, so audio that piles up while nobody records is at most
 /// ~40 ms stale when someone starts.
-fn open_fifo(path: &CString) -> Option<c_int> {
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC) };
-    if fd < 0 {
-        return None;
-    }
-    unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, 4096) };
+fn open_fifo(path: &CString) -> Option<OwnedFd> {
+    let fd = open(path.as_c_str(), OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC, Mode::empty()).ok()?;
+    let _ = fcntl(&fd, FcntlArg::F_SETPIPE_SZ(4096));
     Some(fd)
 }
 
 fn writer(path: CString, queue: Arc<Mutex<Queue>>) {
-    let mut fd: Option<c_int> = None;
+    let mut fd: Option<OwnedFd> = None;
     let mut warned = false;
     let mut frame = vec![0i16; FRAME];
     let mut next = Instant::now();
@@ -103,12 +105,11 @@ fn writer(path: CString, queue: Arc<Mutex<Queue>>) {
                 None => {}
             }
         }
-        if let Some(f) = fd {
-            let r = unsafe { libc::write(f, frame.as_ptr() as *const c_void, FRAME * 2) };
+        if let Some(f) = &fd {
+            let bytes = unsafe { std::slice::from_raw_parts(frame.as_ptr() as *const u8, FRAME * 2) };
             // EAGAIN: nobody is reading right now, so the frame isn't needed.
-            if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EAGAIN) {
-                unsafe { libc::close(f) };
-                fd = None;
+            if matches!(write(f, bytes), Err(e) if e != Errno::EAGAIN) {
+                fd = None; // dropping the OwnedFd closes it
             }
         }
     }
