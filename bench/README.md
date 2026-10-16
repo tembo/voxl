@@ -27,3 +27,18 @@ SELKIES_BIN=/path/to/selkies env/selkies.sh & # selkies on :6912
 - `cpu.sh <pid> <secs>`, `rate.sh <secs>` (voxl `/stats`), `srcfps.py` (true
   source frame rate from the Xvfb framebuffer), `measure.mjs` (in-browser unique FPS).
 - `inputtest.mjs`, `keytest.sh`: input and clipboard checks through the web client.
+
+## Feature tests
+
+`tests/` drives the web client with Playwright against a running voxl
+(`VOXL_PORT`, default 6903) on a test display (`BENCH_DISPLAY`, default `:3`).
+For smooth scrolling, start that display with the patched server:
+`XVFB=$(nix-build -E 'with import <nixpkgs> {}; callPackage ../xvfb.nix {}')/bin/Xvfb BENCH_DISPLAY=:3 env/xvfb.sh`.
+
+- `smoothtest.mjs <display> <port>`: precise scroll steps reach Chromium pixel by pixel.
+- `featuretest.mjs`: wheel/trackpad scrolling, tap, two-finger scroll, long press,
+  touch toolbar (uses `target.html`; `SCROLL_PAGE` for the scroll page).
+- `cliptest.mjs`, `cliptext.mjs`: PNG and text clipboard in both directions
+  (`TEST_PNG`, needs `xclip`).
+- `fstest.mjs`, `fsiframe.mjs`: fullscreen toolbar and Keyboard Lock, top level and embedded.
+- `resizetest.mjs`: re-fit in a resizable sidebar iframe and at several tab sizes.
