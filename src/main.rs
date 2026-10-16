@@ -9,6 +9,7 @@ mod encoder;
 mod files;
 mod hub;
 mod input;
+mod mic;
 mod server;
 mod video;
 
@@ -124,7 +125,13 @@ async fn main() {
         max_upload_bytes: (range_max(a.get("max-upload-mb"), 0.0) * 1048576.0) as u64,
     });
     log::info!("file transfer: {transfers} under {}", files.root.display());
-    let state = server::AppState { hub: hub.clone(), audio: audio_on, epoch: Instant::now(), files };
+    // --microphone-enabled (as in selkies): browser microphone -> a FIFO that a
+    // PulseAudio module-pipe-source reads as the VM's microphone.
+    let mic = truthy(a.get("microphone-enabled"), false).then(|| {
+        let fifo = a.get("microphone-fifo").cloned().unwrap_or_else(|| "/tmp/voxl-mic.fifo".into());
+        mic::spawn(fifo, hub.clone())
+    });
+    let state = server::AppState { hub: hub.clone(), audio: audio_on, epoch: Instant::now(), files, mic };
     let app = server::router(state);
     let listener = tokio::net::TcpListener::bind((addr.as_str(), port)).await.expect("bind");
     log::info!("listening on http://{addr}:{port}");

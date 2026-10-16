@@ -77,15 +77,17 @@
         buildStripes(stripeLayout);
         layout();
         files.setup(m.files);
+        mic.setup(!!m.mic);
         statusEl.style.display = 'none';
         break;
       case 'status':
-        if (m.s === 'closed') { connected = false; statusEl.style.display = ''; statusEl.textContent = 'Reconnecting…'; }
+        if (m.s === 'closed') { connected = false; mic.stop(); statusEl.style.display = ''; statusEl.textContent = 'Reconnecting…'; }
         if (m.s === 'open') updateVisibility(true);
         break;
       case 'cursor': cursorMsg = m.buf; applyCursor(); break;
       case 'clip': onRemoteClipboard(m.d); break;
       case 'clipImage': onRemoteImage(m.buf); break;
+      case 'mic': if (!m.on) mic.stop(); break;
       case 'stats':
         window.fps = Math.round(m.fps);
         window.voxlStats = m;
@@ -415,7 +417,8 @@
   if (matchMedia('(pointer: coarse)').matches) { tools.classList.add('touch'); showTools(0); }
   else document.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse' && e.clientY < 48 && e.clientX > window.innerWidth - 160) showTools(2500); });
   const filesBtn = document.getElementById('files-btn');
-  for (const b of [kbBtn, fsBtn, filesBtn]) b.addEventListener('pointerdown', (e) => e.stopPropagation());
+  const micBtn = document.getElementById('mic-btn');
+  for (const b of [kbBtn, fsBtn, filesBtn, micBtn]) b.addEventListener('pointerdown', (e) => e.stopPropagation());
   kbBtn.addEventListener('click', () => {
     if (document.activeElement === kbd && kbd.dataset.soft) { kbd.blur(); delete kbd.dataset.soft; }
     else { kbd.dataset.soft = '1'; kbd.focus({ preventScroll: true }); }
@@ -629,6 +632,89 @@
       upload(picked, skipped);
     });
     return { setup };
+  })();
+
+  // ---- microphone: capture -> Opus (WebCodecs) -> server, which feeds the VM's mic ----
+  const mic = (() => {
+    let available = false, on = false, stream = null, ctx = null, enc = null, ts = 0;
+    const sendBin = (type, bytes) => {
+      const msg = new Uint8Array(bytes.byteLength + 1);
+      msg[0] = type; msg.set(bytes, 1);
+      worker.postMessage({ t: 'sendBin', d: msg.buffer }, [msg.buffer]);
+    };
+    function show() {
+      micBtn.classList.toggle('on', on);
+      micBtn.setAttribute('aria-pressed', String(on));
+      if (!micBtn.classList.contains('err')) micBtn.title = on ? 'Turn microphone off' : 'Turn microphone on';
+      tools.classList.toggle('mic-on', on);
+    }
+    function setup(enabled) {
+      available = enabled && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+      tools.classList.toggle('mic', available);
+      if (!available) stop();
+    }
+    async function opusEncoder() {
+      if (typeof AudioEncoder === 'undefined') return null;
+      const base = { codec: 'opus', sampleRate: 48000, numberOfChannels: 1, bitrate: 32000 };
+      for (const cfg of [{ ...base, opus: { frameDuration: 20000, application: 'voip' } }, base]) {
+        try {
+          if (!(await AudioEncoder.isConfigSupported(cfg)).supported) continue;
+          const e = new AudioEncoder({
+            output: (chunk) => { const b = new Uint8Array(chunk.byteLength); chunk.copyTo(b); sendBin(0x12, b); },
+            error: (err) => console.warn('[voxl] microphone encoder', err),
+          });
+          e.configure(cfg);
+          return e;
+        } catch {}
+      }
+      return null;
+    }
+    async function start() {
+      micBtn.classList.remove('err');
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+        ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+        await ctx.audioWorklet.addModule('mic.js');
+        enc = await opusEncoder();
+        const node = new AudioWorkletNode(ctx, 'mic-capture', { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1, channelCountMode: 'explicit' });
+        node.port.onmessage = (e) => {
+          if (!on) return;
+          const f = e.data;
+          if (enc && enc.state === 'configured') {
+            const data = new AudioData({ format: 'f32-planar', sampleRate: 48000, numberOfFrames: f.length, numberOfChannels: 1, timestamp: ts, data: f });
+            ts += 20000;
+            enc.encode(data);
+            data.close();
+          } else {
+            // No WebCodecs audio encoder (older Safari/Firefox): send 16-bit PCM.
+            const pcm = new Int16Array(f.length);
+            for (let i = 0; i < f.length; i++) pcm[i] = Math.max(-1, Math.min(1, f[i])) * 32767;
+            sendBin(0x13, new Uint8Array(pcm.buffer));
+          }
+        };
+        ctx.createMediaStreamSource(stream).connect(node);
+        if (ctx.state !== 'running') await ctx.resume();
+        on = true;
+        send('mi,1');
+      } catch (err) {
+        console.warn('[voxl] microphone unavailable', err);
+        stop();
+        micBtn.classList.add('err');
+        micBtn.title = err && err.name === 'NotAllowedError' ? 'Microphone access was blocked' : 'No microphone available';
+      }
+      show();
+    }
+    function stop() {
+      if (on) send('mi,0');
+      on = false;
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      if (ctx) ctx.close().catch(() => {});
+      if (enc && enc.state !== 'closed') { try { enc.close(); } catch {} }
+      stream = ctx = enc = null;
+      show();
+    }
+    micBtn.addEventListener('click', () => (on ? stop() : start()));
+    return { setup, stop };
   })();
 
   // ---- audio ----
