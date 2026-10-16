@@ -12,18 +12,28 @@ use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
+/// Clipboard contents exchanged with clients.
+pub enum ClipContent {
+    Text(String),
+    /// PNG bytes.
+    Image(Vec<u8>),
+}
+
+/// Largest image moved through the clipboard (X requests are capped near 16 MiB).
+const MAX_IMAGE: usize = 15 << 20;
+
 /// Sets the remote CLIPBOARD and returns once the X server has registered us as owner,
 /// so a paste shortcut injected right afterwards sees the new contents.
 #[derive(Clone)]
 pub struct ClipboardHandle {
-    tx: mpsc::Sender<(String, mpsc::SyncSender<()>)>,
+    tx: mpsc::Sender<(ClipContent, mpsc::SyncSender<()>)>,
     wake_w: i32,
 }
 
 impl ClipboardHandle {
-    pub fn set_blocking(&self, text: String) {
+    pub fn set_blocking(&self, content: ClipContent) {
         let (done_tx, done_rx) = mpsc::sync_channel(1);
-        if self.tx.send((text, done_tx)).is_ok() {
+        if self.tx.send((content, done_tx)).is_ok() {
             unsafe { libc::write(self.wake_w, [1u8].as_ptr() as *const _, 1) };
             let _ = done_rx.recv_timeout(std::time::Duration::from_millis(300));
         }
@@ -43,6 +53,7 @@ struct Atoms {
     text_plain: u32,
     incr: u32,
     prop: u32,
+    png: u32,
 }
 
 fn atom(c: &RustConnection, name: &str) -> Result<u32, String> {
@@ -64,6 +75,7 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
         text_plain: atom(&conn, "text/plain;charset=utf-8")?,
         incr: atom(&conn, "INCR")?,
         prop: atom(&conn, "VOXL_CLIP")?,
+        png: atom(&conn, "image/png")?,
     };
     conn.xfixes_select_cursor_input(root, xfixes::CursorNotifyMask::DISPLAY_CURSOR).map_err(|e| e.to_string())?;
     // Clients draw the cursor locally. Xvfb's software cursor is painted into the
@@ -74,24 +86,29 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
         conn.xfixes_select_selection_input(root, atoms.clipboard, xfixes::SelectionEventMask::SET_SELECTION_OWNER).map_err(|e| e.to_string())?;
     }
     conn.flush().map_err(|e| e.to_string())?;
-    let (tx, rx) = mpsc::channel::<(String, mpsc::SyncSender<()>)>();
+    let (tx, rx) = mpsc::channel::<(ClipContent, mpsc::SyncSender<()>)>();
     let mut fds = [0i32; 2];
     unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
     let (wake_r, wake_w) = (fds[0], fds[1]);
     std::thread::Builder::new()
         .name("desktop".into())
         .spawn(move || {
-            let mut owned: Option<Vec<u8>> = None;
-            let mut incr: Option<Vec<u8>> = None;
+            let mut owned: Option<ClipContent> = None;
+            // INCR transfer in progress: (target being fetched, bytes so far).
+            let mut incr: Option<(u32, Vec<u8>)> = None;
+            let mut last_image: Option<u64> = None;
             send_cursor(&conn, &hub);
             let fd = conn.stream().as_raw_fd();
             loop {
                 let mut drain = [0u8; 64];
                 unsafe { while libc::read(wake_r, drain.as_mut_ptr() as *mut _, 64) > 0 {} }
-                while let Ok((text, done)) = rx.try_recv() {
+                while let Ok((content, done)) = rx.try_recv() {
                     if mode.to_server {
-                        *hub.last_clipboard.lock() = Some(text.clone());
-                        owned = Some(text.into_bytes());
+                        match &content {
+                            ClipContent::Text(t) => *hub.last_clipboard.lock() = Some(t.clone()),
+                            ClipContent::Image(png) => last_image = Some(hash(png)),
+                        }
+                        owned = Some(content);
                         let _ = conn.set_selection_owner(win, atoms.clipboard, x11rb::CURRENT_TIME);
                         // Round trip: ownership is in effect once this returns.
                         let _ = conn.get_selection_owner(atoms.clipboard).map(|c| c.reply());
@@ -114,7 +131,8 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
                     Event::XfixesCursorNotify(_) => send_cursor(&conn, &hub),
                     Event::XfixesSelectionNotify(e) => {
                         if e.owner != win && e.owner != x11rb::NONE {
-                            let _ = conn.convert_selection(win, atoms.clipboard, atoms.utf8, atoms.prop, x11rb::CURRENT_TIME);
+                            // Ask what the new owner offers, then fetch text or an image.
+                            let _ = conn.convert_selection(win, atoms.clipboard, atoms.targets, atoms.prop, x11rb::CURRENT_TIME);
                             let _ = conn.flush();
                         }
                     }
@@ -123,10 +141,25 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
                             continue;
                         }
                         if let Ok(Ok(r)) = conn.get_property(true, win, atoms.prop, AtomEnum::ANY, 0, u32::MAX / 4).map(|c| c.reply()) {
-                            if r.type_ == atoms.incr {
-                                incr = Some(Vec::new());
+                            if e.target == atoms.targets {
+                                let offered: Vec<u32> = r.value32().map(|v| v.collect()).unwrap_or_default();
+                                // Text wins when both are offered (rich text copies carry both).
+                                let want = if offered.contains(&atoms.utf8) {
+                                    Some(atoms.utf8)
+                                } else if offered.contains(&atoms.png) {
+                                    Some(atoms.png)
+                                } else if offered.contains(&u32::from(AtomEnum::STRING)) {
+                                    Some(u32::from(AtomEnum::STRING))
+                                } else {
+                                    None
+                                };
+                                if let Some(t) = want {
+                                    let _ = conn.convert_selection(win, atoms.clipboard, t, atoms.prop, x11rb::CURRENT_TIME);
+                                }
+                            } else if r.type_ == atoms.incr {
+                                incr = Some((e.target, Vec::new()));
                             } else {
-                                publish(&hub, r.value);
+                                publish(&hub, &atoms, e.target, r.value, &mut last_image);
                             }
                             let _ = conn.flush();
                         }
@@ -134,9 +167,10 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
                     Event::PropertyNotify(e) if e.atom == atoms.prop && e.state == xproto::Property::NEW_VALUE && incr.is_some() => {
                         if let Ok(Ok(r)) = conn.get_property(true, win, atoms.prop, AtomEnum::ANY, 0, u32::MAX / 4).map(|c| c.reply()) {
                             if r.value.is_empty() {
-                                publish(&hub, incr.take().unwrap());
+                                let (target, data) = incr.take().unwrap();
+                                publish(&hub, &atoms, target, data, &mut last_image);
                             } else {
-                                incr.as_mut().unwrap().extend_from_slice(&r.value);
+                                incr.as_mut().unwrap().1.extend_from_slice(&r.value);
                             }
                             let _ = conn.flush();
                         }
@@ -146,13 +180,23 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
                         if prop == x11rb::NONE {
                             prop = e.target;
                         }
+                        let text_targets = [atoms.utf8, atoms.text, atoms.text_plain, u32::from(AtomEnum::STRING)];
                         let ok = match &owned {
-                            Some(data) if e.selection == atoms.clipboard => {
+                            Some(ClipContent::Text(text)) if e.selection == atoms.clipboard => {
                                 if e.target == atoms.targets {
                                     let list = [atoms.targets, atoms.utf8, u32::from(AtomEnum::STRING), atoms.text, atoms.text_plain];
                                     conn.change_property32(PropMode::REPLACE, e.requestor, prop, AtomEnum::ATOM, &list).is_ok()
-                                } else if e.target == atoms.utf8 || e.target == atoms.text || e.target == atoms.text_plain || e.target == u32::from(AtomEnum::STRING) {
-                                    conn.change_property8(PropMode::REPLACE, e.requestor, prop, e.target, data).is_ok()
+                                } else if text_targets.contains(&e.target) {
+                                    conn.change_property8(PropMode::REPLACE, e.requestor, prop, e.target, text.as_bytes()).is_ok()
+                                } else {
+                                    false
+                                }
+                            }
+                            Some(ClipContent::Image(png)) if e.selection == atoms.clipboard => {
+                                if e.target == atoms.targets {
+                                    conn.change_property32(PropMode::REPLACE, e.requestor, prop, AtomEnum::ATOM, &[atoms.targets, atoms.png]).is_ok()
+                                } else if e.target == atoms.png {
+                                    conn.change_property8(PropMode::REPLACE, e.requestor, prop, atoms.png, png).is_ok()
                                 } else {
                                     false
                                 }
@@ -180,7 +224,30 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
     Ok(ClipboardHandle { tx, wake_w })
 }
 
-fn publish(hub: &Hub, data: Vec<u8>) {
+fn hash(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut h);
+    h.finish()
+}
+
+fn publish(hub: &Hub, atoms: &Atoms, target: u32, data: Vec<u8>, last_image: &mut Option<u64>) {
+    if target == atoms.png {
+        if data.is_empty() || data.len() > MAX_IMAGE {
+            return;
+        }
+        let h = hash(&data);
+        if *last_image == Some(h) {
+            return;
+        }
+        *last_image = Some(h);
+        let mut msg = Vec::with_capacity(data.len() + 1);
+        msg.push(0x04);
+        msg.extend_from_slice(&data);
+        let b = Bytes::from(msg);
+        hub.broadcast(|| Out::Bin(b.clone()));
+        return;
+    }
     let Ok(text) = String::from_utf8(data) else { return };
     if text.is_empty() {
         return;

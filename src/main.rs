@@ -95,7 +95,8 @@ async fn main() {
             None
         }
     };
-    match input::spawn(display.clone(), clipboard) {
+    let px_per_notch = range_max(a.get("scroll-px-per-notch"), 180.0);
+    match input::spawn(display.clone(), clipboard, px_per_notch) {
         Ok(tx) => *hub.input.lock() = Some(tx),
         Err(e) => log::error!("input init failed: {e}"),
     }

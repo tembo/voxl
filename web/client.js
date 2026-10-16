@@ -84,6 +84,7 @@
         break;
       case 'cursor': cursorMsg = m.buf; applyCursor(); break;
       case 'clip': onRemoteClipboard(m.d); break;
+      case 'clipImage': onRemoteImage(m.buf); break;
       case 'stats':
         window.fps = Math.round(m.fps);
         window.voxlStats = m;
@@ -168,29 +169,98 @@
     const s = `m,${x},${y}`;
     if (s !== lastMove) { lastMove = s; send(s); }
   }
-  surface.addEventListener('pointermove', move);
+  surface.addEventListener('pointermove', (e) => { if (e.pointerType === 'touch') touch.move(e); else move(e); });
   surface.addEventListener('pointerdown', (e) => {
     e.preventDefault();
-    kbd.focus({ preventScroll: true });
     startAudio();
     flushClipboardOut();
+    if (e.pointerType === 'touch') { touch.down(e); return; }
+    kbd.focus({ preventScroll: true });
     move(e);
     try { surface.setPointerCapture(e.pointerId); } catch {}
     send(`b,${BTN[e.button] || 1},1`);
   });
-  surface.addEventListener('pointerup', (e) => { e.preventDefault(); move(e); send(`b,${BTN[e.button] || 1},0`); });
-  surface.addEventListener('pointercancel', () => send('r'));
+  surface.addEventListener('pointerup', (e) => {
+    e.preventDefault();
+    if (e.pointerType === 'touch') { touch.up(e); return; }
+    move(e); send(`b,${BTN[e.button] || 1},0`);
+  });
+  surface.addEventListener('pointercancel', (e) => { if (e.pointerType === 'touch') touch.cancel(e); else send('r'); });
   surface.addEventListener('contextmenu', (e) => e.preventDefault());
-  let accX = 0, accY = 0;
+
+  // Scroll is sent in desktop pixels, batched per frame; the server turns it into
+  // smooth (pixel-precise) scrolling, or wheel clicks on X servers that can't.
+  let scrollX = 0, scrollY = 0, scrollQueued = false;
+  function queueScroll(dx, dy) {
+    scrollX += dx; scrollY += dy;
+    if (scrollQueued) return;
+    scrollQueued = true;
+    requestAnimationFrame(() => {
+      scrollQueued = false;
+      if (Math.abs(scrollX) < 0.5 && Math.abs(scrollY) < 0.5) return;
+      send(`sp,${scrollX.toFixed(1)},${scrollY.toFixed(1)}`);
+      scrollX = 0; scrollY = 0;
+    });
+  }
   surface.addEventListener('wheel', (e) => {
     e.preventDefault();
     move(e);
-    const k = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1;
-    accX += e.deltaX * k; accY += e.deltaY * k;
-    const STEP = 40;
-    const tx = Math.trunc(accX / STEP), ty = Math.trunc(accY / STEP);
-    if (tx || ty) { accX -= tx * STEP; accY -= ty * STEP; send(`s,${tx},${ty}`); }
+    const k = (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1) * dw / surface.getBoundingClientRect().width;
+    queueScroll(e.deltaX * k, e.deltaY * k);
   }, { passive: false });
+
+  // ---- touch: tap = click, drag = left-drag, long press = right click,
+  // two fingers = scroll (content follows the fingers) ----
+  const touch = (() => {
+    const pts = new Map();
+    let mode = null, start = null, timer = null, lastMid = null;
+    const SLOP = 10, LONG_PRESS = 550;
+    const mid = () => { let x = 0, y = 0; for (const p of pts.values()) { x += p.x; y += p.y; } return [x / pts.size, y / pts.size]; };
+    const moveTo = (x, y) => { const [dx, dy] = toDesk({ clientX: x, clientY: y }); lastMove = ''; send(`m,${dx},${dy}`); };
+    function down(e) {
+      try { surface.setPointerCapture(e.pointerId); } catch {}
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 1) {
+        mode = 'pending'; start = { x: e.clientX, y: e.clientY };
+        timer = setTimeout(() => {
+          if (mode !== 'pending') return;
+          moveTo(start.x, start.y); send('b,3,1'); send('b,3,0'); mode = 'done';
+          if (navigator.vibrate) navigator.vibrate(10);
+        }, LONG_PRESS);
+      } else if (pts.size === 2) {
+        clearTimeout(timer);
+        if (mode === 'drag') send('b,1,0');
+        mode = 'scroll'; lastMid = mid();
+      }
+    }
+    function move(e) {
+      const p = pts.get(e.pointerId);
+      if (!p) return;
+      p.x = e.clientX; p.y = e.clientY;
+      if (mode === 'pending' && Math.hypot(p.x - start.x, p.y - start.y) > SLOP) {
+        clearTimeout(timer); mode = 'drag'; moveTo(start.x, start.y); send('b,1,1');
+      }
+      if (mode === 'drag') moveTo(p.x, p.y);
+      else if (mode === 'scroll' && pts.size >= 2) {
+        const m = mid(), k = dw / surface.getBoundingClientRect().width;
+        queueScroll((lastMid[0] - m[0]) * k, (lastMid[1] - m[1]) * k);
+        lastMid = m;
+      }
+    }
+    function up(e) {
+      if (!pts.delete(e.pointerId)) return;
+      if (mode === 'pending') { clearTimeout(timer); moveTo(start.x, start.y); send('b,1,1'); send('b,1,0'); mode = 'done'; }
+      else if (mode === 'drag') { send('b,1,0'); mode = 'done'; }
+      else if (mode === 'scroll' && pts.size < 2) mode = 'done';
+      if (pts.size === 0) mode = null;
+    }
+    function cancel(e) {
+      clearTimeout(timer);
+      if (mode === 'drag') send('b,1,0');
+      pts.delete(e.pointerId); if (pts.size === 0) mode = null;
+    }
+    return { down, move, up, cancel };
+  })();
 
   // ---- keyboard ----
   const NAMED = {
@@ -265,10 +335,26 @@
   }
   kbd.addEventListener('paste', (e) => {
     e.preventDefault();
-    const text = e.clipboardData && e.clipboardData.getData('text/plain');
-    if (text) { lastClip = text; send('c,' + text); }
-    flushPaste();
+    const dt = e.clipboardData;
+    const text = dt && dt.getData('text/plain');
+    if (text) { lastClip = text; send('c,' + text); flushPaste(); return; }
+    const item = dt && [...dt.items].find((i) => i.kind === 'file' && i.type.startsWith('image/'));
+    if (!item) { flushPaste(); return; }
+    // Hold the paste shortcut until the image is on the remote clipboard.
+    if (pendingPaste) { clearTimeout(pendingPaste.timer); pendingPaste.timer = setTimeout(flushPaste, 3000); }
+    toPng(item.getAsFile()).then((png) => {
+      const msg = new Uint8Array(png.byteLength + 1);
+      msg[0] = 0x11; msg.set(new Uint8Array(png), 1);
+      worker.postMessage({ t: 'sendBin', d: msg.buffer }, [msg.buffer]);
+    }).catch((err) => console.warn('[voxl] image paste failed', err)).finally(flushPaste);
   });
+  async function toPng(file) {
+    if (file.type === 'image/png') return file.arrayBuffer();
+    const bmp = await createImageBitmap(file);
+    const c = new OffscreenCanvas(bmp.width, bmp.height);
+    c.getContext('2d').drawImage(bmp, 0, 0);
+    return (await c.convertToBlob({ type: 'image/png' })).arrayBuffer();
+  }
   // Text that arrives without usable keydowns (IME, dead-key composition, mobile
   // keyboards, insertText) is typed as individual keysyms.
   function typeText(text) {
@@ -280,8 +366,14 @@
   }
   kbd.addEventListener('compositionend', (e) => { if (e.data) typeText(e.data); kbd.value = ''; });
   kbd.addEventListener('input', (e) => {
-    if (!e.isComposing && e.inputType === 'insertText' && e.data) typeText(e.data);
-    if (!e.isComposing) kbd.value = '';
+    if (!e.isComposing) {
+      // On-screen keyboards often deliver text and edits only as input events.
+      if (e.inputType === 'insertText' && e.data) typeText(e.data);
+      else if (e.inputType === 'deleteContentBackward') { send('k,65288,1'); send('k,65288,0'); }
+      else if (e.inputType === 'deleteContentForward') { send('k,65535,1'); send('k,65535,0'); }
+      else if (e.inputType === 'insertLineBreak' || e.inputType === 'insertParagraph') { send('k,65293,1'); send('k,65293,0'); }
+      kbd.value = '';
+    }
   });
   window.addEventListener('blur', releaseAll);
   surface.addEventListener('focus', () => kbd.focus({ preventScroll: true }));
@@ -295,12 +387,51 @@
     clipOut = text;
     flushClipboardOut();
   }
+  function onRemoteImage(buf) {
+    clipOut = new Blob([new Uint8Array(buf, 1)], { type: 'image/png' });
+    flushClipboardOut();
+  }
   function flushClipboardOut() {
     if (clipOut === null || !navigator.clipboard || (inIframe && !document.hasFocus())) return;
-    const t = clipOut;
-    navigator.clipboard.writeText(t).then(() => { if (clipOut === t) clipOut = null; }, () => {});
+    const c = clipOut;
+    const done = () => { if (clipOut === c) clipOut = null; };
+    if (typeof c === 'string') navigator.clipboard.writeText(c).then(done, () => {});
+    else if (typeof ClipboardItem !== 'undefined') navigator.clipboard.write([new ClipboardItem({ 'image/png': c })]).then(done, () => {});
   }
   window.addEventListener('focus', flushClipboardOut);
+
+  // ---- toolbar: on-screen keyboard (touch) and fullscreen ----
+  const tools = document.getElementById('tools');
+  const kbBtn = document.getElementById('kb-btn');
+  const fsBtn = document.getElementById('fs-btn');
+  let toolsTimer = null;
+  function showTools(ms) {
+    tools.classList.add('show');
+    clearTimeout(toolsTimer);
+    if (ms) toolsTimer = setTimeout(() => tools.classList.remove('show'), ms);
+  }
+  // Touch devices keep the toolbar visible; mice reveal it near the top edge.
+  if (matchMedia('(pointer: coarse)').matches) { tools.classList.add('touch'); showTools(0); }
+  else document.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse' && e.clientY < 48 && e.clientX > window.innerWidth - 160) showTools(2500); });
+  for (const b of [kbBtn, fsBtn]) b.addEventListener('pointerdown', (e) => e.stopPropagation());
+  kbBtn.addEventListener('click', () => {
+    if (document.activeElement === kbd && kbd.dataset.soft) { kbd.blur(); delete kbd.dataset.soft; }
+    else { kbd.dataset.soft = '1'; kbd.focus({ preventScroll: true }); }
+  });
+  if (!document.fullscreenEnabled) fsBtn.style.display = 'none';
+  fsBtn.addEventListener('click', () => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+  });
+  // In fullscreen, capture browser shortcuts (Cmd/Ctrl+W, T, L, ...) for the desktop.
+  // Keyboard Lock is Chromium-only; hold Esc to leave fullscreen.
+  document.addEventListener('fullscreenchange', () => {
+    const kl = navigator.keyboard;
+    if (document.fullscreenElement) { if (kl && kl.lock) kl.lock().catch(() => {}); }
+    else if (kl && kl.unlock) kl.unlock();
+    fsBtn.classList.toggle('on', !!document.fullscreenElement);
+    layout();
+  });
 
   // ---- audio ----
   let audioStarted = false, ac = null;

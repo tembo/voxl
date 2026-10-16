@@ -55,10 +55,20 @@ and latency runs from the moment the content was drawn to the decoded frame. See
 - **Rounded corners without a compositor:** `--round-corners` gives top-level
   windows a rounded X SHAPE when they map or resize, so the X server shows the
   desktop through the corners. Unlike picom on Xvfb, nothing is repainted per frame.
-- **Input, clipboard, audio:** XTEST injection by keysym, with spare keycodes that
-  browsers don't map remapped for characters missing from the keymap. CLIPBOARD
-  sync works both ways, including INCR transfers and paste ordering. PulseAudio
-  monitor audio is sent as Opus.
+- **Input:** XTEST injection by keysym, with spare keycodes that browsers don't map
+  remapped for characters missing from the keymap. Scrolling is pixel-precise on an
+  X server built with [`patches/xorg-server-xtest-scroll.patch`](patches/) (see
+  `xvfb.nix`), which gives the XTEST pointer smooth-scroll axes; elsewhere it falls
+  back to wheel clicks.
+- **Touch:** tap to click, drag, long press for right click, two-finger scroll, and
+  an on-screen keyboard button on touch devices.
+- **Fullscreen:** a toolbar button (top-right on hover) enters fullscreen and takes
+  a Keyboard Lock so browser shortcuts reach the desktop. Browsers only allow the
+  lock from the top-level page, so an embedding page should call
+  `navigator.keyboard.lock()` when the voxl iframe becomes the fullscreen element.
+- **Clipboard:** CLIPBOARD sync both ways for text and PNG images, including INCR
+  transfers and paste ordering.
+- **Audio:** PulseAudio monitor audio is sent as Opus.
 
 ## Build
 
@@ -67,6 +77,12 @@ Needs Rust, pkg-config, clang (bindgen), x264, libyuv, libopus and libpulse.
 ```sh
 nix-shell          # or provide the libraries yourself
 cargo build --release
+```
+
+Smooth scrolling needs the patched Xvfb:
+
+```sh
+nix-build -E 'with import <nixpkgs> {}; callPackage ./xvfb.nix {}'
 ```
 
 ## Run
@@ -95,6 +111,7 @@ adds ~15 ms).
 | `--round-corners` | `0` (off) | corner radius in pixels for top-level windows (Tembo uses `12`) |
 | `--adaptive-threads` | `false` | encode on one thread, fanning out only under sustained heavy motion |
 | `--stripes` | `1` | encode the screen as N independent horizontal streams (experimental) |
+| `--scroll-px-per-notch` | `180` | desktop pixels one wheel notch scrolls (calibrates smooth scrolling) |
 | `--convert-threads`, `--coalesce-us` | `4`, `0` | tuning |
 
 Other selkies flags are accepted and ignored. `GET /stats` returns server counters,
@@ -108,9 +125,10 @@ Debug environment variables: `VOXL_NO_DIRECT_FB`, `VOXL_NO_MBINFO`, `VOXL_X264_I
 One WebSocket at `/ws`. Binary server messages start with a type byte: `0x01` video
 (16-byte header with flags, frame id, server pipeline time, stripe index/count, parts
 in frame and stripe y, followed by Annex-B H.264), `0x02` Opus audio, `0x03` cursor
-image (RGBA). Text messages are JSON (`hello`, `clip`, `ping`). Client messages are
+image (RGBA), `0x04` clipboard image (PNG). Text messages are JSON (`hello`, `clip`, `ping`). Client messages are
 short comma-separated commands: `a,<frame>` ack, `m,x,y` move, `b,btn,0|1`,
-`s,dx,dy` scroll, `k,keysym,0|1`, `c,<text>` clipboard, `v,0|1` video on/off,
+`s,dx,dy` wheel clicks, `sp,dx,dy` scroll in desktop pixels, `k,keysym,0|1`,
+`c,<text>` clipboard text, binary `0x11`+PNG clipboard image, `v,0|1` video on/off,
 `au,0|1` audio, `kf` keyframe request, `po,<t>` pong.
 
 ## Limitations

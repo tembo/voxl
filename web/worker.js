@@ -40,6 +40,7 @@ function connect() {
       case 0x01: onVideo(e.data, b); break;
       case 0x02: onAudio(b); break;
       case 0x03: post({ t: 'cursor', buf: e.data }, [e.data]); break;
+      case 0x04: post({ t: 'clipImage', buf: e.data }, [e.data]); break;
     }
   };
 }
@@ -195,6 +196,8 @@ self.onmessage = (e) => {
     connect();
   } else if (m.t === 'send') {
     send(m.d);
+  } else if (m.t === 'sendBin') {
+    if (ws && ws.readyState === 1) ws.send(m.d);
   } else if (m.t === 'video') {
     if (wantVideo !== m.on) { wantVideo = m.on; if (m.on) resetDecoder(); send('v,' + (m.on ? 1 : 0)); }
   } else if (m.t === 'audioPort') {

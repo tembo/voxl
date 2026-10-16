@@ -122,6 +122,12 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     while let Some(Ok(msg)) = stream.next().await {
         match msg {
             Message::Text(t) => handle_text(&s, &client, t.as_str(), &mut rtts),
+            // 0x11: clipboard image (PNG) pasted on the client.
+            Message::Binary(b) if b.first() == Some(&0x11) && b.len() > 1 => {
+                if let Some(tx) = s.hub.input.lock().as_ref() {
+                    let _ = tx.send(InputEvent::Clipboard(crate::desktop::ClipContent::Image(b[1..].to_vec())));
+                }
+            }
             Message::Close(_) => break,
             _ => {}
         }
@@ -169,13 +175,18 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
                 input(InputEvent::Scroll { dx, dy });
             }
         }
+        "sp" => {
+            if let (Some(dx), Some(dy)) = (num::<f64>(&mut it), num::<f64>(&mut it)) {
+                input(InputEvent::ScrollPx { dx, dy });
+            }
+        }
         "k" => {
             if let (Some(keysym), Some(d)) = (num::<u32>(&mut it), num::<u8>(&mut it)) {
                 input(InputEvent::Key { keysym, down: d == 1 });
             }
         }
         "r" => input(InputEvent::ReleaseAll),
-        "c" => input(InputEvent::Clipboard(rest.to_string())),
+        "c" => input(InputEvent::Clipboard(crate::desktop::ClipContent::Text(rest.to_string()))),
         "v" => {
             let on = rest == "1";
             c.video.store(on, Ordering::Relaxed);
