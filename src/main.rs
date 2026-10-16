@@ -6,6 +6,7 @@ mod convert;
 mod corners;
 mod desktop;
 mod encoder;
+mod files;
 mod hub;
 mod input;
 mod server;
@@ -111,7 +112,19 @@ async fn main() {
         audio::spawn(dev, br, hub.clone());
     }
 
-    let state = server::AppState { hub: hub.clone(), audio: audio_on, epoch: Instant::now() };
+    // --file-transfers=upload,download (as in selkies); "none" turns both off.
+    let transfers = a.get("file-transfers").cloned().unwrap_or_else(|| "upload,download".into());
+    let root = a.get("files-root").cloned().or_else(|| std::env::var("HOME").ok()).unwrap_or_else(|| "/".into());
+    let root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.into());
+    let files = std::sync::Arc::new(files::Files {
+        root,
+        upload: transfers.split(',').any(|t| t.trim() == "upload"),
+        download: transfers.split(',').any(|t| t.trim() == "download"),
+        default_dir: a.get("upload-dir").cloned().unwrap_or_else(|| "Downloads".into()).trim_matches('/').to_string(),
+        max_upload_bytes: (range_max(a.get("max-upload-mb"), 0.0) * 1048576.0) as u64,
+    });
+    log::info!("file transfer: {transfers} under {}", files.root.display());
+    let state = server::AppState { hub: hub.clone(), audio: audio_on, epoch: Instant::now(), files };
     let app = server::router(state);
     let listener = tokio::net::TcpListener::bind((addr.as_str(), port)).await.expect("bind");
     log::info!("listening on http://{addr}:{port}");

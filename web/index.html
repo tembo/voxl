@@ -6,38 +6,142 @@
 <meta name="application-name" content="Tembo Computer">
 <meta name="apple-mobile-web-app-title" content="Tembo Computer">
 <link rel="icon" type="image/x-icon" href="favicon.ico">
+<link rel="preload" href="inter.woff2" as="font" type="font/woff2" crossorigin>
 <title>Tembo Computer</title>
 <style>
+  /* Inter (latin subset of the variable font), as used by the Tembo app. */
+  @font-face { font-family: 'Inter'; src: url(inter.woff2) format('woff2'); font-weight: 100 900; font-style: normal; font-display: swap; }
+  /* Dark theme tokens from the Tembo UI package (packages/ui/src/styles/globals.css). */
+  :root {
+    --surface-raised: #212121; --surface-secondary: #383838;
+    --text-title: #ffffffeb; --text-strong: #ffffffcc; --text-default: #ffffffb8; --text-weak: #ffffff80; --text-muted: #ffffff3d;
+    --icon-title: #e0e0e0; --icon-strong: #b8b8b8; --icon-default: #9e9e9e;
+    --state-hover: #ffffff14; --state-pressed: #ffffff29;
+    --fill-tertiary: #ffffff14; --fill-tertiary-hover: #ffffff1f; --fill-tertiary-pressed: #ffffff33;
+    --fill-primary: #5c5c5c; --fill-primary-hover: #858585; --fill-primary-pressed: #9e9e9e;
+    --border-default: #ffffff0f; --accent: #118af3; --accent-subtle: #0083f514;
+    --positive: #25b134; --negative: #f15555;
+    --focus-ring: 0 0 0 1px #009eff, 0 0 0 2px color-mix(in srgb, #009eff 24%, transparent);
+    --shadow-white-border: 0 0 4px 0 rgba(0,0,0,.04), 0 0 2px 0 rgba(0,0,0,.06), 0 0 1px 0 rgba(0,0,0,.1);
+    --shadow-lg: 0 10px 15px -3px rgba(0,0,0,.1), 0 4px 6px -4px rgba(0,0,0,.1);
+    --font: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  }
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; overscroll-behavior: none; }
-  body { display: flex; align-items: center; justify-content: center; }
+  body { display: flex; align-items: center; justify-content: center; -webkit-font-smoothing: antialiased; }
   #surface { position: relative; outline: none; touch-action: none; }
   #screen { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
   .stripe { position: absolute; left: 0; width: 100%; display: block; pointer-events: none; object-fit: fill; }
   /* On-screen so mobile browsers will open the soft keyboard for it. */
   #kbd { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0.01; border: 0; padding: 0; resize: none; pointer-events: none; font-size: 16px; }
-  #tools { position: fixed; top: 8px; right: 8px; display: flex; gap: 6px; z-index: 3; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  svg.i { width: 16px; height: 16px; padding: 2px; box-sizing: content-box; flex: none; color: var(--icon-default); }
+  button { font: inherit; color: inherit; }
+  button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+  /* Toolbar: ghost icon buttons in a frosted bar, like the app's tooltip surface. */
+  #tools { position: fixed; top: 8px; right: 8px; display: flex; gap: 2px; padding: 2px; z-index: 3; opacity: 0; transition: opacity .1s; pointer-events: none;
+    background: color-mix(in srgb, var(--surface-raised) 90%, transparent); border: 1.5px solid var(--border-default); border-radius: 12px;
+    box-shadow: 0 20px 25px -5px rgba(0,0,0,.1), 0 8px 10px -6px rgba(0,0,0,.1); backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px); }
   #tools.show { opacity: 1; pointer-events: auto; }
   #tools.touch { top: auto; bottom: 12px; }
-  #tools button { width: 34px; height: 34px; border-radius: 8px; border: 1px solid rgba(255,255,255,.18); background: rgba(17,17,20,.72);
-    color: #e5e7eb; display: grid; place-items: center; padding: 0; cursor: pointer; backdrop-filter: blur(6px); }
-  #tools.touch button { width: 44px; height: 44px; }
-  #tools button:hover { background: rgba(40,40,46,.9); }
-  #tools svg { width: 18px; height: 18px; }
-  #kb-btn { display: none !important; }
-  #tools.touch #kb-btn { display: grid !important; }
-  #status { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: #9aa4b2;
-    font: 500 14px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif; pointer-events: none; }
+  .ib { width: 28px; height: 28px; border: 0; padding: 0; border-radius: 8px; background: transparent; display: inline-grid; place-items: center; cursor: pointer;
+    transition: transform .15s ease-out, background-color .15s ease-out; }
+  .ib:hover { background: var(--state-hover); }
+  .ib:active { background: var(--state-pressed); transform: scale(.97); }
+  .ib:hover svg.i, .ib.on svg.i { color: var(--icon-title); }
+  .ib.sm { width: 24px; height: 24px; }
+  #tools.touch .ib { width: 40px; height: 40px; }
+  #tools.touch .ib svg.i { width: 20px; height: 20px; }
+  #kb-btn, #files-btn { display: none !important; }
+  #tools.touch #kb-btn, #tools.files #files-btn { display: inline-grid !important; }
+
+  #status { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-weak);
+    font: 520 14px/20px var(--font); letter-spacing: -.1px; pointer-events: none; }
   #stats { position: fixed; top: 6px; left: 6px; padding: 6px 8px; background: rgba(0,0,0,.7); color: #b8f7c4;
     font: 12px/1.35 ui-monospace, Menlo, monospace; white-space: pre; border-radius: 4px; pointer-events: none; display: none; z-index: 2; }
+
+  /* Files panel: the app's dialog frame (secondary surface, 16px radius, 4px inset) around a raised body. */
+  #files { position: fixed; top: 8px; right: 8px; bottom: 8px; width: min(360px, calc(100vw - 16px)); z-index: 4; display: none; flex-direction: column; box-sizing: border-box;
+    padding: 4px; background: var(--surface-secondary); border: 1px solid var(--border-default); border-radius: 16px; box-shadow: var(--shadow-lg);
+    color: var(--text-default); font: 440 13px/16px var(--font); letter-spacing: -.2px; }
+  #files.open { display: flex; animation: enter .15s cubic-bezier(.23,1,.32,1); }
+  @keyframes enter { from { opacity: 0; transform: translateY(-4px) scale(.98); } }
+  @media (prefers-reduced-motion: reduce) { #files.open { animation: none; } }
+  #files header { display: flex; align-items: center; gap: 4px; height: 32px; margin-top: -2px; padding: 6px 2px 6px 8px; box-sizing: border-box; }
+  #files header h2 { flex: 1; margin: 0; font-size: 13px; line-height: 1; font-weight: 520; color: var(--text-default); }
+  .btn { height: 24px; border: 0; border-radius: 8px; padding: 4px; display: inline-flex; align-items: center; gap: 2px; cursor: pointer;
+    font-weight: 520; font-size: 13px; line-height: 16px; letter-spacing: -.2px; white-space: nowrap; transition: background-color .1s; }
+  .btn span { padding: 0 3px 0 1px; }
+  .btn.primary { color: var(--text-title); background: var(--fill-primary);
+    box-shadow: 0 0 0 1px rgba(255,255,255,.08) inset, 0 -1px 2px 0 rgba(255,255,255,.12) inset, 0 1px 2px 0 rgba(255,255,255,.16) inset; }
+  .btn.primary svg.i { color: #fff; }
+  .btn.primary:hover { background: var(--fill-primary-hover); }
+  .btn.primary:active { background: var(--fill-primary-pressed); }
+  .body { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--surface-raised); border-radius: 12px; box-shadow: var(--shadow-white-border); overflow: hidden; }
+  #files-crumbs { display: flex; align-items: center; flex-wrap: nowrap; gap: 0; padding: 6px 8px 2px; min-height: 28px; overflow: hidden; }
+  #files-crumbs a { height: 28px; display: inline-flex; align-items: center; padding: 0 8px; border-radius: 8px; color: var(--text-weak); font-weight: 520;
+    cursor: pointer; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex-shrink: 1; }
+  #files-crumbs a:hover { background: var(--state-hover); }
+  #files-crumbs a:last-child { color: var(--text-default); flex-shrink: 0; max-width: 60%; }
+  #files-crumbs svg.i { color: var(--text-muted); padding: 0; margin: 0 -2px; }
+  #files-list { flex: 1; overflow-y: auto; padding: 2px 6px 6px; scrollbar-width: thin; scrollbar-color: #ffffff29 transparent; }
+  .f-row { display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 8px 0 4px; border-radius: 6px; cursor: pointer; }
+  .f-row:hover { background: var(--state-hover); }
+  .f-row:active { background: var(--state-pressed); }
+  .f-row .f-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-default); font-weight: 520; }
+  .f-row:hover .f-name { color: var(--text-title); }
+  .f-row .f-meta { color: var(--text-muted); font-weight: 440; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .f-row:hover svg.i { color: var(--icon-strong); }
+  .f-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 48px 16px; }
+  .f-empty svg.i { width: 20px; height: 20px; color: var(--icon-default); margin-bottom: 10px; }
+  .f-empty b { color: var(--text-strong); font-weight: 600; }
+  .f-empty span { color: var(--text-weak); font-weight: 520; margin-top: 6px; max-width: 240px; }
+  #files-uploads:empty { display: none; }
+  #files-uploads { border-top: 1px solid var(--border-default); padding: 6px 6px; max-height: 40%; overflow-y: auto; }
+  .f-up { padding: 6px 8px; border-radius: 6px; }
+  .f-up-top { display: flex; gap: 8px; align-items: center; }
+  .f-up .f-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-default); font-weight: 520; }
+  .f-up .f-meta { color: var(--text-weak); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .f-up.err .f-meta { color: var(--negative); }
+  .f-up.done .f-meta { color: var(--positive); }
+  .f-bar { height: 4px; margin-top: 6px; background: var(--accent-subtle); border-radius: 999px; overflow: hidden; }
+  .f-bar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 999px; transition: width .15s; }
+  .f-up.done .f-bar, .f-up.err .f-bar { display: none; }
+  #files footer { padding: 8px 8px 4px; color: var(--text-weak); }
+
+  /* Drop target: a dialog-style card over a scrim. */
+  #drop { position: fixed; inset: 0; z-index: 5; display: none; align-items: center; justify-content: center; background: #00000033; pointer-events: none; }
+  #drop.show { display: flex; }
+  #drop .frame { padding: 4px; background: var(--surface-secondary); border: 1px solid var(--border-default); border-radius: 16px; box-shadow: var(--shadow-lg); }
+  #drop .inner { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 24px 32px; background: var(--surface-raised); border-radius: 12px;
+    box-shadow: var(--shadow-white-border); outline: 1.5px dashed #ffffff33; outline-offset: -8px; font: 520 13px/16px var(--font); letter-spacing: -.2px; color: var(--text-weak); }
+  #drop .inner svg.i { width: 20px; height: 20px; color: var(--icon-title); margin-bottom: 4px; }
+  #drop .inner b { color: var(--text-strong); font-weight: 600; font-size: 14px; line-height: 20px; letter-spacing: -.1px; }
 </style>
 </head>
 <body>
 <div id="surface" tabindex="0"><canvas id="screen"></canvas></div>
 <textarea id="kbd" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" tabindex="-1" aria-hidden="true"></textarea>
 <div id="tools">
-  <button id="kb-btn" type="button" title="Keyboard" aria-label="Show keyboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M9 10h.01M12 10h.01M15 10h.01M18 10h.01M7 14h10"/></svg></button>
-  <button id="fs-btn" type="button" title="Fullscreen (captures browser shortcuts)" aria-label="Toggle fullscreen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+  <button id="kb-btn" class="ib" type="button" title="Keyboard" aria-label="Show keyboard"><svg class="i" viewBox="0 0 24 24" fill="none"><path d="M6 16.125C6.48325 16.125 6.875 16.5168 6.875 17C6.875 17.4832 6.48325 17.875 6 17.875C5.51675 17.875 5.125 17.4832 5.125 17C5.125 16.5168 5.51675 16.125 6 16.125ZM18 16.125C18.4832 16.125 18.875 16.5168 18.875 17C18.875 17.4832 18.4832 17.875 18 17.875C17.5168 17.875 17.125 17.4832 17.125 17C17.125 16.5168 17.5168 16.125 18 16.125ZM6 12.125C6.48325 12.125 6.875 12.5168 6.875 13C6.875 13.4832 6.48325 13.875 6 13.875C5.51675 13.875 5.125 13.4832 5.125 13C5.125 12.5168 5.51675 12.125 6 12.125ZM10 12.125C10.4832 12.125 10.875 12.5168 10.875 13C10.875 13.4832 10.4832 13.875 10 13.875C9.51675 13.875 9.125 13.4832 9.125 13C9.125 12.5168 9.51675 12.125 10 12.125ZM14 12.125C14.4832 12.125 14.875 12.5168 14.875 13C14.875 13.4832 14.4832 13.875 14 13.875C13.5168 13.875 13.125 13.4832 13.125 13C13.125 12.5168 13.5168 12.125 14 12.125ZM18 12.125C18.4832 12.125 18.875 12.5168 18.875 13C18.875 13.4832 18.4832 13.875 18 13.875C17.5168 13.875 17.125 13.4832 17.125 13C17.125 12.5168 17.5168 12.125 18 12.125Z" fill="currentColor" stroke="currentColor" stroke-width="0.75" stroke-linecap="square"/><path d="M10 17H14M14 5L12 3L10 5M4 9H20C21.1046 9 22 9.89543 22 11V19C22 20.1046 21.1046 21 20 21H4C2.89543 21 2 20.1046 2 19V11C2 9.89543 2.89543 9 4 9Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  <button id="files-btn" class="ib" type="button" title="Files" aria-label="Files"><svg class="i" viewBox="0 0 24 24" fill="none"><path d="M3 6V17C3 18.1046 3.89543 19 5 19H19C20.1046 19 21 18.1046 21 17V9C21 7.89543 20.1046 7 19 7H12.5352C12.2008 7 11.8886 6.8329 11.7031 6.5547L10.5937 4.8906C10.2228 4.3342 9.59834 4 8.92963 4H5C3.89543 4 3 4.89543 3 6Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  <button id="fs-btn" class="ib" type="button" title="Fullscreen (captures browser shortcuts)" aria-label="Toggle fullscreen"><svg class="i" viewBox="0 0 24 24" fill="none"><path d="M7 5H5C3.89543 5 3 5.89543 3 7V9M17 5H19C20.1046 5 21 5.89543 21 7V9M21 15V17C21 18.1046 20.1046 19 19 19H17M7 19H5C3.89543 19 3 18.1046 3 17V15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
 </div>
+<div id="files" role="dialog" aria-label="Files">
+  <header>
+    <h2>Files</h2>
+    <button id="files-upload" class="btn primary" type="button" title="Upload files to this folder"><svg class="i" viewBox="0 0 24 24" fill="none"><path d="M12 5V20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 10L12 4L18 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Upload</span></button>
+    <button id="files-refresh" class="ib sm" type="button" title="Refresh" aria-label="Refresh"><svg class="i" viewBox="0 0 24 24" fill="none"><path d="M5.41072 7.5C7.27034 5.30135 9.14453 4 12.0282 4C16.4465 4 20.0282 7.58172 20.0282 12C20.0282 16.4183 16.4465 20 12.0282 20C8.54493 20 5.58163 17.7738 4.4834 14.6667" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 4V7.25C5 7.66421 5.33579 8 5.75 8H9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <button id="files-close" class="ib sm" type="button" title="Close" aria-label="Close"><svg class="i" viewBox="0 0 24 24" fill="none"><path d="M8 8L16 16M16 8L8 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+  </header>
+  <div class="body">
+    <nav id="files-crumbs" aria-label="Folder"></nav>
+    <div id="files-list"></div>
+    <div id="files-uploads"></div>
+  </div>
+  <footer></footer>
+  <input id="files-input" type="file" multiple hidden>
+</div>
+<div id="drop"><div class="frame"><div class="inner"><svg class="i" viewBox="0 0 24 24" fill="none"><path d="M17 19H19C20.1046 19 21 18.1046 21 17V9C21 7.89543 20.1046 7 19 7H12.5352C12.2008 7 11.8886 6.8329 11.7031 6.5547L10.5937 4.8906C10.2228 4.3342 9.59834 4 8.92963 4H5C3.89543 4 3 4.89543 3 6V17C3 18.1046 3.89543 19 5 19H7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 19V13.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.5 15.5L12 13L14.5 15.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><b>Drop to upload</b><span>to <span id="drop-dir"></span></span></div></div></div>
 <div id="status">Connecting…</div>
 <div id="stats"></div>
 <script src="client.js"></script>
