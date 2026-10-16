@@ -40,6 +40,7 @@ rustPlatform.buildRustPackage {
 
   meta = {
     description = "Low-latency X11 desktop streaming server (H.264 over WebSocket) for the Computer preview";
+    license = lib.licenses.mit;
     mainProgram = "voxl";
     platforms = ["x86_64-linux"];
   };
