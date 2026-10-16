@@ -157,3 +157,19 @@ outside it are refused.
 
 X11 only, single display, fixed resolution, H.264 4:2:0, desktop audio out only (no
 microphone), single files only (no folder upload or download).
+
+## License
+
+voxl is released under the [MIT License](LICENSE), except for these bundled parts,
+which keep their own licenses:
+
+- `web/inter.woff2`: a subset of [Inter](https://github.com/rsms/inter), under the
+  SIL Open Font License 1.1 (`web/inter-LICENSE.txt`).
+- The icons in `web/index.html` and `web/client.js`, from the Central Icons set
+  licensed to Tembo. They are not covered by the MIT License, and that license does
+  not allow sharing them outside Tembo's products.
+- `patches/xorg-server-xtest-scroll.patch` modifies the X.Org server and is
+  distributed under its MIT/X11-style license.
+
+voxl links against x264 (GPL-2.0-or-later), so binaries built from it are subject to
+the GPL.
