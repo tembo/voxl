@@ -109,6 +109,7 @@ adds ~15 ms).
 | `--enable-clipboard` | `true` | `true`, `in`, `out` or `false` |
 | `--audio-enabled`, `--audio-device-name`, `--audio-bitrate` | `true`, `output.monitor`, `128000` | desktop audio |
 | `--round-corners` | `0` (off) | corner radius in pixels for top-level windows (Tembo uses `12`) |
+| `--round-windows` | none | `title:radius,...` rounds windows with that title, docks included |
 | `--adaptive-threads` | `false` | encode on one thread, fanning out only under sustained heavy motion |
 | `--stripes` | `1` | encode the screen as N independent horizontal streams (experimental) |
 | `--scroll-px-per-notch` | `180` | desktop pixels one wheel notch scrolls (calibrates smooth scrolling) |

@@ -18,10 +18,12 @@ struct State {
     root: u32,
     screen_w: u16,
     radius: u16,
+    /// Windows rounded by title regardless of type (e.g. a dock drawn as a pill).
+    named: Vec<(String, u16)>,
     skip_types: Vec<u32>,
     net_wm_window_type: u32,
-    /// Size each window was last shaped for (None: left rectangular).
-    shaped: HashMap<u32, Option<(u16, u16)>>,
+    /// Size and radius each window was last shaped for (None: left rectangular).
+    shaped: HashMap<u32, Option<(u16, u16, u16)>>,
     /// Last size seen per window; moves (same size) need no work.
     seen: HashMap<u32, (u16, u16)>,
 }
@@ -47,19 +49,38 @@ impl State {
         })
     }
 
+    /// Radius requested for this window (or its client child) by title.
+    fn named_radius(&self, win: u32) -> Option<u16> {
+        if self.named.is_empty() {
+            return None;
+        }
+        let mut wins = vec![win];
+        if let Ok(Ok(tree)) = self.conn.query_tree(win).map(|c| c.reply()) {
+            wins.extend(tree.children);
+        }
+        wins.iter().find_map(|&w| {
+            let title = self.conn.get_property(false, w, AtomEnum::WM_NAME, AtomEnum::ANY, 0, 64).ok()?.reply().ok()?.value;
+            let title = String::from_utf8_lossy(&title);
+            self.named.iter().find(|(n, _)| *n == title).map(|&(_, r)| r)
+        })
+    }
+
     fn update(&mut self, win: u32, width: u16, height: u16) {
         if self.seen.insert(win, (width, height)) == Some((width, height)) {
             return;
         }
         let Ok(Ok(attrs)) = self.conn.get_window_attributes(win).map(|c| c.reply()) else { return };
-        // Menus and tooltips (override-redirect) and maximized windows stay square.
-        let square = attrs.override_redirect || attrs.map_state != MapState::VIEWABLE || width >= self.screen_w || self.skip(win);
-        let want = (!square).then_some((width, height));
+        let (square, radius) = match self.named_radius(win) {
+            Some(r) => (attrs.map_state != MapState::VIEWABLE, r),
+            // Menus and tooltips (override-redirect) and maximized windows stay square.
+            None => (attrs.override_redirect || attrs.map_state != MapState::VIEWABLE || width >= self.screen_w || self.skip(win), self.radius),
+        };
+        let want = (!square && radius > 0).then_some((width, height, radius));
         if self.shaped.get(&win) == Some(&want) {
             return;
         }
-        if let Some((w, h)) = want {
-            let rects = rounded_rect(w, h, self.radius);
+        if let Some((w, h, r)) = want {
+            let rects = rounded_rect(w, h, r);
             let _ = self.conn.shape_rectangles(shape::SO::SET, shape::SK::BOUNDING, x11rb::protocol::xproto::ClipOrdering::YX_BANDED, win, 0, 0, &rects);
         } else if self.shaped.get(&win).is_some_and(|s| s.is_some()) {
             let _ = self.conn.shape_mask(shape::SO::SET, shape::SK::BOUNDING, win, 0, 0, x11rb::NONE);
@@ -86,7 +107,7 @@ fn rounded_rect(w: u16, h: u16, r: u16) -> Vec<Rectangle> {
     v
 }
 
-pub fn spawn(display: Option<String>, radius: u16) -> Result<(), String> {
+pub fn spawn(display: Option<String>, radius: u16, named: Vec<(String, u16)>) -> Result<(), String> {
     let (conn, n) = RustConnection::connect(display.as_deref()).map_err(|e| e.to_string())?;
     conn.shape_query_version().map_err(|e| e.to_string())?.reply().map_err(|e| format!("no SHAPE: {e}"))?;
     let screen = &conn.setup().roots[n];
@@ -94,7 +115,7 @@ pub fn spawn(display: Option<String>, radius: u16) -> Result<(), String> {
     conn.change_window_attributes(root, &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY)).map_err(|e| e.to_string())?;
     let skip_types = ["_NET_WM_WINDOW_TYPE_DOCK", "_NET_WM_WINDOW_TYPE_DESKTOP"].iter().map(|n| State::atom(&conn, n)).collect();
     let net_wm_window_type = State::atom(&conn, "_NET_WM_WINDOW_TYPE");
-    let mut st = State { conn, root, screen_w, radius, skip_types, net_wm_window_type, shaped: HashMap::new(), seen: HashMap::new() };
+    let mut st = State { conn, root, screen_w, radius, named, skip_types, net_wm_window_type, shaped: HashMap::new(), seen: HashMap::new() };
     std::thread::Builder::new()
         .name("corners".into())
         .spawn(move || {

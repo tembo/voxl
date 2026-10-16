@@ -83,8 +83,13 @@ async fn main() {
         std::process::exit(1);
     }
     let radius = range_max(a.get("round-corners"), 0.0) as u16;
-    if radius > 0 {
-        if let Err(e) = corners::spawn(display.clone(), radius) {
+    // --round-windows=title:radius,...: round specific windows (docks included) by title.
+    let named: Vec<(String, u16)> = a
+        .get("round-windows")
+        .map(|v| v.split(',').filter_map(|e| e.rsplit_once(':').and_then(|(n, r)| Some((n.to_string(), r.parse().ok()?)))).collect())
+        .unwrap_or_default();
+    if radius > 0 || !named.is_empty() {
+        if let Err(e) = corners::spawn(display.clone(), radius, named) {
             log::warn!("rounded corners unavailable: {e}");
         }
     }
