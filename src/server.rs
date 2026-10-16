@@ -24,14 +24,30 @@ pub struct AppState {
 
 macro_rules! asset {
     ($name:literal, $ctype:literal) => {
-        get(|| async { ([(header::CONTENT_TYPE, $ctype), (header::CACHE_CONTROL, "no-cache")], include_bytes!(concat!("../web/", $name)).as_slice()) })
+        get(|| async {
+            (
+                [
+                    (header::CONTENT_TYPE, $ctype),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                include_bytes!(concat!("../web/", $name)).as_slice(),
+            )
+        })
     };
 }
 
 /// Scripts bundled from web/src by build.rs.
 macro_rules! bundled {
     ($name:literal) => {
-        get(|| async { ([(header::CONTENT_TYPE, "text/javascript"), (header::CACHE_CONTROL, "no-cache")], include_bytes!(concat!(env!("OUT_DIR"), "/web/", $name)).as_slice()) })
+        get(|| async {
+            (
+                [
+                    (header::CONTENT_TYPE, "text/javascript"),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                include_bytes!(concat!(env!("OUT_DIR"), "/web/", $name)).as_slice(),
+            )
+        })
     };
 }
 
@@ -44,7 +60,10 @@ pub fn router(state: AppState) -> Router {
         .with_state(state.files.clone());
     Router::new()
         .route("/", asset!("index.html", "text/html; charset=utf-8"))
-        .route("/index.html", asset!("index.html", "text/html; charset=utf-8"))
+        .route(
+            "/index.html",
+            asset!("index.html", "text/html; charset=utf-8"),
+        )
         .route("/client.js", bundled!("client.js"))
         .route("/worker.js", bundled!("worker.js"))
         .route("/audio.js", bundled!("audio.js"))
@@ -88,11 +107,16 @@ async fn stats(State(s): State<AppState>) -> Response {
         "send_lat_us_total": st.send_lat_us.load(Ordering::Relaxed),
         "clients": clients,
     });
-    ([(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response()
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+        .into_response()
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(s): State<AppState>) -> Response {
-    ws.max_message_size(64 << 20).on_upgrade(move |socket| handle_socket(socket, s))
+    ws.max_message_size(64 << 20)
+        .on_upgrade(move |socket| handle_socket(socket, s))
 }
 
 async fn handle_socket(socket: WebSocket, s: AppState) {
@@ -121,7 +145,11 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
                 break;
             }
             if dbg && big {
-                log::info!("ws send took {} us (queued {})", t.elapsed().as_micros(), rx.len());
+                log::info!(
+                    "ws send took {} us (queued {})",
+                    t.elapsed().as_micros(),
+                    rx.len()
+                );
             }
         }
     });
@@ -144,14 +172,20 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
             // 0x11: clipboard image (PNG) pasted on the client.
             Message::Binary(b) if b.first() == Some(&0x11) && b.len() > 1 => {
                 if let Some(tx) = s.hub.input.lock().as_ref() {
-                    let _ = tx.send(InputEvent::Clipboard(crate::desktop::ClipContent::Image(b[1..].to_vec())));
+                    let _ = tx.send(InputEvent::Clipboard(crate::desktop::ClipContent::Image(
+                        b[1..].to_vec(),
+                    )));
                 }
             }
             // 0x12: microphone Opus packet, 0x13: microphone PCM (s16le mono 48 kHz).
             Message::Binary(b) if matches!(b.first(), Some(0x12 | 0x13)) && b.len() > 1 => {
                 if let Some(tx) = &s.mic {
                     let data = b.slice(1..);
-                    let _ = tx.send(if b[0] == 0x12 { crate::mic::MicMsg::Opus(client.id, data) } else { crate::mic::MicMsg::Pcm(client.id, data) });
+                    let _ = tx.send(if b[0] == 0x12 {
+                        crate::mic::MicMsg::Opus(client.id, data)
+                    } else {
+                        crate::mic::MicMsg::Pcm(client.id, data)
+                    });
                 }
             }
             Message::Close(_) => break,
@@ -196,7 +230,10 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
         }
         "b" => {
             if let (Some(button), Some(d)) = (num::<u8>(&mut it), num::<u8>(&mut it)) {
-                input(InputEvent::Button { button, down: d == 1 });
+                input(InputEvent::Button {
+                    button,
+                    down: d == 1,
+                });
             }
         }
         "s" => {
@@ -211,11 +248,16 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
         }
         "k" => {
             if let (Some(keysym), Some(d)) = (num::<u32>(&mut it), num::<u8>(&mut it)) {
-                input(InputEvent::Key { keysym, down: d == 1 });
+                input(InputEvent::Key {
+                    keysym,
+                    down: d == 1,
+                });
             }
         }
         "r" => input(InputEvent::ReleaseAll),
-        "c" => input(InputEvent::Clipboard(crate::desktop::ClipContent::Text(rest.to_string()))),
+        "c" => input(InputEvent::Clipboard(crate::desktop::ClipContent::Text(
+            rest.to_string(),
+        ))),
         "v" => {
             let on = rest == "1";
             c.video.store(on, Ordering::Relaxed);
@@ -229,7 +271,11 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
         "au" => c.audio.store(rest == "1" && s.audio, Ordering::Relaxed),
         "mi" => {
             if let Some(tx) = &s.mic {
-                let _ = tx.send(if rest == "1" { crate::mic::MicMsg::Start(c.id) } else { crate::mic::MicMsg::Stop(c.id) });
+                let _ = tx.send(if rest == "1" {
+                    crate::mic::MicMsg::Start(c.id)
+                } else {
+                    crate::mic::MicMsg::Stop(c.id)
+                });
             }
         }
         "kf" => {
@@ -245,7 +291,8 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
                 if rtts.len() > 20 {
                     rtts.pop_front();
                 }
-                c.min_rtt_ms.store(*rtts.iter().min().unwrap(), Ordering::Relaxed);
+                c.min_rtt_ms
+                    .store(*rtts.iter().min().unwrap(), Ordering::Relaxed);
             }
         }
         _ => {}

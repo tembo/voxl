@@ -33,7 +33,12 @@ pub const UPLOAD_HEADER: &str = "x-voxl-upload";
 type Q = Query<HashMap<String, String>>;
 
 fn err(code: StatusCode, msg: &str) -> Response {
-    (code, [(header::CONTENT_TYPE, "application/json")], serde_json::json!({ "error": msg }).to_string()).into_response()
+    (
+        code,
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::json!({ "error": msg }).to_string(),
+    )
+        .into_response()
 }
 
 impl Files {
@@ -61,7 +66,9 @@ impl Files {
     }
 
     fn rel(&self, p: &Path) -> String {
-        p.strip_prefix(&self.root).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default()
+        p.strip_prefix(&self.root)
+            .map(|r| r.to_string_lossy().into_owned())
+            .unwrap_or_default()
     }
 }
 
@@ -84,14 +91,25 @@ pub async fn list(State(f): State<Arc<Files>>, Query(q): Q) -> Response {
                 }
                 // Follow symlinks for type and size, as a file manager would, but
                 // hide links that lead outside the shared folder.
-                let Ok(md) = tokio::fs::metadata(e.path()).await else { continue };
-                if e.file_type().await.is_ok_and(|t| t.is_symlink()) && !tokio::fs::canonicalize(e.path()).await.is_ok_and(|c| c.starts_with(&f.root)) {
+                let Ok(md) = tokio::fs::metadata(e.path()).await else {
+                    continue;
+                };
+                if e.file_type().await.is_ok_and(|t| t.is_symlink())
+                    && !tokio::fs::canonicalize(e.path())
+                        .await
+                        .is_ok_and(|c| c.starts_with(&f.root))
+                {
                     continue;
                 }
                 if !md.is_dir() && !md.is_file() {
                     continue;
                 }
-                let mtime = md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
+                let mtime = md
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
                 entries.push(serde_json::json!({ "name": name, "dir": md.is_dir(), "size": md.len(), "mtime": mtime }));
                 if entries.len() >= 5000 {
                     break;
@@ -102,8 +120,16 @@ pub async fn list(State(f): State<Arc<Files>>, Query(q): Q) -> Response {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && rel == f.default_dir => {}
         Err(_) => return err(StatusCode::NOT_FOUND, "not a folder"),
     }
-    let body = serde_json::json!({ "path": f.rel(&dir).trim_start_matches('/'), "entries": entries });
-    ([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], body.to_string()).into_response()
+    let body =
+        serde_json::json!({ "path": f.rel(&dir).trim_start_matches('/'), "entries": entries });
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body.to_string(),
+    )
+        .into_response()
 }
 
 pub async fn download(State(f): State<Arc<Files>>, Query(q): Q) -> Response {
@@ -114,12 +140,19 @@ pub async fn download(State(f): State<Arc<Files>>, Query(q): Q) -> Response {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let Ok(file) = tokio::fs::File::open(&path).await else { return err(StatusCode::NOT_FOUND, "not found") };
-    let Ok(md) = file.metadata().await else { return err(StatusCode::NOT_FOUND, "not found") };
+    let Ok(file) = tokio::fs::File::open(&path).await else {
+        return err(StatusCode::NOT_FOUND, "not found");
+    };
+    let Ok(md) = file.metadata().await else {
+        return err(StatusCode::NOT_FOUND, "not found");
+    };
     if !md.is_file() {
         return err(StatusCode::BAD_REQUEST, "not a file");
     }
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "download".into());
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".into());
     let stream = futures_util::stream::unfold(Some(file), |file| async move {
         let mut file = file?;
         let mut buf = Vec::with_capacity(256 << 10);
@@ -129,10 +162,25 @@ pub async fn download(State(f): State<Arc<Files>>, Query(q): Q) -> Response {
             Err(e) => Some((Err(e), None)),
         }
     });
-    let ascii: String = name.chars().map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' { c } else { '_' }).collect();
-    let disposition = format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{}", pct_encode(&name));
+    let ascii: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let disposition = format!(
+        "attachment; filename=\"{ascii}\"; filename*=UTF-8''{}",
+        pct_encode(&name)
+    );
     let mut h = HeaderMap::new();
-    h.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+    h.insert(
+        header::CONTENT_TYPE,
+        "application/octet-stream".parse().unwrap(),
+    );
     h.insert(header::CONTENT_LENGTH, md.len().into());
     h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     if let Ok(v) = disposition.parse() {
@@ -143,14 +191,26 @@ pub async fn download(State(f): State<Arc<Files>>, Query(q): Q) -> Response {
 
 fn pct_encode(s: &str) -> String {
     s.bytes()
-        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
         .collect()
 }
 
 /// A plain file name: no separators, no `.`/`..`, no control characters.
 fn clean_name(name: &str) -> Option<&str> {
     let name = name.trim();
-    let ok = !name.is_empty() && name != "." && name != ".." && name.len() <= 255 && !name.chars().any(|c| c == '/' || c == '\\' || c.is_control());
+    let ok = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.len() <= 255
+        && !name
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c.is_control());
     ok.then_some(name)
 }
 
@@ -164,36 +224,66 @@ fn unique(dir: &Path, name: &str) -> PathBuf {
         Some(i) if i > 0 => (&name[..i], &name[i..]),
         _ => (name, ""),
     };
-    (1..).map(|n| dir.join(format!("{stem} ({n}){ext}"))).find(|p| !p.exists()).unwrap()
+    (1..)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .find(|p| !p.exists())
+        .unwrap()
 }
 
 static UPLOADS: AtomicU64 = AtomicU64::new(0);
 
-pub async fn upload(State(f): State<Arc<Files>>, Query(q): Q, headers: HeaderMap, body: Body) -> Response {
+pub async fn upload(
+    State(f): State<Arc<Files>>,
+    Query(q): Q,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
     if !f.upload {
         return err(StatusCode::FORBIDDEN, "uploads are disabled");
     }
     if !headers.contains_key(UPLOAD_HEADER) {
         return err(StatusCode::FORBIDDEN, "missing upload header");
     }
-    let Some(name) = q.get("name").and_then(|n| clean_name(n)) else { return err(StatusCode::BAD_REQUEST, "invalid file name") };
-    let rel = q.get("path").cloned().unwrap_or_else(|| f.default_dir.clone());
+    let Some(name) = q.get("name").and_then(|n| clean_name(n)) else {
+        return err(StatusCode::BAD_REQUEST, "invalid file name");
+    };
+    let rel = q
+        .get("path")
+        .cloned()
+        .unwrap_or_else(|| f.default_dir.clone());
     let dir = match f.resolve(&rel, rel != f.default_dir) {
         Ok(d) => d,
         Err(e) => return e,
     };
     if rel == f.default_dir && tokio::fs::create_dir_all(&dir).await.is_err() {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, "cannot create the upload folder");
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot create the upload folder",
+        );
     }
     if !dir.is_dir() {
         return err(StatusCode::NOT_FOUND, "not a folder");
     }
     // Write to a hidden temporary file and rename once complete, so nothing in the
     // VM sees (or opens) a half-uploaded file.
-    let part = dir.join(format!(".{name}.{}-{}.part", std::process::id(), UPLOADS.fetch_add(1, Ordering::Relaxed)));
-    let mut out = match tokio::fs::OpenOptions::new().write(true).create_new(true).open(&part).await {
+    let part = dir.join(format!(
+        ".{name}.{}-{}.part",
+        std::process::id(),
+        UPLOADS.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut out = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&part)
+        .await
+    {
         Ok(o) => o,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot write: {e}")),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("cannot write: {e}"),
+            )
+        }
     };
     let mut written: u64 = 0;
     let mut stream = body.into_data_stream();
@@ -204,9 +294,19 @@ pub async fn upload(State(f): State<Arc<Files>>, Query(q): Q, headers: HeaderMap
             if f.max_upload_bytes > 0 && written > f.max_upload_bytes {
                 return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "file is too large"));
             }
-            out.write_all(&chunk).await.map_err(|e| err(StatusCode::INSUFFICIENT_STORAGE, &format!("cannot write: {e}")))?;
+            out.write_all(&chunk).await.map_err(|e| {
+                err(
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    &format!("cannot write: {e}"),
+                )
+            })?;
         }
-        out.flush().await.map_err(|e| err(StatusCode::INSUFFICIENT_STORAGE, &format!("cannot write: {e}")))?;
+        out.flush().await.map_err(|e| {
+            err(
+                StatusCode::INSUFFICIENT_STORAGE,
+                &format!("cannot write: {e}"),
+            )
+        })?;
         Ok(())
     }
     .await;
@@ -218,9 +318,16 @@ pub async fn upload(State(f): State<Arc<Files>>, Query(q): Q, headers: HeaderMap
     let dest = unique(&dir, name);
     if let Err(e) = tokio::fs::rename(&part, &dest).await {
         let _ = tokio::fs::remove_file(&part).await;
-        return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot save: {e}"));
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("cannot save: {e}"),
+        );
     }
     log::info!("uploaded {} ({written} bytes)", dest.display());
     let body = serde_json::json!({ "path": f.rel(&dest).trim_start_matches('/'), "size": written });
-    ([(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response()
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+        .into_response()
 }

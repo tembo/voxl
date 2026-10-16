@@ -50,7 +50,10 @@ struct Job {
 fn union(a: Option<Band>, b: Band) -> Band {
     match a {
         None => b,
-        Some(a) => Band { y0: a.y0.min(b.y0), y1: a.y1.max(b.y1) },
+        Some(a) => Band {
+            y0: a.y0.min(b.y0),
+            y1: a.y1.max(b.y1),
+        },
     }
 }
 
@@ -59,22 +62,56 @@ pub fn spawn(cfg: VideoConfig, hub: Arc<Hub>) -> Result<(), String> {
     let (w, h) = (cap.width, cap.height);
     hub.width.store(w, Ordering::Relaxed);
     hub.height.store(h, Ordering::Relaxed);
-    log::info!("capturing {}x{} @ {} fps, preset {} threads {}", w, h, cfg.fps, cfg.preset, cfg.threads);
+    log::info!(
+        "capturing {}x{} @ {} fps, preset {} threads {}",
+        w,
+        h,
+        cfg.fps,
+        cfg.preset,
+        cfg.threads
+    );
 
     let (job_tx, job_rx) = mpsc::sync_channel::<Job>(1);
     let (ret_tx, ret_rx) = mpsc::channel::<(usize, Box<I420>)>();
     let layout = stripe_layout(h, cfg.stripes);
     let mut stripes = Vec::new();
     for &(y, sh) in &layout {
-        let fixed = if cfg.adaptive_threads { 1 } else { (cfg.threads / layout.len() as u32).max(1) };
-        let ecfg = EncoderConfig { width: w, height: sh, fps: cfg.fps, preset: cfg.preset.clone(), threads: fixed, crf: cfg.crf, max_kbps: cfg.max_kbps };
-        let max_threads = if cfg.adaptive_threads { (cfg.threads / layout.len() as u32).max(1) } else { 1 };
-        stripes.push(Stripe { y: y as usize, h: sh as usize, enc: Encoder::new(&ecfg)?, cfg: ecfg, max_threads, applied_kbps: 0, applied_crf: -1.0 });
+        let fixed = if cfg.adaptive_threads {
+            1
+        } else {
+            (cfg.threads / layout.len() as u32).max(1)
+        };
+        let ecfg = EncoderConfig {
+            width: w,
+            height: sh,
+            fps: cfg.fps,
+            preset: cfg.preset.clone(),
+            threads: fixed,
+            crf: cfg.crf,
+            max_kbps: cfg.max_kbps,
+        };
+        let max_threads = if cfg.adaptive_threads {
+            (cfg.threads / layout.len() as u32).max(1)
+        } else {
+            1
+        };
+        stripes.push(Stripe {
+            y: y as usize,
+            h: sh as usize,
+            enc: Encoder::new(&ecfg)?,
+            cfg: ecfg,
+            max_threads,
+            applied_kbps: 0,
+            applied_crf: -1.0,
+        });
     }
     *hub.stripes.lock() = layout;
     let hub2 = hub.clone();
     let (crf, po_crf) = (cfg.crf, cfg.paintover_crf);
-    std::thread::Builder::new().name("encode".into()).spawn(move || encode_loop(stripes, job_rx, ret_tx, hub2, crf, po_crf)).unwrap();
+    std::thread::Builder::new()
+        .name("encode".into())
+        .spawn(move || encode_loop(stripes, job_rx, ret_tx, hub2, crf, po_crf))
+        .unwrap();
 
     let hub3 = hub.clone();
     std::thread::Builder::new()
@@ -104,7 +141,12 @@ fn flow_ok(hub: &Hub, interval_ms: f64) -> bool {
         let max_age = rtt as u128 + 120;
         if age > 4000 {
             // Stalled client (hidden tab, dead socket): stop letting it gate everyone.
-            log::warn!("client {} stalled ({} frames, {} ms); resyncing", c.id, n, age);
+            log::warn!(
+                "client {} stalled ({} frames, {} ms); resyncing",
+                c.id,
+                n,
+                age
+            );
             c.inflight.lock().clear();
             c.needs_keyframe.store(true, Ordering::Relaxed);
             c.started.store(false, Ordering::Relaxed);
@@ -140,7 +182,17 @@ const START_KBPS: f64 = 8000.0;
 impl RateCtl {
     fn new(max: f64, min: f64) -> Self {
         let past = Instant::now() - Duration::from_secs(10);
-        RateCtl { target: START_KBPS.min(max), max, min, last_eval: past, last_dec: past, last_inc: past, slow_start: true, ceiling: f64::MAX, ceiling_at: past }
+        RateCtl {
+            target: START_KBPS.min(max),
+            max,
+            min,
+            last_eval: past,
+            last_dec: past,
+            last_inc: past,
+            slow_start: true,
+            ceiling: f64::MAX,
+            ceiling_at: past,
+        }
     }
 
     fn update(&mut self, hub: &Hub, clients: &[Arc<crate::hub::Client>]) {
@@ -188,15 +240,31 @@ impl RateCtl {
             self.target = t.max(self.min);
             self.last_dec = now;
             self.slow_start = false;
-            log::debug!("rate: congested, target {:.0} kbps (delivered {:.0})", self.target, rate);
-        } else if self.slow_start && !congested && clear && self.last_inc.elapsed() >= Duration::from_millis(250) {
+            log::debug!(
+                "rate: congested, target {:.0} kbps (delivered {:.0})",
+                self.target,
+                rate
+            );
+        } else if self.slow_start
+            && !congested
+            && clear
+            && self.last_inc.elapsed() >= Duration::from_millis(250)
+        {
             // Only probe upward once the content actually presses against the cap.
             if delivered >= self.target * 0.5 {
                 self.target = (self.target * 1.5).min(self.max);
                 self.last_inc = now;
-                log::debug!("rate: slow start, target {:.0} kbps (delivered {:.0})", self.target, delivered);
+                log::debug!(
+                    "rate: slow start, target {:.0} kbps (delivered {:.0})",
+                    self.target,
+                    delivered
+                );
             }
-        } else if !congested && clear && self.last_dec.elapsed() >= Duration::from_secs(1) && delivered >= self.target * 0.5 {
+        } else if !congested
+            && clear
+            && self.last_dec.elapsed() >= Duration::from_secs(1)
+            && delivered >= self.target * 0.5
+        {
             // Only raise the cap while the content actually uses it: an idle screen says
             // nothing about the path, and an inflated cap overshoots the next burst.
             // Paths change; forget a capacity estimate that hasn't been confirmed lately.
@@ -205,10 +273,16 @@ impl RateCtl {
             }
             // Recover quickly to just under the known capacity, then probe past it gently
             // so a busy link isn't driven into the queue every couple of seconds.
-            if self.target < self.ceiling * 0.9 && self.last_inc.elapsed() >= Duration::from_millis(200) {
-                self.target = (self.target * 1.06 + 100.0).min(self.ceiling * 0.9).min(self.max);
+            if self.target < self.ceiling * 0.9
+                && self.last_inc.elapsed() >= Duration::from_millis(200)
+            {
+                self.target = (self.target * 1.06 + 100.0)
+                    .min(self.ceiling * 0.9)
+                    .min(self.max);
                 self.last_inc = now;
-            } else if self.target >= self.ceiling * 0.9 && self.last_inc.elapsed() >= Duration::from_millis(1000) {
+            } else if self.target >= self.ceiling * 0.9
+                && self.last_inc.elapsed() >= Duration::from_millis(1000)
+            {
                 self.target = (self.target * 1.02).min(self.max);
                 self.last_inc = now;
             }
@@ -218,8 +292,14 @@ impl RateCtl {
 }
 
 fn wait_fds(fds: &[BorrowedFd], timeout_ms: i32) {
-    let mut p: Vec<PollFd> = fds.iter().map(|&fd| PollFd::new(fd, PollFlags::POLLIN)).collect();
-    let _ = poll(&mut p, PollTimeout::try_from(timeout_ms).unwrap_or(PollTimeout::NONE));
+    let mut p: Vec<PollFd> = fds
+        .iter()
+        .map(|&fd| PollFd::new(fd, PollFlags::POLLIN))
+        .collect();
+    let _ = poll(
+        &mut p,
+        PollTimeout::try_from(timeout_ms).unwrap_or(PollTimeout::NONE),
+    );
 }
 
 /// Regional sharpening. Blocks encoded while they changed carry motion-level quality;
@@ -239,7 +319,13 @@ const REFINE_EVERY: Duration = Duration::from_millis(250);
 
 impl Refiner {
     fn new(blocks: usize, cols: usize) -> Self {
-        Refiner { epoch: Instant::now(), changed_ms: vec![0; blocks], pending: vec![false; blocks], last_refine: Instant::now(), cols }
+        Refiner {
+            epoch: Instant::now(),
+            changed_ms: vec![0; blocks],
+            pending: vec![false; blocks],
+            last_refine: Instant::now(),
+            cols,
+        }
     }
     fn now(&self) -> u32 {
         self.epoch.elapsed().as_millis() as u32
@@ -276,7 +362,15 @@ impl Refiner {
                 p as u8
             })
             .collect();
-        (r1 > r0).then(|| (map, Band { y0: (r0 * 16) as u32, y1: (r1 * 16) as u32 }))
+        (r1 > r0).then(|| {
+            (
+                map,
+                Band {
+                    y0: (r0 * 16) as u32,
+                    y1: (r1 * 16) as u32,
+                },
+            )
+        })
     }
     /// Blocks due for sharpening (1 = refine) and the row band they span.
     fn due(&mut self) -> Option<(Vec<u8>, Band)> {
@@ -286,9 +380,9 @@ impl Refiner {
         let now = self.now();
         let mut map = vec![0u8; self.pending.len()];
         let (mut r0, mut r1, mut any) = (usize::MAX, 0, false);
-        for i in 0..map.len() {
+        for (i, m) in map.iter_mut().enumerate() {
             if self.pending[i] && now.saturating_sub(self.changed_ms[i]) >= REFINE_STILL_MS {
-                map[i] = 1;
+                *m = 1;
                 self.pending[i] = false;
                 let row = i / self.cols;
                 r0 = r0.min(row);
@@ -300,13 +394,28 @@ impl Refiner {
             return None;
         }
         self.last_refine = Instant::now();
-        Some((map, Band { y0: (r0 * 16) as u32, y1: (r1 * 16) as u32 }))
+        Some((
+            map,
+            Band {
+                y0: (r0 * 16) as u32,
+                y1: (r1 * 16) as u32,
+            },
+        ))
     }
 }
 
-fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mpsc::SyncSender<Job>, ret_rx: mpsc::Receiver<(usize, Box<I420>)>) -> Result<(), String> {
+fn capture_loop(
+    cap: &mut Capturer,
+    cfg: VideoConfig,
+    hub: Arc<Hub>,
+    job_tx: mpsc::SyncSender<Job>,
+    ret_rx: mpsc::Receiver<(usize, Box<I420>)>,
+) -> Result<(), String> {
     let (w, h) = (cap.width as usize, cap.height as usize);
-    let mut pool: Vec<Option<Box<I420>>> = vec![Some(Box::new(I420::new(w, h))), Some(Box::new(I420::new(w, h)))];
+    let mut pool: Vec<Option<Box<I420>>> = vec![
+        Some(Box::new(I420::new(w, h))),
+        Some(Box::new(I420::new(w, h))),
+    ];
     let mut pending: [Option<Band>; 2] = [Some(cap.full()), Some(cap.full())];
     let mut next_idx = 0usize;
     let interval = Duration::from_secs_f64(1.0 / cfg.fps as f64);
@@ -340,7 +449,9 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
             continue;
         }
         rc.update(&hub, &clients);
-        let want_key = clients.iter().any(|c| c.needs_keyframe.load(Ordering::Relaxed));
+        let want_key = clients
+            .iter()
+            .any(|c| c.needs_keyframe.load(Ordering::Relaxed));
         if !had_clients {
             had_clients = true;
             // Our shm copy may be stale: re-grab everything once.
@@ -349,9 +460,16 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
             cap.damaged = true;
             full_next = true;
         }
-        let paintover_due = paintover_left > 0 && last_motion.elapsed() >= Duration::from_millis(cfg.paintover_delay_ms);
+        let paintover_due = paintover_left > 0
+            && last_motion.elapsed() >= Duration::from_millis(cfg.paintover_delay_ms);
         if !cap.damaged && !want_key && !paintover_due {
-            let timeout = if paintover_left == 0 { 100 } else { cfg.paintover_delay_ms.saturating_sub(last_motion.elapsed().as_millis() as u64) as i32 + 1 };
+            let timeout = if paintover_left == 0 {
+                100
+            } else {
+                cfg.paintover_delay_ms
+                    .saturating_sub(last_motion.elapsed().as_millis() as u64) as i32
+                    + 1
+            };
             wait_fds(&[cap.fd(), hub.wake_r.as_fd()], timeout);
             continue;
         }
@@ -389,7 +507,9 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
 
         let t0 = Instant::now();
         let origin = cap.damaged_at.unwrap_or(t0);
-        hub.stats.damage_wait_us.fetch_add((t0 - origin).as_micros() as u64, Ordering::Relaxed);
+        hub.stats
+            .damage_wait_us
+            .fetch_add((t0 - origin).as_micros() as u64, Ordering::Relaxed);
         let mut band = None;
         let mut mb_dirty = (!full_next).then(|| cap.take_mb_map());
         if full_next {
@@ -408,9 +528,18 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
         }
         let t1 = Instant::now();
         if debug_marker {
-            log::info!("cap dt {:.1} ms band {:?} grab {} us", last_capture.elapsed().as_secs_f64() * 1000.0, band, (t1 - t0).as_micros());
+            log::info!(
+                "cap dt {:.1} ms band {:?} grab {} us",
+                last_capture.elapsed().as_secs_f64() * 1000.0,
+                band,
+                (t1 - t0).as_micros()
+            );
         }
-        let marker_ms = if debug_marker { marker_probe(cap.pixels(), cap.stride, "grab") } else { -1 };
+        let marker_ms = if debug_marker {
+            marker_probe(cap.pixels(), cap.stride, "grab")
+        } else {
+            -1
+        };
         let is_motion = band.is_some();
         if !is_motion && !want_key && !paintover_due {
             // Damage was empty after all.
@@ -439,11 +568,22 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
         }
         pending[idx] = None;
         if let Some(t) = todo {
-            convert_band(cap.pixels(), cap.stride, &mut buf, t.y0 as usize, t.y1 as usize, cfg.convert_threads);
+            convert_band(
+                cap.pixels(),
+                cap.stride,
+                &mut buf,
+                t.y0 as usize,
+                t.y1 as usize,
+                cfg.convert_threads,
+            );
         }
         let t2 = Instant::now();
-        hub.stats.grab_us.fetch_add((t1 - t0).as_micros() as u64, Ordering::Relaxed);
-        hub.stats.convert_us.fetch_add((t2 - t1).as_micros() as u64, Ordering::Relaxed);
+        hub.stats
+            .grab_us
+            .fetch_add((t1 - t0).as_micros() as u64, Ordering::Relaxed);
+        hub.stats
+            .convert_us
+            .fetch_add((t2 - t1).as_micros() as u64, Ordering::Relaxed);
         hub.stats.captured.fetch_add(1, Ordering::Relaxed);
 
         let mut refine = None;
@@ -498,7 +638,20 @@ fn capture_loop(cap: &mut Capturer, cfg: VideoConfig, hub: Arc<Hub>, job_tx: mps
         };
         last_capture = t0;
         next_idx = 1 - idx;
-        if job_tx.send(Job { buf, idx, force_idr: want_key, paintover, paintover_final: frame_paintover && paintover_left == 0, mb_dirty: mb_map, band, captured_at: origin, marker_ms }).is_err() {
+        if job_tx
+            .send(Job {
+                buf,
+                idx,
+                force_idr: want_key,
+                paintover,
+                paintover_final: frame_paintover && paintover_left == 0,
+                mb_dirty: mb_map,
+                band,
+                captured_at: origin,
+                marker_ms,
+            })
+            .is_err()
+        {
             return Err("encoder gone".into());
         }
     }
@@ -572,7 +725,11 @@ impl ThreadGovernor {
         self.ewma_ms = self.ewma_ms * 0.8 + enc_ms * 0.2;
         if self.threads == 1 {
             // Only when one thread can no longer hold the frame rate.
-            self.heavy = if self.ewma_ms > self.budget_ms * 0.9 { self.heavy + 1 } else { 0 };
+            self.heavy = if self.ewma_ms > self.budget_ms * 0.9 {
+                self.heavy + 1
+            } else {
+                0
+            };
             (self.heavy >= 30).then_some(max)
         } else if self.ewma_ms < self.budget_ms * 0.45 {
             // Threaded encode is ~2x faster, so this means one thread would fit again.
@@ -585,18 +742,32 @@ impl ThreadGovernor {
     }
 }
 
-fn stripe_worker(i: usize, mut s: Stripe, rx: mpsc::Receiver<StripeJob>, done: mpsc::Sender<StripeResult>, debug: bool) {
-    let mut gov = ThreadGovernor { threads: 1, ewma_ms: 0.0, heavy: 0, light_since: None, budget_ms: 1000.0 / s.cfg.fps as f64 };
+fn stripe_worker(
+    i: usize,
+    mut s: Stripe,
+    rx: mpsc::Receiver<StripeJob>,
+    done: mpsc::Sender<StripeResult>,
+    debug: bool,
+) {
+    let mut gov = ThreadGovernor {
+        threads: 1,
+        ewma_ms: 0.0,
+        heavy: 0,
+        light_since: None,
+        budget_ms: 1000.0 / s.cfg.fps as f64,
+    };
     while let Ok(job) = rx.recv() {
         let buf = unsafe { &*job.buf.0 };
         if job.force_idr {
             // A keyframe is what a new viewer sees first; don't starve it to the
             // steady-state frame budget (up to ~8 frames' worth at 4x the cap).
             let boost = job.cap.saturating_mul(4).max(16_000);
-            s.enc.set_rate_buf(job.crf, boost, boost / s.cfg.fps.max(1) * 8);
+            s.enc
+                .set_rate_buf(job.crf, boost, boost / s.cfg.fps.max(1) * 8);
             s.applied_kbps = 0;
         } else {
-            let moved = s.applied_kbps == 0 || (job.cap as f64 - s.applied_kbps as f64).abs() > s.applied_kbps as f64 * 0.04;
+            let moved = s.applied_kbps == 0
+                || (job.cap as f64 - s.applied_kbps as f64).abs() > s.applied_kbps as f64 * 0.04;
             if job.crf != s.applied_crf || moved {
                 s.enc.set_rate(job.crf, job.cap);
                 s.applied_crf = job.crf;
@@ -604,27 +775,55 @@ fn stripe_worker(i: usize, mut s: Stripe, rx: mpsc::Receiver<StripeJob>, done: m
             }
         }
         let suv = buf.stride_uv();
-        let planes = Planes { y: &buf.y[s.y * buf.width..], u: &buf.u[(s.y / 2) * suv..], v: &buf.v[(s.y / 2) * suv..], stride_y: buf.width, stride_uv: suv };
+        let planes = Planes {
+            y: &buf.y[s.y * buf.width..],
+            u: &buf.u[(s.y / 2) * suv..],
+            v: &buf.v[(s.y / 2) * suv..],
+            stride_y: buf.width,
+            stride_uv: suv,
+        };
         let mut out = Vec::with_capacity(64 << 10);
         out.resize(HDR, 0);
         // x264 wants X264_MBINFO_CONSTANT (1) on unchanged macroblocks of this stripe.
         let mut info = job.mb_dirty.as_ref().map(|d| {
             let rows = s.h.div_ceil(16);
             let start = (s.y / 16) * job.mb_cols;
-            d[start..start + rows * job.mb_cols].iter().map(|&x| (x == 0) as u8).collect::<Vec<u8>>()
+            d[start..start + rows * job.mb_cols]
+                .iter()
+                .map(|&x| (x == 0) as u8)
+                .collect::<Vec<u8>>()
         });
         let te = Instant::now();
-        let r = s.enc.encode(&planes, job.ts, job.force_idr, None, info.as_deref_mut(), &mut out);
+        let r = s.enc.encode(
+            &planes,
+            job.ts,
+            job.force_idr,
+            None,
+            info.as_deref_mut(),
+            &mut out,
+        );
         if debug {
             let ts = clock_gettime(ClockId::CLOCK_THREAD_CPUTIME_ID).unwrap_or(TimeSpec::new(0, 0));
             let cpu_now = ts.tv_sec() as i64 * 1_000_000 + ts.tv_nsec() as i64 / 1000;
-            log::info!("stripe y{} encode {} us wall, thread cpu total {} us, {} bytes", s.y, te.elapsed().as_micros(), cpu_now, out.len());
+            log::info!(
+                "stripe y{} encode {} us wall, thread cpu total {} us, {} bytes",
+                s.y,
+                te.elapsed().as_micros(),
+                cpu_now,
+                out.len()
+            );
         }
         if s.max_threads > 1 {
             if let Some(t) = gov.want(te.elapsed().as_secs_f64() * 1000.0, s.max_threads) {
-                match Encoder::new(&EncoderConfig { threads: t, ..s.cfg.clone() }) {
+                match Encoder::new(&EncoderConfig {
+                    threads: t,
+                    ..s.cfg.clone()
+                }) {
                     Ok(e) => {
-                        log::info!("stripe {i}: encoder now {t} thread(s) (encode {:.1} ms)", gov.ewma_ms);
+                        log::info!(
+                            "stripe {i}: encoder now {t} thread(s) (encode {:.1} ms)",
+                            gov.ewma_ms
+                        );
                         // A fresh encoder opens with an IDR on its next frame.
                         s.enc = e;
                         s.applied_kbps = 0;
@@ -650,13 +849,21 @@ fn stripe_worker(i: usize, mut s: Stripe, rx: mpsc::Receiver<StripeJob>, done: m
     }
 }
 
-fn encode_loop(stripes_in: Vec<Stripe>, rx: mpsc::Receiver<Job>, ret: mpsc::Sender<(usize, Box<I420>)>, hub: Arc<Hub>, crf: f32, po_crf: f32) {
+fn encode_loop(
+    stripes_in: Vec<Stripe>,
+    rx: mpsc::Receiver<Job>,
+    ret: mpsc::Sender<(usize, Box<I420>)>,
+    hub: Arc<Hub>,
+    crf: f32,
+    po_crf: f32,
+) {
     let epoch = Instant::now();
     let mut frame_id: u32 = 0;
     let n = stripes_in.len();
     let debug_stripes = std::env::var("VOXL_DEBUG_STRIPES").is_ok();
     // Geometry and paint-over bookkeeping stay here; encoders move to their workers.
-    let mut stripes: Vec<(usize, usize, bool)> = stripes_in.iter().map(|s| (s.y, s.h, false)).collect();
+    let mut stripes: Vec<(usize, usize, bool)> =
+        stripes_in.iter().map(|s| (s.y, s.h, false)).collect();
     let (done_tx, done_rx) = mpsc::channel::<StripeResult>();
     let workers: Vec<(mpsc::Sender<StripeJob>, std::thread::JoinHandle<()>)> = stripes_in
         .into_iter()
@@ -664,7 +871,10 @@ fn encode_loop(stripes_in: Vec<Stripe>, rx: mpsc::Receiver<Job>, ret: mpsc::Send
         .map(|(i, s)| {
             let (tx, rx) = mpsc::channel();
             let done = done_tx.clone();
-            let h = std::thread::Builder::new().name(format!("enc-{i}")).spawn(move || stripe_worker(i, s, rx, done, debug_stripes)).unwrap();
+            let h = std::thread::Builder::new()
+                .name(format!("enc-{i}"))
+                .spawn(move || stripe_worker(i, s, rx, done, debug_stripes))
+                .unwrap();
             (tx, h)
         })
         .collect();
@@ -672,7 +882,13 @@ fn encode_loop(stripes_in: Vec<Stripe>, rx: mpsc::Receiver<Job>, ret: mpsc::Send
         let t0 = Instant::now();
         let selected: Vec<bool> = stripes
             .iter()
-            .map(|&(y, h, touched)| job.force_idr || (job.paintover && touched) || job.band.is_some_and(|b| (b.y0 as usize) < y + h && (b.y1 as usize) > y))
+            .map(|&(y, h, touched)| {
+                job.force_idr
+                    || (job.paintover && touched)
+                    || job
+                        .band
+                        .is_some_and(|b| (b.y0 as usize) < y + h && (b.y1 as usize) > y)
+            })
             .collect();
         if !selected.iter().any(|&x| x) {
             let _ = ret.send((job.idx, job.buf));
@@ -689,8 +905,20 @@ fn encode_loop(stripes_in: Vec<Stripe>, rx: mpsc::Receiver<Job>, ret: mpsc::Send
         let mut pending = 0;
         for (i, &on) in selected.iter().enumerate() {
             if on {
-                let cap = if job.paintover { share.saturating_mul(2) } else { share };
-                let _ = workers[i].0.send(StripeJob { buf: buf_ptr, ts, force_idr: job.force_idr, crf: want_crf, cap, mb_dirty: job.mb_dirty.clone(), mb_cols: job.buf.width.div_ceil(16) });
+                let cap = if job.paintover {
+                    share.saturating_mul(2)
+                } else {
+                    share
+                };
+                let _ = workers[i].0.send(StripeJob {
+                    buf: buf_ptr,
+                    ts,
+                    force_idr: job.force_idr,
+                    crf: want_crf,
+                    cap,
+                    mb_dirty: job.mb_dirty.clone(),
+                    mb_cols: job.buf.width.div_ceil(16),
+                });
                 pending += 1;
             }
         }
@@ -705,11 +933,18 @@ fn encode_loop(stripes_in: Vec<Stripe>, rx: mpsc::Receiver<Job>, ret: mpsc::Send
             if job.paintover_final {
                 *touched = false;
             }
-            if job.band.is_some_and(|b| (b.y0 as usize) < *y + *h && (b.y1 as usize) > *y) {
+            if job
+                .band
+                .is_some_and(|b| (b.y0 as usize) < *y + *h && (b.y1 as usize) > *y)
+            {
                 *touched = true;
             }
         }
-        let parts: Vec<(usize, bool, Vec<u8>)> = results.into_iter().enumerate().filter_map(|(i, r)| r.map(|(k, o)| (i, k, o))).collect();
+        let parts: Vec<(usize, bool, Vec<u8>)> = results
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.map(|(k, o)| (i, k, o)))
+            .collect();
         if parts.is_empty() {
             continue;
         }
@@ -727,7 +962,10 @@ fn encode_loop(stripes_in: Vec<Stripe>, rx: mpsc::Receiver<Job>, ret: mpsc::Send
         let mut pipe = (job.captured_at.elapsed().as_micros() / 100).min(u32::MAX as u128) as u32;
         if job.marker_ms >= 0 {
             // Debug: wall-clock send time instead of pipeline latency.
-            pipe = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u32;
+            pipe = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u32;
         }
         let nparts = parts.len() as u8;
         let msgs: Vec<Bytes> = parts
@@ -763,15 +1001,26 @@ fn encode_loop(stripes_in: Vec<Stripe>, rx: mpsc::Receiver<Job>, ret: mpsc::Send
                     c.send(Out::Text("{\"t\":\"close\"}".into()));
                     continue;
                 }
-                q.push_back(Inflight { id: frame_id, sent: now, bytes: total });
+                q.push_back(Inflight {
+                    id: frame_id,
+                    sent: now,
+                    bytes: total,
+                });
             }
             for m in &msgs {
                 c.send(Out::Bin(m.clone()));
             }
         }
-        hub.stats.send_lat_us.fetch_add(job.captured_at.elapsed().as_micros() as u64, Ordering::Relaxed);
+        hub.stats.send_lat_us.fetch_add(
+            job.captured_at.elapsed().as_micros() as u64,
+            Ordering::Relaxed,
+        );
         if job.marker_ms >= 0 {
-            log::info!("marker sent age {} ms (encode {} us)", marker_age(job.marker_ms), enc_us);
+            log::info!(
+                "marker sent age {} ms (encode {} us)",
+                marker_age(job.marker_ms),
+                enc_us
+            );
         }
     }
 }
@@ -781,7 +1030,10 @@ fn marker_probe(buf: &[u8], stride: usize, what: &str) -> i64 {
     let mut v: u64 = 0;
     let (mx, my) = std::env::var("VOXL_DEBUG_MARKER")
         .ok()
-        .and_then(|s| s.split_once(',').and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))))
+        .and_then(|s| {
+            s.split_once(',')
+                .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?)))
+        })
         .unwrap_or((300, 150));
     for b in 0..40 {
         let x = mx + (b % 20) * 24 + 12;
@@ -792,12 +1044,20 @@ fn marker_probe(buf: &[u8], stride: usize, what: &str) -> i64 {
         }
     }
     let ms = (v & 0xffffff) as i64;
-    let now = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64) & 0xffffff;
+    let now = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64)
+        & 0xffffff;
     log::info!("marker {} frame {} age {} ms", what, v >> 24, now - ms);
     ms
 }
 
 fn marker_age(ms: i64) -> i64 {
-    let now = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64) & 0xffffff;
+    let now = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64)
+        & 0xffffff;
     now - ms
 }

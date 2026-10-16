@@ -33,7 +33,14 @@ pub enum MicMsg {
 #[link(name = "opus")]
 extern "C" {
     fn opus_decoder_create(fs: i32, channels: c_int, error: *mut c_int) -> *mut c_void;
-    fn opus_decode(st: *mut c_void, data: *const u8, len: i32, pcm: *mut i16, frame_size: c_int, decode_fec: c_int) -> c_int;
+    fn opus_decode(
+        st: *mut c_void,
+        data: *const u8,
+        len: i32,
+        pcm: *mut i16,
+        frame_size: c_int,
+        decode_fec: c_int,
+    ) -> c_int;
 }
 
 const RATE: i32 = 48000;
@@ -56,7 +63,12 @@ struct Queue {
 /// and shrinks its buffer, so audio that piles up while nobody records is at most
 /// ~40 ms stale when someone starts.
 fn open_fifo(path: &CStr) -> Option<OwnedFd> {
-    let fd = open(path, OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC, Mode::empty()).ok()?;
+    let fd = open(
+        path,
+        OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
     let _ = fcntl(&fd, FcntlArg::F_SETPIPE_SZ(4096));
     Some(fd)
 }
@@ -99,14 +111,17 @@ fn writer(path: CString, queue: Arc<Mutex<Queue>>) {
                     warned = false;
                 }
                 None if !warned => {
-                    log::warn!("microphone: cannot open {path:?} (is PulseAudio's pipe source loaded?)");
+                    log::warn!(
+                        "microphone: cannot open {path:?} (is PulseAudio's pipe source loaded?)"
+                    );
                     warned = true;
                 }
                 None => {}
             }
         }
         if let Some(f) = &fd {
-            let bytes = unsafe { std::slice::from_raw_parts(frame.as_ptr() as *const u8, FRAME * 2) };
+            let bytes =
+                unsafe { std::slice::from_raw_parts(frame.as_ptr() as *const u8, FRAME * 2) };
             // EAGAIN: nobody is reading right now, so the frame isn't needed.
             if matches!(write(f, bytes), Err(e) if e != Errno::EAGAIN) {
                 fd = None; // dropping the OwnedFd closes it
@@ -121,7 +136,10 @@ pub fn spawn(fifo: String, hub: Arc<Hub>) -> mpsc::Sender<MicMsg> {
     {
         let queue = queue.clone();
         let path = CString::new(fifo).unwrap();
-        std::thread::Builder::new().name("mic-out".into()).spawn(move || writer(path, queue)).unwrap();
+        std::thread::Builder::new()
+            .name("mic-out".into())
+            .spawn(move || writer(path, queue))
+            .unwrap();
     }
     std::thread::Builder::new()
         .name("mic".into())

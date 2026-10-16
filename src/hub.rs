@@ -87,7 +87,11 @@ impl Client {
         let el = d.window_start.elapsed().as_secs_f64();
         if el >= 0.5 {
             let r = d.bytes as f64 * 8.0 / el;
-            d.rate_bps = if d.rate_bps == 0.0 { r } else { d.rate_bps * 0.6 + r * 0.4 };
+            d.rate_bps = if d.rate_bps == 0.0 {
+                r
+            } else {
+                d.rate_bps * 0.6 + r * 0.4
+            };
             d.bytes = 0;
             d.window_start = Instant::now();
         }
@@ -96,7 +100,10 @@ impl Client {
     /// Frames in flight and age of the oldest unacknowledged one.
     pub fn backlog(&self) -> (usize, u128) {
         let q = self.inflight.lock();
-        (q.len(), q.front().map(|f| f.sent.elapsed().as_millis()).unwrap_or(0))
+        (
+            q.len(),
+            q.front().map(|f| f.sent.elapsed().as_millis()).unwrap_or(0),
+        )
     }
 }
 
@@ -175,10 +182,18 @@ impl Hub {
             audio: AtomicBool::new(false),
             inflight: Mutex::new(VecDeque::new()),
             min_rtt_ms: AtomicU32::new(0),
-            delivered: Mutex::new(RateEst { window_start: Instant::now(), bytes: 0, rate_bps: 0.0 }),
+            delivered: Mutex::new(RateEst {
+                window_start: Instant::now(),
+                bytes: 0,
+                rate_bps: 0.0,
+            }),
             needs_keyframe: AtomicBool::new(true),
             started: AtomicBool::new(false),
-            delay: Mutex::new(DelayEst { base_ms: f64::MAX, base_at: Instant::now(), queue_ms: 0.0 }),
+            delay: Mutex::new(DelayEst {
+                base_ms: f64::MAX,
+                base_at: Instant::now(),
+                queue_ms: 0.0,
+            }),
         });
         self.clients.lock().push(c.clone());
         c
@@ -190,7 +205,12 @@ impl Hub {
     }
 
     pub fn video_clients(&self) -> Vec<Arc<Client>> {
-        self.clients.lock().iter().filter(|c| c.video.load(Ordering::Relaxed)).cloned().collect()
+        self.clients
+            .lock()
+            .iter()
+            .filter(|c| c.video.load(Ordering::Relaxed))
+            .cloned()
+            .collect()
     }
 
     pub fn broadcast(&self, m: impl Fn() -> Out) {

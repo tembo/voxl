@@ -2,11 +2,16 @@
 
 extern "C" {
     fn ARGBToI420(
-        src_argb: *const u8, src_stride_argb: i32,
-        dst_y: *mut u8, dst_stride_y: i32,
-        dst_u: *mut u8, dst_stride_u: i32,
-        dst_v: *mut u8, dst_stride_v: i32,
-        width: i32, height: i32,
+        src_argb: *const u8,
+        src_stride_argb: i32,
+        dst_y: *mut u8,
+        dst_stride_y: i32,
+        dst_u: *mut u8,
+        dst_stride_u: i32,
+        dst_v: *mut u8,
+        dst_stride_v: i32,
+        width: i32,
+        height: i32,
     ) -> i32;
 }
 
@@ -21,7 +26,12 @@ impl I420 {
     pub fn new(width: usize, height: usize) -> Self {
         let cw = width.div_ceil(2);
         let ch = height.div_ceil(2);
-        I420 { width, y: vec![16; width * height], u: vec![128; cw * ch], v: vec![128; cw * ch] }
+        I420 {
+            width,
+            y: vec![16; width * height],
+            u: vec![128; cw * ch],
+            v: vec![128; cw * ch],
+        }
     }
     pub fn stride_uv(&self) -> usize {
         self.width.div_ceil(2)
@@ -38,24 +48,40 @@ impl SendPtr {
 }
 
 /// Convert rows [y0, y1) (even-aligned) of `src` into `dst`.
-pub fn convert_band(src: &[u8], src_stride: usize, dst: &mut I420, y0: usize, y1: usize, threads: usize) {
+pub fn convert_band(
+    src: &[u8],
+    src_stride: usize,
+    dst: &mut I420,
+    y0: usize,
+    y1: usize,
+    threads: usize,
+) {
     let rows = y1 - y0;
     if rows == 0 {
         return;
     }
     let w = dst.width;
     let suv = dst.stride_uv();
-    let (yp, up, vp) = (SendPtr(dst.y.as_mut_ptr()), SendPtr(dst.u.as_mut_ptr()), SendPtr(dst.v.as_mut_ptr()));
+    let (yp, up, vp) = (
+        SendPtr(dst.y.as_mut_ptr()),
+        SendPtr(dst.u.as_mut_ptr()),
+        SendPtr(dst.v.as_mut_ptr()),
+    );
     let src_p = SendPtr(src.as_ptr() as *mut u8);
     let n = threads.clamp(1, (rows / 64).max(1));
     let chunk = (rows.div_ceil(n) + 1) & !1;
     let run = |a: usize, b: usize| unsafe {
         ARGBToI420(
-            src_p.get().add(a * src_stride), src_stride as i32,
-            yp.get().add(a * w), w as i32,
-            up.get().add((a / 2) * suv), suv as i32,
-            vp.get().add((a / 2) * suv), suv as i32,
-            w as i32, (b - a) as i32,
+            src_p.get().add(a * src_stride),
+            src_stride as i32,
+            yp.get().add(a * w),
+            w as i32,
+            up.get().add((a / 2) * suv),
+            suv as i32,
+            vp.get().add((a / 2) * suv),
+            suv as i32,
+            w as i32,
+            (b - a) as i32,
         );
     };
     if n == 1 {
