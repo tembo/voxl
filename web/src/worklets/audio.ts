@@ -1,4 +1,5 @@
-// Jitter-buffered PCM player. Receives planar Float32 [L, R] chunks on a MessagePort.
+// Jitter-buffered PCM player. Receives planar Float32 [L, R] chunks on a MessagePort
+// and posts each one back once copied, so the worker can reuse it.
 import type { PcmChunk } from '../protocol';
 
 class PcmPlayer extends AudioWorkletProcessor {
@@ -15,7 +16,12 @@ class PcmPlayer extends AudioWorkletProcessor {
     super();
     this.port.onmessage = (e: MessageEvent<{ port?: MessagePort }>) => {
       const port = e.data.port;
-      if (port) port.onmessage = (m: MessageEvent<PcmChunk>) => this.push(m.data);
+      if (port) {
+        port.onmessage = (m: MessageEvent<PcmChunk>) => {
+          this.push(m.data);
+          port.postMessage(m.data, [m.data.l.buffer, m.data.r.buffer]);
+        };
+      }
     };
   }
 

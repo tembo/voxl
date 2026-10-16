@@ -15,6 +15,8 @@ let ctx: OffscreenCanvasRenderingContext2D | null = null;
 let audioDecoder: AudioDecoder | null = null;
 let audioPort: MessagePort | null = null;
 let audioTs = 0;
+/** PCM chunks the player worklet has handed back, reused instead of allocating. */
+const spareChunks: PcmChunk[] = [];
 let wantVideo = true;
 let wantAudio = false;
 
@@ -198,7 +200,8 @@ function onAudio(b: Uint8Array) {
     audioDecoder = new AudioDecoder({
       output: (ad) => {
         const n = ad.numberOfFrames;
-        const chunk: PcmChunk = { l: new Float32Array(n), r: new Float32Array(n) };
+        let chunk = spareChunks.pop();
+        if (!chunk || chunk.l.length !== n) chunk = { l: new Float32Array(n), r: new Float32Array(n) };
         ad.copyTo(chunk.l, { planeIndex: 0, format: 'f32-planar' });
         if (ad.numberOfChannels > 1) ad.copyTo(chunk.r, { planeIndex: 1, format: 'f32-planar' });
         else chunk.r.set(chunk.l);
@@ -246,6 +249,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
       break;
     case 'audioPort':
       audioPort = m.port;
+      audioPort.onmessage = (e: MessageEvent<PcmChunk>) => { if (spareChunks.length < 8) spareChunks.push(e.data); };
       wantAudio = true;
       send(cmd.audio(true));
       break;
