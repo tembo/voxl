@@ -12,13 +12,28 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
 pub enum InputEvent {
-    Move { x: i32, y: i32 },
-    Button { button: u8, down: bool },
+    Move {
+        x: i32,
+        y: i32,
+    },
+    Button {
+        button: u8,
+        down: bool,
+    },
     /// Wheel ticks: positive dy scrolls down, positive dx scrolls right.
-    Scroll { dx: i32, dy: i32 },
+    Scroll {
+        dx: i32,
+        dy: i32,
+    },
     /// Precise scroll in desktop pixels (trackpads, smooth wheels).
-    ScrollPx { dx: f64, dy: f64 },
-    Key { keysym: u32, down: bool },
+    ScrollPx {
+        dx: f64,
+        dy: f64,
+    },
+    Key {
+        keysym: u32,
+        down: bool,
+    },
     /// Remote clipboard update, ordered with the key events around it.
     Clipboard(crate::desktop::ClipContent),
     ReleaseAll,
@@ -42,9 +57,9 @@ fn scratch_file(display: Option<&str>) -> std::path::PathBuf {
 
 /// X keycodes (evdev + 8) with no entry in Chromium's DOM code table.
 const SAFE_SCRATCH: &[u8] = &[
-    92, 109, 120, 126, 138, 147, 149, 153, 154, 155, 156, 157, 159, 161, 162, 165, 168, 170, 178, 183, 184, 185, 186, 203, 204, 205, 206,
-    207, 208, 210, 211, 213, 219, 220, 221, 222, 223, 224, 226, 227, 228, 229, 230, 231, 234, 235, 244, 245, 246, 247, 248, 249, 250, 251,
-    253, 254, 255,
+    92, 109, 120, 126, 138, 147, 149, 153, 154, 155, 156, 157, 159, 161, 162, 165, 168, 170, 178,
+    183, 184, 185, 186, 203, 204, 205, 206, 207, 208, 210, 211, 213, 219, 220, 221, 222, 223, 224,
+    226, 227, 228, 229, 230, 231, 234, 235, 244, 245, 246, 247, 248, 249, 250, 251, 253, 254, 255,
 ];
 
 const SHIFT_L: u32 = 0xffe1;
@@ -67,10 +82,18 @@ impl SmoothScroll {
     fn detect(conn: &RustConnection) -> Option<Self> {
         use x11rb::connection::RequestConnection;
         use x11rb::protocol::xinput::{self, ConnectionExt as _, DeviceClassData, ScrollType};
-        let xtest = conn.extension_information(x11rb::protocol::xtest::X11_EXTENSION_NAME).ok()??;
-        let xi = conn.extension_information(xinput::X11_EXTENSION_NAME).ok()??;
+        let xtest = conn
+            .extension_information(x11rb::protocol::xtest::X11_EXTENSION_NAME)
+            .ok()??;
+        let xi = conn
+            .extension_information(xinput::X11_EXTENSION_NAME)
+            .ok()??;
         conn.xinput_xi_query_version(2, 2).ok()?.reply().ok()?;
-        let reply = conn.xinput_xi_query_device(xinput::Device::ALL).ok()?.reply().ok()?;
+        let reply = conn
+            .xinput_xi_query_device(xinput::Device::ALL)
+            .ok()?
+            .reply()
+            .ok()?;
         for dev in reply.infos {
             if !String::from_utf8_lossy(&dev.name).contains("XTEST pointer") {
                 continue;
@@ -86,7 +109,13 @@ impl SmoothScroll {
                 }
             }
             if let (Some(vaxis), Some(haxis)) = (v.filter(|&a| a < 6), h.filter(|&a| a < 6)) {
-                return Some(SmoothScroll { device: dev.deviceid, vaxis, haxis, xtest_opcode: xtest.major_opcode, xi_first_event: xi.first_event });
+                return Some(SmoothScroll {
+                    device: dev.deviceid,
+                    vaxis,
+                    haxis,
+                    xtest_opcode: xtest.major_opcode,
+                    xi_first_event: xi.first_event,
+                });
             }
         }
         None
@@ -178,7 +207,9 @@ impl Injector {
             me.load_keymap(max_kc)?;
             for kc in old.split_whitespace().filter_map(|k| k.parse::<u8>().ok()) {
                 if kc >= min_kc && kc <= max_kc {
-                    let _ = me.conn.change_keyboard_mapping(1, kc, me.per as u8, &vec![0; me.per]);
+                    let _ = me
+                        .conn
+                        .change_keyboard_mapping(1, kc, me.per as u8, &vec![0; me.per]);
                 }
             }
             let _ = me.conn.sync();
@@ -188,7 +219,12 @@ impl Injector {
         me.shift_kc = me.lookup.get(&SHIFT_L).map(|&(k, _)| k).unwrap_or(50);
         me.smooth = SmoothScroll::detect(&me.conn);
         match &me.smooth {
-            Some(s) => log::info!("smooth scrolling via XTEST device {} (axes {}/{})", s.device, s.vaxis, s.haxis),
+            Some(s) => log::info!(
+                "smooth scrolling via XTEST device {} (axes {}/{})",
+                s.device,
+                s.vaxis,
+                s.haxis
+            ),
             None => log::info!("XTEST pointer has no scroll axes; scrolling with wheel clicks"),
         }
         Ok(me)
@@ -196,7 +232,12 @@ impl Injector {
 
     fn load_keymap(&mut self, max_kc: u8) -> Result<(), String> {
         let count = max_kc - self.min_kc + 1;
-        let r = self.conn.get_keyboard_mapping(self.min_kc, count).map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?;
+        let r = self
+            .conn
+            .get_keyboard_mapping(self.min_kc, count)
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?;
         self.per = r.keysyms_per_keycode as usize;
         self.syms = r.keysyms;
         self.lookup.clear();
@@ -220,7 +261,11 @@ impl Injector {
         // from the keycode, so a remapped "New" key would open tabs instead of typing.
         self.scratch.retain(|k| SAFE_SCRATCH.contains(k));
         self.scratch.reverse();
-        log::info!("keymap: {} keysyms, {} scratch keycodes", self.lookup.len(), self.scratch.len());
+        log::info!(
+            "keymap: {} keysyms, {} scratch keycodes",
+            self.lookup.len(),
+            self.scratch.len()
+        );
         Ok(())
     }
 
@@ -230,7 +275,9 @@ impl Injector {
     }
 
     fn fake(&self, ty: u8, detail: u8, x: i16, y: i16) {
-        let _ = self.conn.xtest_fake_input(ty, detail, x11rb::CURRENT_TIME, self.root, x, y, 0);
+        let _ = self
+            .conn
+            .xtest_fake_input(ty, detail, x11rb::CURRENT_TIME, self.root, x, y, 0);
     }
 
     fn resolve(&mut self, keysym: u32) -> (u8, ShiftFix) {
@@ -243,7 +290,14 @@ impl Injector {
             if lvl == want_level || shift_neutral {
                 return (kc, ShiftFix::None);
             }
-            return (kc, if lvl == 1 { ShiftFix::Add } else { ShiftFix::Lift });
+            return (
+                kc,
+                if lvl == 1 {
+                    ShiftFix::Add
+                } else {
+                    ShiftFix::Lift
+                },
+            );
         }
         if let Some((kc, t)) = self.scratch_map.get_mut(&keysym) {
             *t = Instant::now();
@@ -256,11 +310,17 @@ impl Injector {
         let kc = if self.scratch_map.len() < self.scratch.len() {
             self.scratch[self.scratch_map.len()]
         } else {
-            let (&old, _) = self.scratch_map.iter().min_by_key(|(_, (_, t))| *t).unwrap();
+            let (&old, _) = self
+                .scratch_map
+                .iter()
+                .min_by_key(|(_, (_, t))| *t)
+                .unwrap();
             self.scratch_map.remove(&old).unwrap().0
         };
         let row = vec![keysym; self.per];
-        let _ = self.conn.change_keyboard_mapping(1, kc, self.per as u8, &row);
+        let _ = self
+            .conn
+            .change_keyboard_mapping(1, kc, self.per as u8, &row);
         let _ = self.conn.sync();
         // Clients must process MappingNotify before they see the key.
         std::thread::sleep(Duration::from_millis(8));
@@ -268,14 +328,20 @@ impl Injector {
         let per = self.per;
         self.syms[i * per..(i + 1) * per].copy_from_slice(&row);
         self.scratch_map.insert(keysym, (kc, Instant::now()));
-        let used: Vec<String> = self.scratch_map.values().map(|(k, _)| k.to_string()).collect();
+        let used: Vec<String> = self
+            .scratch_map
+            .values()
+            .map(|(k, _)| k.to_string())
+            .collect();
         let _ = std::fs::write(&self.scratch_path, used.join(" "));
         (kc, ShiftFix::None)
     }
 
     fn restore_keymap(&mut self) {
         for (_, (kc, _)) in std::mem::take(&mut self.scratch_map) {
-            let _ = self.conn.change_keyboard_mapping(1, kc, self.per as u8, &vec![0; self.per]);
+            let _ = self
+                .conn
+                .change_keyboard_mapping(1, kc, self.per as u8, &vec![0; self.per]);
         }
         let _ = self.conn.sync();
         let _ = std::fs::remove_file(&self.scratch_path);
@@ -283,7 +349,9 @@ impl Injector {
 
     fn handle(&mut self, ev: InputEvent) {
         match ev {
-            InputEvent::Move { x, y } => self.fake(xproto::MOTION_NOTIFY_EVENT, 0, x as i16, y as i16),
+            InputEvent::Move { x, y } => {
+                self.fake(xproto::MOTION_NOTIFY_EVENT, 0, x as i16, y as i16)
+            }
             InputEvent::Button { button, down } => {
                 if (button as usize) < self.buttons.len() {
                     if self.buttons[button as usize] == down {
@@ -291,7 +359,16 @@ impl Injector {
                     }
                     self.buttons[button as usize] = down;
                 }
-                self.fake(if down { xproto::BUTTON_PRESS_EVENT } else { xproto::BUTTON_RELEASE_EVENT }, button, 0, 0)
+                self.fake(
+                    if down {
+                        xproto::BUTTON_PRESS_EVENT
+                    } else {
+                        xproto::BUTTON_RELEASE_EVENT
+                    },
+                    button,
+                    0,
+                    0,
+                )
             }
             InputEvent::Scroll { dx, dy } => {
                 let click = |b: u8, n: i32| {
@@ -300,8 +377,17 @@ impl Injector {
                         self.fake(xproto::BUTTON_RELEASE_EVENT, b, 0, 0);
                     }
                 };
-                if dy > 0 { click(5, dy) } else if dy < 0 { click(4, -dy) }
-                if dx > 0 { click(7, dx) } else if dx < 0 { click(6, -dx) }
+                // X buttons: 4/5 scroll up/down, 6/7 left/right.
+                match dy.cmp(&0) {
+                    std::cmp::Ordering::Greater => click(5, dy),
+                    std::cmp::Ordering::Less => click(4, -dy),
+                    std::cmp::Ordering::Equal => {}
+                }
+                match dx.cmp(&0) {
+                    std::cmp::Ordering::Greater => click(7, dx),
+                    std::cmp::Ordering::Less => click(6, -dx),
+                    std::cmp::Ordering::Equal => {}
+                }
             }
             InputEvent::ScrollPx { dx, dy } => {
                 let k = NOTCH / self.px_per_notch;
@@ -316,11 +402,17 @@ impl Injector {
                     }
                 } else {
                     // Whole notches only; the remainder carries into the next gesture event.
-                    let (nx, ny) = ((self.scroll_acc.0 / NOTCH).trunc(), (self.scroll_acc.1 / NOTCH).trunc());
+                    let (nx, ny) = (
+                        (self.scroll_acc.0 / NOTCH).trunc(),
+                        (self.scroll_acc.1 / NOTCH).trunc(),
+                    );
                     self.scroll_acc.0 -= nx * NOTCH;
                     self.scroll_acc.1 -= ny * NOTCH;
                     if nx != 0.0 || ny != 0.0 {
-                        self.handle(InputEvent::Scroll { dx: nx as i32, dy: ny as i32 });
+                        self.handle(InputEvent::Scroll {
+                            dx: nx as i32,
+                            dy: ny as i32,
+                        });
                     }
                 }
             }
@@ -348,7 +440,10 @@ impl Injector {
                             self.fake(xproto::KEY_RELEASE_EVENT, self.shift_kc, 0, 0);
                         }
                         ShiftFix::Lift => {
-                            let held: Vec<u8> = [SHIFT_L, SHIFT_R].iter().filter_map(|k| self.pressed.get(k).copied()).collect();
+                            let held: Vec<u8> = [SHIFT_L, SHIFT_R]
+                                .iter()
+                                .filter_map(|k| self.pressed.get(k).copied())
+                                .collect();
                             for &h in &held {
                                 self.fake(xproto::KEY_RELEASE_EVENT, h, 0, 0);
                             }
@@ -390,7 +485,11 @@ impl Injector {
     }
 }
 
-pub fn spawn(display: Option<String>, clipboard: Option<crate::desktop::ClipboardHandle>, px_per_notch: f64) -> Result<mpsc::Sender<InputEvent>, String> {
+pub fn spawn(
+    display: Option<String>,
+    clipboard: Option<crate::desktop::ClipboardHandle>,
+    px_per_notch: f64,
+) -> Result<mpsc::Sender<InputEvent>, String> {
     let mut inj = Injector::new(display.as_deref())?;
     inj.clipboard = clipboard;
     inj.px_per_notch = px_per_notch.max(1.0);
@@ -400,15 +499,16 @@ pub fn spawn(display: Option<String>, clipboard: Option<crate::desktop::Clipboar
         .spawn(move || {
             while let Ok(first) = rx.recv() {
                 let mut pending_move: Option<(i32, i32)> = None;
-                let handle = |inj: &mut Injector, ev: InputEvent, pm: &mut Option<(i32, i32)>| match ev {
-                    InputEvent::Move { x, y } => *pm = Some((x, y)),
-                    other => {
-                        if let Some((x, y)) = pm.take() {
-                            inj.handle(InputEvent::Move { x, y });
+                let handle =
+                    |inj: &mut Injector, ev: InputEvent, pm: &mut Option<(i32, i32)>| match ev {
+                        InputEvent::Move { x, y } => *pm = Some((x, y)),
+                        other => {
+                            if let Some((x, y)) = pm.take() {
+                                inj.handle(InputEvent::Move { x, y });
+                            }
+                            inj.handle(other);
                         }
-                        inj.handle(other);
-                    }
-                };
+                    };
                 handle(&mut inj, first, &mut pending_move);
                 // Coalesce whatever queued up meanwhile; moves collapse to the latest.
                 while let Ok(ev) = rx.try_recv() {

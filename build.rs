@@ -1,6 +1,7 @@
 fn main() {
     let x264 = pkg_config::probe_library("x264").expect("x264");
-    let others = ["libyuv", "opus", "libpulse-simple"].map(|l| pkg_config::probe_library(l).expect(l));
+    let others =
+        ["libyuv", "opus", "libpulse-simple"].map(|l| pkg_config::probe_library(l).expect(l));
     // Embed library dirs so the binary runs outside the build shell.
     for lib in std::iter::once(&x264).chain(others.iter()) {
         for p in &lib.link_paths {
@@ -17,7 +18,10 @@ fn main() {
         b = b.clang_arg(format!("-I{}", p.display()));
     }
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    b.generate().expect("bindgen x264").write_to_file(out.join("x264.rs")).unwrap();
+    b.generate()
+        .expect("bindgen x264")
+        .write_to_file(out.join("x264.rs"))
+        .unwrap();
     bundle_web(&out);
     println!("cargo:rerun-if-changed=build.rs");
 }
@@ -40,7 +44,11 @@ fn bundle_web(out: &std::path::Path) {
         ])
         .arg(format!("--outdir={}", out.join("web").display()))
         .status()
-        .unwrap_or_else(|e| panic!("running {esbuild} to bundle web/src failed ({e}); use nix-shell, or set ESBUILD"));
+        .unwrap_or_else(|e| {
+            panic!(
+                "running {esbuild} to bundle web/src failed ({e}); use nix-shell, or set ESBUILD"
+            )
+        });
     assert!(status.success(), "esbuild failed to bundle web/src");
     println!("cargo:rerun-if-changed=web/src");
     println!("cargo:rerun-if-env-changed=ESBUILD");

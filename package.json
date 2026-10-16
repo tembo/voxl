@@ -1,0 +1,17 @@
+{
+	"name": "voxl-dev",
+	"private": true,
+	"description": "Formatting, linting and type-checking for the web client (the build itself needs no npm packages).",
+	"scripts": {
+		"fmt": "oxfmt .",
+		"fmt:check": "oxfmt --check .",
+		"lint": "oxlint",
+		"typecheck": "tsc -p web && tsc -p web/tsconfig.worker.json && tsc -p web/tsconfig.worklet.json",
+		"check": "npm run fmt:check && npm run lint && npm run typecheck"
+	},
+	"devDependencies": {
+		"oxfmt": "0.59.0",
+		"oxlint": "1.80.0",
+		"typescript": "5.8.2"
+	}
+}

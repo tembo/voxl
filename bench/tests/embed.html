@@ -1,9 +1,39 @@
-<!doctype html><html><body style="margin:0;background:#f4f4f5;font:14px sans-serif">
-<div style="display:flex;height:100vh">
-  <div style="flex:1;padding:16px">Tembo app (left pane)</div>
-  <div id="sb" style="width:640px;border-left:1px solid #ccc;display:flex;flex-direction:column">
-    <div style="padding:6px 10px;border-bottom:1px solid #ddd">Computer</div>
-    <iframe id="f" src="http://localhost:6903/?resize=remote" style="flex:1;border:0" allow="autoplay; clipboard-read; clipboard-write; fullscreen"></iframe>
-  </div>
-</div><script>// Embedders must take the Keyboard Lock themselves; browsers refuse it inside iframes.
-document.addEventListener('fullscreenchange',()=>{const f=document.fullscreenElement;if(f&&f.tagName==='IFRAME'&&navigator.keyboard)navigator.keyboard.lock().catch(()=>{});else if(navigator.keyboard)navigator.keyboard.unlock();});</script></body></html>
+<!doctype html>
+<html>
+	<body style="margin: 0; background: #f4f4f5; font: 14px sans-serif">
+		<div style="display: flex; height: 100vh">
+			<div style="flex: 1; padding: 16px">Tembo app (left pane)</div>
+			<div
+				id="sb"
+				style="
+					width: 640px;
+					border-left: 1px solid #ccc;
+					display: flex;
+					flex-direction: column;
+				">
+				<div style="padding: 6px 10px; border-bottom: 1px solid #ddd">
+					Computer
+				</div>
+				<iframe
+					id="f"
+					src="http://localhost:6903/?resize=remote"
+					style="flex: 1; border: 0"
+					allow="
+						autoplay;
+						clipboard-read;
+						clipboard-write;
+						fullscreen;
+					"></iframe>
+			</div>
+		</div>
+		<script>
+			// Embedders must take the Keyboard Lock themselves; browsers refuse it inside iframes.
+			document.addEventListener('fullscreenchange', () => {
+				const f = document.fullscreenElement;
+				if (f && f.tagName === 'IFRAME' && navigator.keyboard)
+					navigator.keyboard.lock().catch(() => {});
+				else if (navigator.keyboard) navigator.keyboard.unlock();
+			});
+		</script>
+	</body>
+</html>
