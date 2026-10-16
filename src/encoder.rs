@@ -49,7 +49,7 @@ impl Encoder {
         unsafe {
             let mut param: ffi::x264_param_t = std::mem::zeroed();
             let preset = CString::new(cfg.preset.as_str()).unwrap();
-            let tune = CString::new("zerolatency").unwrap();
+            let tune = c"zerolatency";
             if ffi::x264_param_default_preset(&mut param, preset.as_ptr(), tune.as_ptr()) < 0 {
                 return Err(format!("bad x264 preset {}", cfg.preset));
             }
@@ -95,7 +95,7 @@ impl Encoder {
             param.vui.i_transfer = 1;
             param.vui.i_colmatrix = 6;
             param.vui.b_fullrange = 0;
-            let profile = CString::new("high").unwrap();
+            let profile = c"high";
             ffi::x264_param_apply_profile(&mut param, profile.as_ptr());
 
             let h = ffi::x264_encoder_open_164(&mut param);
