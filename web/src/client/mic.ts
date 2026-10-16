@@ -72,7 +72,11 @@ export function createMic(app: App) {
       await ctx.audioWorklet.addModule('mic.js');
       enc = await opusEncoder();
       const node = new AudioWorkletNode(ctx, 'mic-capture', { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1, channelCountMode: 'explicit' });
-      node.port.onmessage = (e: MessageEvent<Float32Array>) => onChunk(e.data);
+      node.port.onmessage = (e: MessageEvent<Float32Array>) => {
+        onChunk(e.data);
+        // AudioData copied the samples, so the worklet can refill this buffer.
+        node.port.postMessage(e.data, [e.data.buffer]);
+      };
       ctx.createMediaStreamSource(stream).connect(node);
       if (ctx.state !== 'running') await ctx.resume();
       on = true;
