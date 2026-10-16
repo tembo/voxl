@@ -29,6 +29,47 @@
     font: 500 14px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif; pointer-events: none; }
   #stats { position: fixed; top: 6px; left: 6px; padding: 6px 8px; background: rgba(0,0,0,.7); color: #b8f7c4;
     font: 12px/1.35 ui-monospace, Menlo, monospace; white-space: pre; border-radius: 4px; pointer-events: none; display: none; z-index: 2; }
+  #files-btn { display: none !important; }
+  #tools.files #files-btn { display: grid !important; }
+  #files { position: fixed; top: 8px; right: 8px; bottom: 8px; width: min(360px, calc(100vw - 16px)); z-index: 4; display: none; flex-direction: column;
+    background: rgba(17,17,20,.92); color: #e5e7eb; border: 1px solid rgba(255,255,255,.14); border-radius: 12px; backdrop-filter: blur(10px);
+    font: 13px/1.35 ui-sans-serif, system-ui, -apple-system, sans-serif; box-shadow: 0 12px 40px rgba(0,0,0,.45); }
+  #files.open { display: flex; }
+  #files header { display: flex; align-items: center; gap: 6px; padding: 10px 10px 6px 14px; }
+  #files header h2 { flex: 1; margin: 0; font-size: 14px; font-weight: 600; }
+  #files button { border: 1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.06); color: inherit; border-radius: 7px; height: 28px;
+    padding: 0 10px; font: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  #files button:hover { background: rgba(255,255,255,.12); }
+  #files button.icon { width: 28px; padding: 0; justify-content: center; }
+  #files svg { width: 16px; height: 16px; flex: none; }
+  #files-crumbs { padding: 0 14px 8px; color: #9aa4b2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #files-crumbs a { color: #cbd5e1; cursor: pointer; text-decoration: none; }
+  #files-crumbs a:hover { text-decoration: underline; }
+  #files-list { flex: 1; overflow-y: auto; border-top: 1px solid rgba(255,255,255,.08); padding: 4px 0; }
+  .f-row { display: flex; align-items: center; gap: 10px; padding: 7px 14px; cursor: pointer; }
+  .f-row:hover { background: rgba(255,255,255,.07); }
+  .f-row .f-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .f-row .f-meta { color: #8b95a5; font-size: 12px; white-space: nowrap; }
+  .f-row .f-ico { color: #8b95a5; display: grid; }
+  .f-row.dir .f-ico { color: #7aa2f7; }
+  .f-empty { padding: 18px 14px; color: #8b95a5; text-align: center; }
+  #files-uploads:empty { display: none; }
+  #files-uploads { border-top: 1px solid rgba(255,255,255,.08); padding: 6px 0; max-height: 40%; overflow-y: auto; }
+  .f-up { padding: 6px 14px; }
+  .f-up .f-up-top { display: flex; gap: 8px; }
+  .f-up .f-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .f-up .f-meta { color: #8b95a5; font-size: 12px; }
+  .f-up.err .f-meta { color: #f87171; }
+  .f-up.done .f-meta { color: #86efac; }
+  .f-bar { height: 3px; margin-top: 5px; background: rgba(255,255,255,.1); border-radius: 2px; overflow: hidden; }
+  .f-bar i { display: block; height: 100%; width: 0; background: #7aa2f7; transition: width .15s; }
+  .f-up.done .f-bar, .f-up.err .f-bar { display: none; }
+  #files footer { padding: 8px 14px 10px; color: #8b95a5; font-size: 12px; border-top: 1px solid rgba(255,255,255,.08); }
+  #drop { position: fixed; inset: 0; z-index: 5; display: none; align-items: center; justify-content: center; background: rgba(10,12,16,.55);
+    pointer-events: none; }
+  #drop.show { display: flex; }
+  #drop div { padding: 18px 26px; border: 2px dashed rgba(255,255,255,.5); border-radius: 14px; background: rgba(17,17,20,.85); color: #e5e7eb;
+    font: 500 15px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif; }
 </style>
 </head>
 <body>
@@ -36,8 +77,23 @@
 <textarea id="kbd" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" tabindex="-1" aria-hidden="true"></textarea>
 <div id="tools">
   <button id="kb-btn" type="button" title="Keyboard" aria-label="Show keyboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M9 10h.01M12 10h.01M15 10h.01M18 10h.01M7 14h10"/></svg></button>
+  <button id="files-btn" type="button" title="Files (upload and download)" aria-label="Files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5 12 11l2.5 2.5"/></svg></button>
   <button id="fs-btn" type="button" title="Fullscreen (captures browser shortcuts)" aria-label="Toggle fullscreen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
 </div>
+<div id="files" role="dialog" aria-label="Files">
+  <header>
+    <h2>Files</h2>
+    <button id="files-upload" type="button" title="Upload files to this folder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5M5 20h14"/></svg>Upload</button>
+    <button id="files-refresh" class="icon" type="button" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg></button>
+    <button id="files-close" class="icon" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </header>
+  <div id="files-crumbs"></div>
+  <div id="files-list"></div>
+  <div id="files-uploads"></div>
+  <footer>Drop files anywhere on the screen to upload them here. Click a file to download it.</footer>
+  <input id="files-input" type="file" multiple hidden>
+</div>
+<div id="drop"><div>Drop to upload to <span id="drop-dir"></span></div></div>
 <div id="status">Connecting…</div>
 <div id="stats"></div>
 <script src="client.js"></script>

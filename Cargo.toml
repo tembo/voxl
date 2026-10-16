@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "fs", "io-util"] }
 axum = { version = "0.8", features = ["ws"] }
 x11rb = { version = "0.13", features = ["shm", "damage", "xfixes", "xtest", "shape", "xinput", "allow-unsafe-code"] }
 libc = "0.2"

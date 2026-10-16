@@ -69,6 +69,12 @@ and latency runs from the moment the content was drawn to the decoded frame. See
 - **Clipboard:** CLIPBOARD sync both ways for text and PNG images, including INCR
   transfers and paste ordering.
 - **Audio:** PulseAudio monitor audio is sent as Opus.
+- **Files:** a Files button (top-right on hover) opens a panel to browse the
+  desktop user's home folder and download files, newest first. Files dropped
+  anywhere on the screen, or picked with Upload, go to the open folder
+  (`~/Downloads` by default). Transfers use their own HTTP requests, so they never
+  hold up the stream. Uploads are written to a hidden temporary file and renamed
+  when complete, and existing names get a ` (1)` suffix instead of being replaced.
 
 ## Build
 
@@ -113,6 +119,10 @@ adds ~15 ms).
 | `--adaptive-threads` | `false` | encode on one thread, fanning out only under sustained heavy motion |
 | `--stripes` | `1` | encode the screen as N independent horizontal streams (experimental) |
 | `--scroll-px-per-notch` | `180` | desktop pixels one wheel notch scrolls (calibrates smooth scrolling) |
+| `--file-transfers` | `upload,download` | `upload`, `download`, both, or `none` |
+| `--files-root` | `$HOME` | folder the Files panel can see; nothing outside it is reachable |
+| `--upload-dir` | `Downloads` | folder (under the root) the panel opens and uploads into; created on first upload |
+| `--max-upload-mb` | `0` (no limit) | largest accepted upload |
 | `--convert-threads`, `--coalesce-us` | `4`, `0` | tuning |
 
 Other selkies flags are accepted and ignored. `GET /stats` returns server counters,
@@ -132,7 +142,15 @@ short comma-separated commands: `a,<frame>` ack, `m,x,y` move, `b,btn,0|1`,
 `c,<text>` clipboard text, binary `0x11`+PNG clipboard image, `v,0|1` video on/off,
 `au,0|1` audio, `kf` keyframe request, `po,<t>` pong.
 
+Files are plain HTTP: `GET /files/list?path=<dir>` returns JSON entries (`name`, `dir`, `size`, `mtime` in ms),
+`GET /files/download?path=<file>` streams a file as an attachment, and
+`PUT /files/upload?path=<dir>&name=<file>` takes the raw file as the body. Uploads
+must send an `X-Voxl-Upload` header; browsers only send custom headers cross-origin
+after a CORS preflight, which voxl never answers, so other sites can't upload.
+Paths are relative to `--files-root`; `..`, absolute paths and symlinks leading
+outside it are refused.
+
 ## Limitations
 
 X11 only, single display, fixed resolution, H.264 4:2:0, desktop audio out only (no
-microphone), no file transfer.
+microphone), single files only (no folder upload or download).

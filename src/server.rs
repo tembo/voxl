@@ -18,6 +18,7 @@ pub struct AppState {
     pub hub: Arc<Hub>,
     pub audio: bool,
     pub epoch: Instant,
+    pub files: Arc<crate::files::Files>,
 }
 
 macro_rules! asset {
@@ -27,6 +28,12 @@ macro_rules! asset {
 }
 
 pub fn router(state: AppState) -> Router {
+    use crate::files;
+    let file_routes = Router::new()
+        .route("/files/list", get(files::list))
+        .route("/files/download", get(files::download))
+        .route("/files/upload", axum::routing::put(files::upload))
+        .with_state(state.files.clone());
     Router::new()
         .route("/", asset!("index.html", "text/html; charset=utf-8"))
         .route("/index.html", asset!("index.html", "text/html; charset=utf-8"))
@@ -38,6 +45,7 @@ pub fn router(state: AppState) -> Router {
         .route("/stats", get(stats))
         .route("/ws", get(ws_handler))
         .with_state(state)
+        .merge(file_routes)
 }
 
 async fn stats(State(s): State<AppState>) -> Response {
@@ -84,7 +92,8 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     let client = s.hub.add_client(tx);
     log::info!("client {} connected", client.id);
     let stripes = s.hub.stripes.lock().clone();
-    let hello = serde_json::json!({"t": "hello", "w": s.hub.width.load(Ordering::Relaxed), "h": s.hub.height.load(Ordering::Relaxed), "audio": s.audio, "stripes": stripes});
+    let hello = serde_json::json!({"t": "hello", "w": s.hub.width.load(Ordering::Relaxed), "h": s.hub.height.load(Ordering::Relaxed), "audio": s.audio, "stripes": stripes,
+        "files": {"upload": s.files.upload, "download": s.files.download, "dir": s.files.default_dir}});
     client.send(Out::Text(hello.to_string()));
     if let Some(c) = s.hub.cursor.lock().clone() {
         client.send(Out::Bin(c));

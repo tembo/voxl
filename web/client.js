@@ -76,6 +76,7 @@
         stripeLayout = m.stripes && m.stripes.length ? m.stripes : [[0, m.h]];
         buildStripes(stripeLayout);
         layout();
+        files.setup(m.files);
         statusEl.style.display = 'none';
         break;
       case 'status':
@@ -413,7 +414,8 @@
   // Touch devices keep the toolbar visible; mice reveal it near the top edge.
   if (matchMedia('(pointer: coarse)').matches) { tools.classList.add('touch'); showTools(0); }
   else document.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse' && e.clientY < 48 && e.clientX > window.innerWidth - 160) showTools(2500); });
-  for (const b of [kbBtn, fsBtn]) b.addEventListener('pointerdown', (e) => e.stopPropagation());
+  const filesBtn = document.getElementById('files-btn');
+  for (const b of [kbBtn, fsBtn, filesBtn]) b.addEventListener('pointerdown', (e) => e.stopPropagation());
   kbBtn.addEventListener('click', () => {
     if (document.activeElement === kbd && kbd.dataset.soft) { kbd.blur(); delete kbd.dataset.soft; }
     else { kbd.dataset.soft = '1'; kbd.focus({ preventScroll: true }); }
@@ -432,6 +434,204 @@
     fsBtn.classList.toggle('on', !!document.fullscreenElement);
     layout();
   });
+
+  // ---- files: browse and download, upload with the button or by dropping files ----
+  const files = (() => {
+    const panel = document.getElementById('files');
+    const list = document.getElementById('files-list');
+    const crumbs = document.getElementById('files-crumbs');
+    const uploads = document.getElementById('files-uploads');
+    const input = document.getElementById('files-input');
+    const drop = document.getElementById('drop');
+    const dropDir = document.getElementById('drop-dir');
+    const svg = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+    const ICON_DIR = svg('<path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>');
+    const ICON_FILE = svg('<path d="M14 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5z"/><path d="M14 3.5v5h5"/>');
+    let cfg = null, cwd = '', seq = 0, shown = '', poll = null;
+    const api = (op, q) => `files/${op}?${new URLSearchParams(q)}`;
+    const label = (p) => '~' + (p ? '/' + p : '');
+    const join = (a, b) => (a ? a + '/' : '') + b;
+    const size = (n) => n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixed(1)} KB` : n < 1 << 30 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1073741824).toFixed(2)} GB`;
+    function when(t) {
+      const d = new Date(t), now = new Date();
+      if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
+    }
+    function setup(f) {
+      cfg = f && (f.upload || f.download) ? f : null;
+      tools.classList.toggle('files', !!cfg);
+      if (!cfg) { close(); return; }
+      if (!cwd) cwd = cfg.dir || '';
+      dropDir.textContent = label(cwd);
+      document.getElementById('files-upload').style.display = cfg.upload ? '' : 'none';
+      panel.querySelector('footer').textContent = [cfg.upload && 'Drop files anywhere on the screen to upload them here.', cfg.download && 'Click a file to download it.'].filter(Boolean).join(' ');
+    }
+    function open() {
+      if (!cfg) return;
+      panel.classList.add('open');
+      load(cwd);
+      clearInterval(poll);
+      // Pick up files that appear in the VM (e.g. browser downloads) while open.
+      poll = setInterval(() => { if (!document.hidden) load(cwd, true); }, 3000);
+    }
+    function close() { panel.classList.remove('open'); clearInterval(poll); poll = null; }
+    async function load(path, quiet) {
+      const n = ++seq;
+      let r = null, d = null;
+      try { r = await fetch(api('list', { path }), { cache: 'no-store' }); d = await r.json(); } catch {}
+      if (n !== seq) return;
+      if (!r || !r.ok || !d) {
+        if (quiet) return;
+        shown = '';
+        list.innerHTML = '';
+        const e = document.createElement('div');
+        e.className = 'f-empty';
+        e.textContent = (d && d.error) || 'Could not open this folder.';
+        list.append(e);
+        return;
+      }
+      cwd = d.path; dropDir.textContent = label(cwd);
+      const key = cwd + '\n' + JSON.stringify(d.entries);
+      if (key !== shown) { shown = key; render(d.entries); }
+    }
+    function render(entries) {
+      crumbs.innerHTML = '';
+      const parts = cwd ? cwd.split('/') : [];
+      const crumb = (text, path) => { const a = document.createElement('a'); a.textContent = text; a.onclick = () => load(path); crumbs.append(a); };
+      crumb('~', '');
+      parts.forEach((p, i) => { crumbs.append(' / '); crumb(p, parts.slice(0, i + 1).join('/')); });
+      const top = list.scrollTop;
+      list.innerHTML = '';
+      // Folders by name, then files newest first (downloads land at the top).
+      entries.sort((a, b) => (b.dir - a.dir) || (a.dir ? a.name.localeCompare(b.name) : b.mtime - a.mtime || a.name.localeCompare(b.name)));
+      if (!entries.length) {
+        const e = document.createElement('div');
+        e.className = 'f-empty';
+        e.textContent = cfg.upload ? 'This folder is empty. Drop files here to upload them.' : 'This folder is empty.';
+        list.append(e);
+      }
+      for (const en of entries) {
+        const row = document.createElement('div');
+        row.className = 'f-row' + (en.dir ? ' dir' : '');
+        row.innerHTML = `<span class="f-ico">${en.dir ? ICON_DIR : ICON_FILE}</span><span class="f-name"></span><span class="f-meta"></span>`;
+        row.querySelector('.f-name').textContent = en.name;
+        row.querySelector('.f-meta').textContent = en.dir ? when(en.mtime) : `${size(en.size)} · ${when(en.mtime)}`;
+        row.title = en.dir ? `Open ${en.name}` : cfg.download ? `Download ${en.name}` : en.name;
+        const path = join(cwd, en.name);
+        if (en.dir) row.onclick = () => load(path);
+        else if (cfg.download) row.onclick = () => download(path);
+        else row.style.cursor = 'default';
+        list.append(row);
+      }
+      list.scrollTop = top;
+    }
+    function download(path) {
+      const a = document.createElement('a');
+      a.href = api('download', { path });
+      a.download = '';
+      document.body.append(a);
+      a.click();
+      a.remove();
+    }
+    // Uploads run one at a time, each to the folder that was open when it was added.
+    const queue = [];
+    let busy = false;
+    function status(row, text, cls) {
+      row.querySelector('.f-meta').textContent = text;
+      if (cls) row.classList.add(cls);
+    }
+    function upload(picked, skipped = 0) {
+      if (!cfg || !cfg.upload) return;
+      open();
+      for (const f of picked) {
+        const row = document.createElement('div');
+        row.className = 'f-up';
+        row.innerHTML = '<div class="f-up-top"><span class="f-name"></span><span class="f-meta">Waiting…</span></div><div class="f-bar"><i></i></div>';
+        row.querySelector('.f-name').textContent = f.name;
+        uploads.prepend(row);
+        queue.push({ f, dir: cwd, row });
+      }
+      if (skipped) {
+        const row = document.createElement('div');
+        row.className = 'f-up err';
+        row.innerHTML = '<div class="f-up-top"><span class="f-name"></span><span class="f-meta"></span></div>';
+        row.querySelector('.f-name').textContent = `${skipped} folder${skipped > 1 ? 's' : ''} skipped`;
+        status(row, 'Upload the files inside instead');
+        uploads.prepend(row);
+        setTimeout(() => row.remove(), 8000);
+      }
+      pump();
+    }
+    function pump() {
+      if (busy || !queue.length) return;
+      busy = true;
+      const u = queue.shift();
+      const bar = u.row.querySelector('.f-bar i');
+      const xhr = new XMLHttpRequest();
+      const finish = () => { busy = false; pump(); };
+      xhr.open('PUT', api('upload', { path: u.dir, name: u.f.name }));
+      xhr.setRequestHeader('X-Voxl-Upload', '1');
+      xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return;
+        bar.style.width = `${(e.loaded / e.total) * 100}%`;
+        status(u.row, `${Math.floor((e.loaded / e.total) * 100)}% of ${size(e.total)}`);
+      };
+      xhr.onload = () => {
+        let d = {};
+        try { d = JSON.parse(xhr.responseText); } catch {}
+        if (xhr.status === 200) {
+          const saved = (d.path || '').split('/').pop();
+          if (saved && saved !== u.f.name) u.row.querySelector('.f-name').textContent = saved;
+          status(u.row, `Uploaded to ${label(u.dir)}`, 'done');
+          if (u.dir === cwd) load(cwd, true);
+          setTimeout(() => u.row.remove(), 6000);
+        } else status(u.row, d.error || `Failed (${xhr.status})`, 'err');
+        finish();
+      };
+      xhr.onerror = () => { status(u.row, 'Connection lost', 'err'); finish(); };
+      xhr.send(u.f);
+    }
+    filesBtn.addEventListener('click', () => (panel.classList.contains('open') ? close() : open()));
+    document.getElementById('files-close').onclick = close;
+    document.getElementById('files-refresh').onclick = () => load(cwd);
+    document.getElementById('files-upload').onclick = () => input.click();
+    input.onchange = () => { upload([...input.files]); input.value = ''; };
+    // Esc closes the panel unless the remote screen has focus (it goes to the desktop then).
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && e.target !== kbd && e.target !== surface) close(); });
+    // Always swallow dropped files: otherwise the browser navigates away to open them.
+    const hasFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+    let depth = 0;
+    window.addEventListener('dragenter', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      if (cfg && cfg.upload && ++depth === 1) drop.classList.add('show');
+    });
+    window.addEventListener('dragover', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = cfg && cfg.upload ? 'copy' : 'none';
+    });
+    window.addEventListener('dragleave', (e) => {
+      if (hasFiles(e) && --depth <= 0) { depth = 0; drop.classList.remove('show'); }
+    });
+    window.addEventListener('drop', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      drop.classList.remove('show');
+      const picked = [];
+      let skipped = 0;
+      for (const it of e.dataTransfer.items) {
+        if (it.kind !== 'file') continue;
+        const entry = it.webkitGetAsEntry && it.webkitGetAsEntry();
+        if (entry && entry.isDirectory) { skipped++; continue; }
+        const f = it.getAsFile();
+        if (f) picked.push(f);
+      }
+      upload(picked, skipped);
+    });
+    return { setup };
+  })();
 
   // ---- audio ----
   let audioStarted = false, ac = null;
