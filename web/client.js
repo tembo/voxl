@@ -444,12 +444,19 @@
     const input = document.getElementById('files-input');
     const drop = document.getElementById('drop');
     const dropDir = document.getElementById('drop-dir');
-    const svg = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
-    const ICON_DIR = svg('<path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>');
-    const ICON_FILE = svg('<path d="M14 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5z"/><path d="M14 3.5v5h5"/>');
+    // Icons from the Tembo UI package's icon set (16px with 2px padding).
+    const svg = (d) => `<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+    const ICON_DIR = svg('<path d="M3 6V17C3 18.1046 3.89543 19 5 19H19C20.1046 19 21 18.1046 21 17V9C21 7.89543 20.1046 7 19 7H12.5352C12.2008 7 11.8886 6.8329 11.7031 6.5547L10.5937 4.8906C10.2228 4.3342 9.59834 4 8.92963 4H5C3.89543 4 3 4.89543 3 6Z"/>');
+    const ICON_FILE = svg('<path d="M12.1716 3H7C5.89543 3 5 3.89543 5 5V19C5 20.1046 5.89543 21 7 21H17C18.1046 21 19 20.1046 19 19V9.82843C19 9.29799 18.7893 8.78929 18.4142 8.41421L13.5858 3.58579C13.2107 3.21071 12.702 3 12.1716 3Z"/><path d="M13 3.5V7C13 8.10457 13.8954 9 15 9H18.5"/>');
+    const ICON_CHEVRON = svg('<path d="M10 16L13.2929 12.7071C13.6834 12.3166 13.6834 11.6834 13.2929 11.2929L10 8"/>');
+    function empty(title, text) {
+      list.innerHTML = `<div class="f-empty">${ICON_DIR}<b></b><span></span></div>`;
+      list.querySelector('b').textContent = title;
+      list.querySelector('.f-empty span').textContent = text;
+    }
     let cfg = null, cwd = '', seq = 0, shown = '', poll = null;
     const api = (op, q) => `files/${op}?${new URLSearchParams(q)}`;
-    const label = (p) => '~' + (p ? '/' + p : '');
+    const label = (p) => (p ? p.split('/').pop() : 'Home');
     const join = (a, b) => (a ? a + '/' : '') + b;
     const size = (n) => n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixed(1)} KB` : n < 1 << 30 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1073741824).toFixed(2)} GB`;
     function when(t) {
@@ -483,11 +490,7 @@
       if (!r || !r.ok || !d) {
         if (quiet) return;
         shown = '';
-        list.innerHTML = '';
-        const e = document.createElement('div');
-        e.className = 'f-empty';
-        e.textContent = (d && d.error) || 'Could not open this folder.';
-        list.append(e);
+        empty('Can’t open this folder', (d && d.error) || 'The computer did not respond. Try again in a moment.');
         return;
       }
       cwd = d.path; dropDir.textContent = label(cwd);
@@ -498,18 +501,13 @@
       crumbs.innerHTML = '';
       const parts = cwd ? cwd.split('/') : [];
       const crumb = (text, path) => { const a = document.createElement('a'); a.textContent = text; a.onclick = () => load(path); crumbs.append(a); };
-      crumb('~', '');
-      parts.forEach((p, i) => { crumbs.append(' / '); crumb(p, parts.slice(0, i + 1).join('/')); });
+      crumb('Home', '');
+      parts.forEach((p, i) => { crumbs.insertAdjacentHTML('beforeend', ICON_CHEVRON); crumb(p, parts.slice(0, i + 1).join('/')); });
       const top = list.scrollTop;
       list.innerHTML = '';
       // Folders by name, then files newest first (downloads land at the top).
       entries.sort((a, b) => (b.dir - a.dir) || (a.dir ? a.name.localeCompare(b.name) : b.mtime - a.mtime || a.name.localeCompare(b.name)));
-      if (!entries.length) {
-        const e = document.createElement('div');
-        e.className = 'f-empty';
-        e.textContent = cfg.upload ? 'This folder is empty. Drop files here to upload them.' : 'This folder is empty.';
-        list.append(e);
-      }
+      if (!entries.length) empty('No files yet', cfg.upload ? 'Drop files anywhere on the screen, or use Upload, to add them here.' : 'Files in this folder will show up here.');
       for (const en of entries) {
         const row = document.createElement('div');
         row.className = 'f-row' + (en.dir ? ' dir' : '');

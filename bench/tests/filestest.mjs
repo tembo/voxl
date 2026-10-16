@@ -47,11 +47,12 @@ try {
   const p = await ctx.newPage();
   const names = () => p.$$eval('#files-list .f-row .f-name', (e) => e.map((x) => x.textContent));
   await p.goto(base + '/');
+  await p.evaluate(() => { window.crumbs = () => [...document.querySelectorAll('#files-crumbs a')].map((a) => a.textContent).join('/'); });
   await p.waitForFunction(() => document.getElementById('tools').classList.contains('files'), null, { timeout: 10000 });
   await p.mouse.move(1380, 20); await p.waitForTimeout(300);
   await p.click('#files-btn');
   await p.waitForSelector('#files.open');
-  await p.waitForFunction(() => document.getElementById('files-crumbs').textContent === '~ / Downloads');
+  await p.waitForFunction(() => crumbs() === 'Home/Downloads');
   check(true, 'panel opens at ~/Downloads before it exists');
 
   await p.setInputFiles('#files-input', [path.join(fixtures, 'report.csv'), path.join(fixtures, 'photo.jpg')]);
@@ -74,12 +75,12 @@ try {
   check((await names())[0] === 'from-vm.pdf', 'files that appear in the VM show up, newest first');
 
   await p.click('#files-crumbs a:first-child');
-  await p.waitForFunction(() => document.getElementById('files-crumbs').textContent === '~');
+  await p.waitForFunction(() => crumbs() === 'Home');
   await p.click('.f-row.dir >> text=docs');
-  await p.waitForFunction(() => document.getElementById('files-crumbs').textContent === '~ / docs');
+  await p.waitForFunction(() => crumbs() === 'Home/docs');
   check(JSON.stringify(await names()) === '["a.txt"]', 'folders open from the list and the breadcrumb');
   await p.click('#files-crumbs a:first-child');
-  await p.waitForFunction(() => document.getElementById('files-crumbs').textContent === '~');
+  await p.waitForFunction(() => crumbs() === 'Home');
   const [dl] = await Promise.all([p.waitForEvent('download'), p.click('.f-row >> text=résumé.txt')]);
   check(dl.suggestedFilename() === 'résumé.txt' && fs.readFileSync(await dl.path(), 'utf8') === 'unicode', 'clicking a file downloads it with its name');
 

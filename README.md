@@ -75,6 +75,9 @@ and latency runs from the moment the content was drawn to the decoded frame. See
   (`~/Downloads` by default). Transfers use their own HTTP requests, so they never
   hold up the stream. Uploads are written to a hidden temporary file and renamed
   when complete, and existing names get a ` (1)` suffix instead of being replaced.
+- **Look:** the toolbar and Files panel use the Tembo app's UI tokens, icons and
+  Inter (`web/inter.woff2`, a Latin subset under the SIL Open Font License, see
+  `web/inter-LICENSE.txt`).
 
 ## Build
 

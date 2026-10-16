@@ -41,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         .route("/worker.js", asset!("worker.js", "text/javascript"))
         .route("/audio.js", asset!("audio.js", "text/javascript"))
         .route("/favicon.ico", asset!("favicon.ico", "image/x-icon"))
+        .route("/inter.woff2", asset!("inter.woff2", "font/woff2"))
         .route("/healthz", get(|| async { "ok" }))
         .route("/stats", get(stats))
         .route("/ws", get(ws_handler))
