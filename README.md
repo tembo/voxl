@@ -52,6 +52,9 @@ and latency runs from the moment the content was drawn to the decoded frame. See
   drawn to an `OffscreenCanvas` elsewhere, as soon as they are decoded. The cursor is
   drawn locally from XFixes cursor images (the X cursor is hidden), so pointer
   movement has no stream latency.
+- **Rounded corners without a compositor:** `--round-corners` gives top-level
+  windows a rounded X SHAPE when they map or resize, so the X server shows the
+  desktop through the corners. Unlike picom on Xvfb, nothing is repainted per frame.
 - **Input, clipboard, audio:** XTEST injection by keysym, with spare keycodes that
   browsers don't map remapped for characters missing from the keymap. CLIPBOARD
   sync works both ways, including INCR transfers and paste ordering. PulseAudio
@@ -89,6 +92,7 @@ adds ~15 ms).
 | `--paintover-crf`, `--paintover-burst`, `--paintover-delay-ms` | `16`, `3`, `150` | sharpening when the screen goes still |
 | `--enable-clipboard` | `true` | `true`, `in`, `out` or `false` |
 | `--audio-enabled`, `--audio-device-name`, `--audio-bitrate` | `true`, `output.monitor`, `128000` | desktop audio |
+| `--round-corners` | `0` (off) | corner radius in pixels for top-level windows (Tembo uses `12`) |
 | `--adaptive-threads` | `false` | encode on one thread, fanning out only under sustained heavy motion |
 | `--stripes` | `1` | encode the screen as N independent horizontal streams (experimental) |
 | `--convert-threads`, `--coalesce-us` | `4`, `0` | tuning |

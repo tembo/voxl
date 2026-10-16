@@ -3,6 +3,7 @@
 mod audio;
 mod capture;
 mod convert;
+mod corners;
 mod desktop;
 mod encoder;
 mod hub;
@@ -80,6 +81,12 @@ async fn main() {
     if let Err(e) = video::spawn(vcfg, hub.clone()) {
         log::error!("video init failed: {e}");
         std::process::exit(1);
+    }
+    let radius = range_max(a.get("round-corners"), 0.0) as u16;
+    if radius > 0 {
+        if let Err(e) = corners::spawn(display.clone(), radius) {
+            log::warn!("rounded corners unavailable: {e}");
+        }
     }
     let clipboard = match desktop::spawn(display.clone(), hub.clone(), clip_mode) {
         Ok(h) => Some(h),
