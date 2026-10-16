@@ -2,7 +2,10 @@
 
 use crate::hub::{Hub, Out};
 use bytes::Bytes;
-use std::os::fd::AsRawFd;
+use nix::fcntl::OFlag;
+use nix::poll::{poll, PollFd, PollFlags};
+use nix::unistd::{pipe2, read, write};
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::mpsc;
 use std::sync::Arc;
 use x11rb::connection::Connection;
@@ -27,14 +30,14 @@ const MAX_IMAGE: usize = 15 << 20;
 #[derive(Clone)]
 pub struct ClipboardHandle {
     tx: mpsc::Sender<(ClipContent, mpsc::SyncSender<()>)>,
-    wake_w: i32,
+    wake_w: Arc<OwnedFd>,
 }
 
 impl ClipboardHandle {
     pub fn set_blocking(&self, content: ClipContent) {
         let (done_tx, done_rx) = mpsc::sync_channel(1);
         if self.tx.send((content, done_tx)).is_ok() {
-            unsafe { libc::write(self.wake_w, [1u8].as_ptr() as *const _, 1) };
+            let _ = write(&*self.wake_w, &[1u8]);
             let _ = done_rx.recv_timeout(std::time::Duration::from_millis(300));
         }
     }
@@ -87,9 +90,8 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
     }
     conn.flush().map_err(|e| e.to_string())?;
     let (tx, rx) = mpsc::channel::<(ClipContent, mpsc::SyncSender<()>)>();
-    let mut fds = [0i32; 2];
-    unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
-    let (wake_r, wake_w) = (fds[0], fds[1]);
+    let (wake_r, wake_w) = pipe2(OFlag::O_NONBLOCK | OFlag::O_CLOEXEC).map_err(|e| e.to_string())?;
+    let wake_w = Arc::new(wake_w);
     std::thread::Builder::new()
         .name("desktop".into())
         .spawn(move || {
@@ -98,10 +100,9 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
             let mut incr: Option<(u32, Vec<u8>)> = None;
             let mut last_image: Option<u64> = None;
             send_cursor(&conn, &hub);
-            let fd = conn.stream().as_raw_fd();
             loop {
                 let mut drain = [0u8; 64];
-                unsafe { while libc::read(wake_r, drain.as_mut_ptr() as *mut _, 64) > 0 {} }
+                while matches!(read(&wake_r, &mut drain), Ok(n) if n > 0) {}
                 while let Ok((content, done)) = rx.try_recv() {
                     if mode.to_server {
                         match &content {
@@ -118,8 +119,8 @@ pub fn spawn(display: Option<String>, hub: Arc<Hub>, mode: ClipboardMode) -> Res
                 let ev = match conn.poll_for_event() {
                     Ok(Some(ev)) => ev,
                     Ok(None) => {
-                        let mut p = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }, libc::pollfd { fd: wake_r, events: libc::POLLIN, revents: 0 }];
-                        unsafe { libc::poll(p.as_mut_ptr(), 2, 1000) };
+                        let mut p = [PollFd::new(conn.stream().as_fd(), PollFlags::POLLIN), PollFd::new(wake_r.as_fd(), PollFlags::POLLIN)];
+                        let _ = poll(&mut p, 1000u16);
                         continue;
                     }
                     Err(e) => {

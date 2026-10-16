@@ -1,8 +1,11 @@
 //! Shared state between media producers (video/audio/cursor/clipboard) and websocket clients.
 
 use bytes::Bytes;
+use nix::fcntl::OFlag;
+use nix::unistd::{pipe2, read, write};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
+use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -130,18 +133,15 @@ pub struct Hub {
     /// Last cursor message, replayed to new clients.
     pub cursor: Mutex<Option<Bytes>>,
     /// Pipe used to wake the capture thread (acks, joins, keyframe requests).
-    wake_w: i32,
-    pub wake_r: i32,
+    wake_w: OwnedFd,
+    pub wake_r: OwnedFd,
     pub input: Mutex<Option<std::sync::mpsc::Sender<crate::input::InputEvent>>>,
     pub last_clipboard: Mutex<Option<String>>,
 }
 
 impl Hub {
     pub fn new() -> Arc<Self> {
-        let mut fds = [0i32; 2];
-        unsafe {
-            libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC);
-        }
+        let (wake_r, wake_w) = pipe2(OFlag::O_NONBLOCK | OFlag::O_CLOEXEC).expect("wake pipe");
         Arc::new(Hub {
             clients: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),
@@ -151,22 +151,20 @@ impl Hub {
             target_kbps: AtomicU32::new(0),
             stripes: Mutex::new(Vec::new()),
             cursor: Mutex::new(None),
-            wake_w: fds[1],
-            wake_r: fds[0],
+            wake_w,
+            wake_r,
             input: Mutex::new(None),
             last_clipboard: Mutex::new(None),
         })
     }
 
     pub fn wake(&self) {
-        unsafe {
-            libc::write(self.wake_w, [1u8].as_ptr() as *const _, 1);
-        }
+        let _ = write(&self.wake_w, &[1u8]);
     }
 
     pub fn drain_wake(&self) {
         let mut buf = [0u8; 64];
-        unsafe { while libc::read(self.wake_r, buf.as_mut_ptr() as *mut _, 64) > 0 {} }
+        while matches!(read(&self.wake_r, &mut buf), Ok(n) if n > 0) {}
     }
 
     pub fn add_client(&self, tx: mpsc::UnboundedSender<Out>) -> Arc<Client> {
