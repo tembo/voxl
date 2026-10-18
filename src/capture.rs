@@ -129,30 +129,32 @@ impl Capturer {
             .map_err(|e| e.to_string())?;
         let mut stride = width as usize * 4;
         let seg = conn.generate_id().map_err(|e| e.to_string())?;
-        let (buf, offset, direct) = match find_xvfb_framebuffer(&conn, root, width, height) {
-            Some((buf, offset, fb_stride)) => {
-                log::info!(
-                    "capturing directly from the Xvfb framebuffer (shmid {})",
-                    buf.shmid
-                );
-                stride = fb_stride;
-                (buf, offset, true)
-            }
-            None => {
-                log::warn!(
+        let server_pid = display.and_then(xserver_pid);
+        let (buf, offset, direct) =
+            match find_xvfb_framebuffer(&conn, root, width, height, server_pid) {
+                Some((buf, offset, fb_stride)) => {
+                    log::info!(
+                        "capturing directly from the Xvfb framebuffer (shmid {})",
+                        buf.shmid
+                    );
+                    stride = fb_stride;
+                    (buf, offset, true)
+                }
+                None => {
+                    log::warn!(
                     "Xvfb framebuffer not found (start Xvfb with -shmem); falling back to GetImage"
                 );
-                let buf = ShmBuf::new(stride * height as usize)?;
-                conn.shm_attach(seg, buf.shmid as u32, false)
-                    .map_err(|e| e.to_string())?
-                    .check()
-                    .map_err(|e| e.to_string())?;
-                // Mark for removal now; it stays alive while attached.
-                unsafe { libc::shmctl(buf.shmid, libc::IPC_RMID, std::ptr::null_mut()) };
-                log::info!("capturing via MIT-SHM GetImage");
-                (buf, 0, false)
-            }
-        };
+                    let buf = ShmBuf::new(stride * height as usize)?;
+                    conn.shm_attach(seg, buf.shmid as u32, false)
+                        .map_err(|e| e.to_string())?
+                        .check()
+                        .map_err(|e| e.to_string())?;
+                    // Mark for removal now; it stays alive while attached.
+                    unsafe { libc::shmctl(buf.shmid, libc::IPC_RMID, std::ptr::null_mut()) };
+                    log::info!("capturing via MIT-SHM GetImage");
+                    (buf, 0, false)
+                }
+            };
         let damage = conn.generate_id().map_err(|e| e.to_string())?;
         conn.damage_create(damage, root, damage::ReportLevel::RAW_RECTANGLES)
             .map_err(|e| e.to_string())?;
@@ -281,17 +283,31 @@ impl Capturer {
     }
 }
 
+/// Pid of the local X server for `display` (":N" or "host:N.S"), from its lock file.
+fn xserver_pid(display: &str) -> Option<u32> {
+    let after = display.rsplit(':').next()?;
+    let n: u32 = after.split('.').next()?.parse().ok()?;
+    std::fs::read_to_string(format!("/tmp/.X{n}-lock"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 fn be32(b: &[u8], i: usize) -> u32 {
     u32::from_be_bytes([b[i * 4], b[i * 4 + 1], b[i * 4 + 2], b[i * 4 + 3]])
 }
 
 /// Xvfb started with `-shmem` keeps each screen as an XWD image in a SysV segment.
 /// Find it, check the header and verify pixels against the server before trusting it.
+/// After a RandR resize the header still describes the size Xvfb started with: the
+/// screen is the top-left `width`x`height` of it, at the header's stride.
 fn find_xvfb_framebuffer(
     conn: &RustConnection,
     root: u32,
     width: u32,
     height: u32,
+    server_pid: Option<u32>,
 ) -> Option<(ShmBuf, usize, usize)> {
     if std::env::var("VOXL_NO_DIRECT_FB").is_ok() {
         return None;
@@ -305,8 +321,12 @@ fn find_xvfb_framebuffer(
         let (Ok(shmid), Ok(size)) = (f[1].parse::<i32>(), f[3].parse::<usize>()) else {
             continue;
         };
-        if size < (width * height * 4) as usize || size > (width * height * 4) as usize + (1 << 16)
-        {
+        // Several Xvfbs can run side by side with similar (or blank) screens, so only
+        // look at segments our X server created when we know its pid.
+        if server_pid.is_some_and(|pid| f.get(4).and_then(|c| c.parse::<u32>().ok()) != Some(pid)) {
+            continue;
+        }
+        if size < (width * height * 4) as usize {
             continue;
         }
         let Some(buf) = ShmBuf::attach_readonly(shmid, size) else {
@@ -321,7 +341,7 @@ fn find_xvfb_framebuffer(
             be32(b, 12) as usize,
             be32(b, 19) as usize,
         );
-        if be32(b, 1) != 7 || w != width || h != height || bpp != 32 || bpl < (w * 4) as usize {
+        if be32(b, 1) != 7 || w < width || h < height || bpp != 32 || bpl < (w * 4) as usize {
             continue;
         }
         let offset = header_size + ncolors * 12;

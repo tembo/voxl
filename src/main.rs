@@ -10,6 +10,7 @@ mod files;
 mod hub;
 mod input;
 mod mic;
+mod screen;
 mod server;
 mod video;
 
@@ -101,7 +102,24 @@ async fn main() {
     let audio_on = truthy(a.get("audio-enabled"), true);
 
     let hub = hub::Hub::new();
-    if let Err(e) = video::spawn(vcfg, hub.clone()) {
+    // --enable-resize (as in selkies): clients resize the desktop to their window.
+    let screen = truthy(a.get("enable-resize"), false)
+        .then(|| match screen::Screen::open(display.as_deref()) {
+            Ok(s) => {
+                log::info!("dynamic resolution on, up to {}x{}", s.max().0, s.max().1);
+                Some(s)
+            }
+            Err(e) => {
+                log::warn!("dynamic resolution unavailable: {e}");
+                None
+            }
+        })
+        .flatten();
+    let resize_on = screen.is_some();
+    // Desktop pixels per CSS pixel of the viewer's window. The default matches a
+    // 144 DPI desktop (apps drawn at 1.5x), so windows look as big as in the viewer.
+    let resize_scale = range_max(a.get("resize-scale"), 1.5);
+    if let Err(e) = video::spawn(vcfg, hub.clone(), screen) {
         log::error!("video init failed: {e}");
         std::process::exit(1);
     }
@@ -177,12 +195,28 @@ async fn main() {
             .unwrap_or_else(|| "/tmp/voxl-mic.fifo".into());
         mic::spawn(fifo, hub.clone())
     });
+    {
+        let mut extra = hub.hello_extra.lock();
+        extra.insert("audio".into(), audio_on.into());
+        extra.insert("mic".into(), mic.is_some().into());
+        extra.insert(
+            "files".into(),
+            serde_json::json!({"upload": files.upload, "download": files.download, "dir": files.default_dir}),
+        );
+        if resize_on {
+            extra.insert(
+                "resize".into(),
+                serde_json::json!({ "scale": resize_scale }),
+            );
+        }
+    }
     let state = server::AppState {
         hub: hub.clone(),
         audio: audio_on,
         epoch: Instant::now(),
         files,
         mic,
+        resize: resize_on,
     };
     let app = server::router(state);
     let listener = tokio::net::TcpListener::bind((addr.as_str(), port))

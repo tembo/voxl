@@ -144,6 +144,12 @@ pub struct Hub {
     pub wake_r: OwnedFd,
     pub input: Mutex<Option<std::sync::mpsc::Sender<crate::input::InputEvent>>>,
     pub last_clipboard: Mutex<Option<String>>,
+    /// Desktop size a client asked for (dynamic resolution), applied by the video thread.
+    pub resize_req: Mutex<Option<(u32, u32)>>,
+    /// Largest desktop size (Some when dynamic resolution is on).
+    pub resize_max: Mutex<Option<(u32, u32)>>,
+    /// Server settings sent in every `hello` besides the geometry (audio, files, ...).
+    pub hello_extra: Mutex<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl Hub {
@@ -162,6 +168,9 @@ impl Hub {
             wake_r,
             input: Mutex::new(None),
             last_clipboard: Mutex::new(None),
+            resize_req: Mutex::new(None),
+            resize_max: Mutex::new(None),
+            hello_extra: Mutex::new(serde_json::Map::new()),
         })
     }
 
@@ -211,6 +220,28 @@ impl Hub {
             .filter(|c| c.video.load(Ordering::Relaxed))
             .cloned()
             .collect()
+    }
+
+    /// The `hello` message: current geometry plus the server's settings.
+    pub fn hello(&self) -> String {
+        let mut m = self.hello_extra.lock().clone();
+        m.insert("t".into(), "hello".into());
+        m.insert("w".into(), self.width.load(Ordering::Relaxed).into());
+        m.insert("h".into(), self.height.load(Ordering::Relaxed).into());
+        m.insert("stripes".into(), serde_json::json!(*self.stripes.lock()));
+        serde_json::Value::Object(m).to_string()
+    }
+
+    /// After the stream restarts (new size): every client needs the new geometry and
+    /// a keyframe, and acks for the old stream's frames no longer apply.
+    pub fn restart_clients(&self) {
+        let hello = self.hello();
+        for c in self.clients.lock().iter() {
+            c.inflight.lock().clear();
+            c.started.store(false, Ordering::Relaxed);
+            c.needs_keyframe.store(true, Ordering::Relaxed);
+            c.send(Out::Text(hello.clone()));
+        }
     }
 
     pub fn broadcast(&self, m: impl Fn() -> Out) {

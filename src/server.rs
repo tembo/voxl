@@ -20,6 +20,8 @@ pub struct AppState {
     pub epoch: Instant,
     pub files: Arc<crate::files::Files>,
     pub mic: Option<std::sync::mpsc::Sender<crate::mic::MicMsg>>,
+    /// Clients may resize the desktop to their window (--enable-resize).
+    pub resize: bool,
 }
 
 macro_rules! asset {
@@ -125,10 +127,7 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
     let client = s.hub.add_client(tx);
     log::info!("client {} connected", client.id);
-    let stripes = s.hub.stripes.lock().clone();
-    let hello = serde_json::json!({"t": "hello", "w": s.hub.width.load(Ordering::Relaxed), "h": s.hub.height.load(Ordering::Relaxed), "audio": s.audio, "mic": s.mic.is_some(), "stripes": stripes,
-        "files": {"upload": s.files.upload, "download": s.files.download, "dir": s.files.default_dir}});
-    client.send(Out::Text(hello.to_string()));
+    client.send(Out::Text(s.hub.hello()));
     if let Some(c) = s.hub.cursor.lock().clone() {
         client.send(Out::Bin(c));
     }
@@ -276,6 +275,23 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
                 } else {
                     crate::mic::MicMsg::Stop(c.id)
                 });
+            }
+        }
+        // sz,w,h: the desktop size this client's window wants (dynamic resolution).
+        // The latest request wins; the video thread clamps it and applies it.
+        "sz" if s.resize => {
+            if let (Some(w), Some(h), Some(max)) = (
+                num::<u32>(&mut it),
+                num::<u32>(&mut it),
+                *s.hub.resize_max.lock(),
+            ) {
+                let want = crate::screen::fit(w, h, max);
+                let current = (
+                    s.hub.width.load(Ordering::Relaxed),
+                    s.hub.height.load(Ordering::Relaxed),
+                );
+                *s.hub.resize_req.lock() = (want != current).then_some(want);
+                s.hub.wake();
             }
         }
         "kf" => {

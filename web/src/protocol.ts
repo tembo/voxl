@@ -39,6 +39,8 @@ export interface Hello {
 	mic?: boolean;
 	stripes?: Stripe[];
 	files?: FilesConfig;
+	/** Dynamic resolution: desktop pixels per CSS pixel of the viewer's window. */
+	resize?: { scale: number };
 }
 
 /** JSON text messages from the server. */
@@ -62,6 +64,8 @@ export const cmd = {
 	video: (on: boolean) => `v,${on ? 1 : 0}`,
 	audio: (on: boolean) => `au,${on ? 1 : 0}`,
 	mic: (on: boolean) => `mi,${on ? 1 : 0}`,
+	/** Ask for a desktop of this size (dynamic resolution). */
+	resize: (w: number, h: number) => `sz,${w},${h}`,
 	keyframe: 'kf',
 	pong: (sent: number) => `po,${sent}`,
 } as const;
