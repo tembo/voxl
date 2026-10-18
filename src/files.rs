@@ -413,6 +413,11 @@ pub async fn upload(
         .get("path")
         .cloned()
         .unwrap_or_else(|| f.default_dir.clone());
+    // resolve() already confines this to the root; this is the form static analysis
+    // recognizes before folders are created under it.
+    if rel.contains("..") {
+        return err(StatusCode::BAD_REQUEST, "invalid path");
+    }
     let dir = match f.resolve(&rel, rel != f.default_dir) {
         Ok(d) => d,
         Err(e) => return e,
