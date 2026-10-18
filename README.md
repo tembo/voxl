@@ -97,6 +97,17 @@ the full-screen animation).
 - **Clipboard:** CLIPBOARD sync both ways for text and PNG images, including INCR
   transfers and paste ordering.
 - **Audio:** PulseAudio monitor audio is sent as Opus.
+- **Dynamic resolution:** with `--enable-resize`, the desktop follows the viewer's
+  window instead of being scaled into it: the client asks for its window size times
+  `--resize-scale` (default 1.5, matching a 144 DPI desktop, so windows look as big
+  as in the viewer) on connect and, debounced, whenever the window changes. voxl
+  resizes the X screen with RandR (width rounded to 8, height to 2, clamped between
+  640x480 and the size Xvfb started with), rebuilds capture and encode at the new
+  size and sends clients the new geometry with a keyframe. The latest request wins.
+  Start Xvfb at the largest size to allow; it keeps the same `-shmem` framebuffer
+  across sizes, so capture stays zero-copy. `?scale=` on the page overrides the scale.
+  Apps that position things in screen pixels (and agents taking screenshots) see the
+  size change.
 - **Microphone:** with `--microphone-enabled`, a mic button in the toolbar captures the
   browser's microphone (echo cancellation and noise suppression on), encodes it as
   Opus with WebCodecs (16-bit PCM where that's missing) and sends it on the same
@@ -182,6 +193,7 @@ adds ~15 ms).
 | `--paintover-crf`, `--paintover-burst`, `--paintover-delay-ms` | `16`, `3`, `150`                   | sharpening when the screen goes still                                             |
 | `--enable-clipboard`                                           | `true`                             | `true`, `in`, `out` or `false`                                                    |
 | `--audio-enabled`, `--audio-device-name`, `--audio-bitrate`    | `true`, `output.monitor`, `128000` | desktop audio                                                                     |
+| `--enable-resize`, `--resize-scale`                            | `false`, `1.5`                     | desktop follows the viewer's window; desktop pixels per CSS pixel                 |
 | `--microphone-enabled`, `--microphone-fifo`                    | `false`, `/tmp/voxl-mic.fifo`      | browser microphone into the FIFO a PulseAudio pipe source reads                   |
 | `--round-corners`                                              | `0` (off)                          | corner radius in pixels for top-level windows (Tembo uses `12`)                   |
 | `--round-windows`                                              | none                               | `title:radius,...` rounds windows with that title, docks included                 |
@@ -209,7 +221,7 @@ image (RGBA), `0x04` clipboard image (PNG). Text messages are JSON (`hello`, `cl
 short comma-separated commands: `a,<frame>` ack, `m,x,y` move, `b,btn,0|1`,
 `s,dx,dy` wheel clicks, `sp,dx,dy` scroll in desktop pixels, `k,keysym,0|1`,
 `c,<text>` clipboard text, binary `0x11`+PNG clipboard image, `v,0|1` video on/off,
-`au,0|1` audio, `mi,0|1` microphone off/on, binary `0x12`+Opus or `0x13`+PCM (s16le
+`au,0|1` audio, `sz,w,h` desktop size request (dynamic resolution), `mi,0|1` microphone off/on, binary `0x12`+Opus or `0x13`+PCM (s16le
 mono 48 kHz) microphone audio, `kf` keyframe request, `po,<t>` pong.
 
 Files are plain HTTP: `GET /files/list?path=<dir>` returns JSON entries (`name`, `dir`, `size`, `mtime` in ms),
@@ -222,5 +234,5 @@ outside it are refused.
 
 ## Limitations
 
-X11 only, single display, fixed resolution, H.264 4:2:0, single files only (no folder
+X11 only, single display, H.264 4:2:0, resizing only up to the size Xvfb started with, single files only (no folder
 upload or download).

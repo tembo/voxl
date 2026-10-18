@@ -57,8 +57,61 @@ fn union(a: Option<Band>, b: Band) -> Band {
     }
 }
 
-pub fn spawn(cfg: VideoConfig, hub: Arc<Hub>) -> Result<(), String> {
-    let mut cap = Capturer::new(cfg.display.as_deref())?;
+/// One capture/encode setup for the current screen size.
+struct Pipeline {
+    cap: Capturer,
+    job_tx: mpsc::SyncSender<Job>,
+    ret_rx: mpsc::Receiver<(usize, Box<I420>)>,
+    encode: std::thread::JoinHandle<()>,
+}
+
+/// Runs the pipeline. With a `Screen` (dynamic resolution), a client's size request
+/// ends the capture loop: the encoder drains, the screen is resized and the pipeline
+/// is rebuilt at the new size, and clients get the new geometry and a keyframe.
+pub fn spawn(
+    cfg: VideoConfig,
+    hub: Arc<Hub>,
+    mut screen: Option<crate::screen::Screen>,
+) -> Result<(), String> {
+    if let Some(s) = &screen {
+        *hub.resize_max.lock() = Some(s.max());
+    }
+    let mut p = build(&cfg, &hub)?;
+    std::thread::Builder::new()
+        .name("capture".into())
+        .spawn(move || loop {
+            let Pipeline {
+                mut cap,
+                job_tx,
+                ret_rx,
+                encode,
+            } = p;
+            if let Err(e) = capture_loop(&mut cap, cfg.clone(), hub.clone(), job_tx, ret_rx) {
+                log::error!("capture loop ended: {e}");
+                std::process::exit(1);
+            }
+            drop(cap);
+            let _ = encode.join();
+            let req = hub.resize_req.lock().take();
+            if let (Some(s), Some((w, h))) = (screen.as_mut(), req) {
+                if let Err(e) = s.resize(w, h) {
+                    log::warn!("resize to {w}x{h} failed: {e}");
+                }
+            }
+            p = match build(&cfg, &hub) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::error!("video restart failed: {e}");
+                    std::process::exit(1);
+                }
+            };
+        })
+        .unwrap();
+    Ok(())
+}
+
+fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
+    let cap = Capturer::new(cfg.display.as_deref())?;
     let (w, h) = (cap.width, cap.height);
     hub.width.store(w, Ordering::Relaxed);
     hub.height.store(h, Ordering::Relaxed);
@@ -108,22 +161,18 @@ pub fn spawn(cfg: VideoConfig, hub: Arc<Hub>) -> Result<(), String> {
     *hub.stripes.lock() = layout;
     let hub2 = hub.clone();
     let (crf, po_crf) = (cfg.crf, cfg.paintover_crf);
-    std::thread::Builder::new()
+    let encode = std::thread::Builder::new()
         .name("encode".into())
         .spawn(move || encode_loop(stripes, job_rx, ret_tx, hub2, crf, po_crf))
         .unwrap();
-
-    let hub3 = hub.clone();
-    std::thread::Builder::new()
-        .name("capture".into())
-        .spawn(move || {
-            if let Err(e) = capture_loop(&mut cap, cfg, hub3, job_tx, ret_rx) {
-                log::error!("capture loop ended: {e}");
-                std::process::exit(1);
-            }
-        })
-        .unwrap();
-    Ok(())
+    // New geometry (and a keyframe) for clients already connected; no-op at startup.
+    hub.restart_clients();
+    Ok(Pipeline {
+        cap,
+        job_tx,
+        ret_rx,
+        encode,
+    })
 }
 
 fn flow_ok(hub: &Hub, interval_ms: f64) -> bool {
@@ -433,6 +482,9 @@ fn capture_loop(
     let debug_marker = std::env::var("VOXL_DEBUG_MARKER").is_ok();
 
     loop {
+        if hub.resize_req.lock().is_some() {
+            return Ok(());
+        }
         cap.pump()?;
         hub.drain_wake();
         while let Ok((i, b)) = ret_rx.try_recv() {

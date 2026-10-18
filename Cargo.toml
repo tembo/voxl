@@ -23,6 +23,7 @@ x11rb = { version = "0.13", features = [
 	"xtest",
 	"shape",
 	"xinput",
+	"randr",
 	"allow-unsafe-code",
 ] }
 libc = "0.2"

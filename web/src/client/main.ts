@@ -11,6 +11,7 @@ import { createFiles } from './files';
 import { setupKeyboard } from './keyboard';
 import { createMic } from './mic';
 import { setupPointer } from './pointer';
+import { createResize } from './resize';
 import { setupToolbar } from './toolbar';
 import { createVideo } from './video';
 
@@ -70,6 +71,7 @@ function main() {
 	setupToolbar(app, video.layout);
 	const files = createFiles(app);
 	const mic = createMic(app);
+	const resize = createResize(app);
 
 	const offscreen = canvas.transferControlToOffscreen();
 	post(
@@ -110,6 +112,7 @@ function main() {
 				video.layout();
 				files.setup(m.files);
 				mic.setup(!!m.mic);
+				resize.setup(m.resize);
 				statusEl.style.display = 'none';
 				break;
 			case 'status':
