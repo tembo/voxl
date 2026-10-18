@@ -429,6 +429,11 @@ pub async fn upload(
     // Folder uploads: `sub` is the file's folder inside the upload ("Photos/2024"),
     // created as needed. Folders that already exist are merged into.
     let sub = q.get("sub").map(String::as_str).unwrap_or("");
+    // Also covered below (`..` components, checks against the root); this form is the
+    // one static analysis recognizes.
+    if sub.contains("../") {
+        return err(StatusCode::BAD_REQUEST, "invalid folder name");
+    }
     let mut dir = dir;
     for part in sub.split('/').filter(|p| !p.is_empty()) {
         let Some(p) = clean_name(part) else {
