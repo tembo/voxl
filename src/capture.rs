@@ -252,8 +252,24 @@ impl Capturer {
         }
     }
 
+    /// Convert rows [y0, y1) of the current frame into `dst`.
+    pub fn convert(&self, dst: &mut crate::convert::I420, y0: usize, y1: usize, threads: usize) {
+        crate::convert::convert_band(self.pixels(), self.stride, dst, y0, y1, threads);
+    }
+
+    /// The current frame as BGRX pixels and their stride (debug marker probe).
+    pub fn bgrx(&self) -> Option<(&[u8], usize)> {
+        Some((self.pixels(), self.stride))
+    }
+
+    /// The display changed under us and capture must be set up again. X screens only
+    /// change size through dynamic resolution, which restarts capture itself.
+    pub fn needs_rebuild(&self) -> bool {
+        false
+    }
+
     /// Current frame pixels (BGRX, `stride` bytes per row).
-    pub fn pixels(&self) -> &[u8] {
+    fn pixels(&self) -> &[u8] {
         &self.buf.as_slice()[self.offset..self.offset + self.stride * self.height as usize]
     }
 

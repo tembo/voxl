@@ -1,8 +1,8 @@
 //! Shared state between media producers (video/audio/cursor/clipboard) and websocket clients.
 
 use bytes::Bytes;
-use nix::fcntl::OFlag;
-use nix::unistd::{pipe2, read, write};
+use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
+use nix::unistd::{pipe, read, write};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::os::fd::OwnedFd;
@@ -107,6 +107,17 @@ impl Client {
     }
 }
 
+/// A non-blocking, close-on-exec pipe for waking a thread that polls file descriptors
+/// (`pipe2` with those flags, which macOS lacks).
+pub fn wake_pipe() -> nix::Result<(OwnedFd, OwnedFd)> {
+    let (r, w) = pipe()?;
+    for fd in [&r, &w] {
+        fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))?;
+        fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+    }
+    Ok((r, w))
+}
+
 fn wrapping_le(a: u32, b: u32) -> bool {
     b.wrapping_sub(a) < 0x8000_0000
 }
@@ -154,7 +165,7 @@ pub struct Hub {
 
 impl Hub {
     pub fn new() -> Arc<Self> {
-        let (wake_r, wake_w) = pipe2(OFlag::O_NONBLOCK | OFlag::O_CLOEXEC).expect("wake pipe");
+        let (wake_r, wake_w) = wake_pipe().expect("wake pipe");
         Arc::new(Hub {
             clients: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),

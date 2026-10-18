@@ -1,8 +1,9 @@
 # voxl
 
 Low-latency desktop streaming for the browser, written in Rust. voxl captures an X11
-display, encodes it as H.264 and streams it over a WebSocket to a small web client
-that decodes with WebCodecs. It powers the Computer preview in Tembo and replaces
+display (or a Mac's screen, see [macOS](#macos)), encodes it as H.264 and streams it
+over a WebSocket to a small web client that decodes with WebCodecs. It powers the
+Computer preview in Tembo and replaces
 [selkies](https://github.com/selkies-project/selkies) there; it accepts selkies'
 command-line flags, so it drops into the same service definition.
 
@@ -131,6 +132,59 @@ the full-screen animation).
   Inter (`web/inter.woff2`, a Latin subset under the SIL Open Font License, see
   `web/inter-LICENSE.txt`).
 
+## macOS
+
+voxl also streams a Mac's own screen, with every feature of the Linux version: the
+same encoder, flow control, adaptive bitrate, web client and protocol, on Apple's
+APIs instead of X11's.
+
+| Feature            | Linux (X11)                               | macOS                                                                                                                           |
+| ------------------ | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Capture            | Xvfb framebuffer + XDamage                | ScreenCaptureKit: NV12 frames (converted on the GPU) with dirty rectangles                                                      |
+| Encode             | x264, damage-driven, paint-over           | the same                                                                                                                        |
+| Cursor             | XFixes cursor images, drawn by the client | NSCursor images, drawn by the client (left out of the video)                                                                    |
+| Input              | XTEST by keysym                           | CGEvent: keys resolved against the Mac's current layout, Unicode text for the rest                                              |
+| Scrolling          | smooth with the patched Xvfb              | pixel-precise scroll events                                                                                                     |
+| Clipboard          | CLIPBOARD text and PNG                    | NSPasteboard text and images (PNG, and TIFF for apps that only read that)                                                       |
+| Audio              | PulseAudio monitor                        | system audio from ScreenCaptureKit, no driver needed                                                                            |
+| Microphone         | FIFO into a PulseAudio pipe source        | played into a loopback output device such as [BlackHole](https://github.com/ExistentialAudio/BlackHole), which apps record from |
+| Dynamic resolution | RandR, any size up to Xvfb's              | switches the display to the largest mode that fits the window, for voxl's lifetime only                                         |
+| Files              | HTTP under `$HOME`                        | the same                                                                                                                        |
+| Rounded corners    | X SHAPE                                   | not needed (macOS rounds windows)                                                                                               |
+
+Shortcuts work the way the viewer expects: from a Mac, Command is Command; from
+Windows or Linux, Control is sent as Command (so Ctrl+C copies) and the Windows key as
+Control.
+
+Measured on an M1 Max (1920x1080-point display streamed at 2698x1518), a full-screen
+animation reaches the viewer at 58 FPS with 6.5 ms from capture to send, 5.6 ms of
+encoding per frame and a quarter of one core; a still screen costs nothing.
+
+```sh
+brew install x264 opus pkgconf esbuild
+cargo build --release
+./target/release/voxl --port=6901
+```
+
+Open `http://localhost:6901/`. On a Mac, voxl listens on `127.0.0.1` unless `--addr`
+says otherwise: the stream is your whole screen and there is no login, so reach it
+from elsewhere through something that authenticates (an SSH tunnel, Tailscale, a
+proxy). macOS asks for two permissions, for voxl or the terminal that starts it:
+Screen Recording (System Settings > Privacy & Security; restart voxl after granting)
+and Accessibility (for input). For the microphone, install a loopback device (`brew
+install blackhole-2ch`) and pick it as the input in the apps that should hear you.
+
+| macOS flag             | Default                     |                                                                                        |
+| ---------------------- | --------------------------- | -------------------------------------------------------------------------------------- |
+| `--display`            | main display                | display to stream: an index (0 is the main display) or a display ID; logged at startup |
+| `--capture-scale`      | native, within the budget   | streamed pixels per point                                                              |
+| `--max-capture-pixels` | `4096000` (2560x1600)       | pixel budget for the automatic scale: x264's cost grows with area                      |
+| `--microphone-device`  | first loopback device found | output device (name or prefix) to play the browser microphone into                     |
+| `--resize-scale`       | the capture scale           | so a viewer's window maps to the same number of points on the Mac                      |
+
+The other flags work as on Linux; `--audio-device-name`, `--microphone-fifo` and the
+rounded-corner flags don't apply.
+
 ## Build
 
 Needs Rust, pkg-config, clang (bindgen), x264, libyuv, libopus and libpulse, plus
@@ -217,7 +271,7 @@ Debug environment variables: `VOXL_NO_DIRECT_FB`, `VOXL_NO_MBINFO`, `VOXL_X264_I
 One WebSocket at `/ws`. Binary server messages start with a type byte: `0x01` video
 (16-byte header with flags, frame id, server pipeline time, stripe index/count, parts
 in frame and stripe y, followed by Annex-B H.264), `0x02` Opus audio, `0x03` cursor
-image (RGBA), `0x04` clipboard image (PNG). Text messages are JSON (`hello`, `clip`, `ping`). Client messages are
+image (RGBA), `0x04` clipboard image (PNG). Text messages are JSON (`hello`, with the desktop's `os`, `clip`, `ping`). Client messages are
 short comma-separated commands: `a,<frame>` ack, `m,x,y` move, `b,btn,0|1`,
 `s,dx,dy` wheel clicks, `sp,dx,dy` scroll in desktop pixels, `k,keysym,0|1`,
 `c,<text>` clipboard text, binary `0x11`+PNG clipboard image, `v,0|1` video on/off,
@@ -234,5 +288,6 @@ outside it are refused.
 
 ## Limitations
 
-X11 only, single display, H.264 4:2:0, resizing only up to the size Xvfb started with, single files only (no folder
+One display per server (X11 or a Mac's), H.264 4:2:0, resizing only up to the size
+Xvfb started with (on a Mac, to the display's modes), single files only (no folder
 upload or download).

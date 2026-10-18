@@ -13,6 +13,8 @@ export interface App {
 	kbd: HTMLTextAreaElement;
 	tools: HTMLElement;
 	isMac: boolean;
+	/** The desktop is a Mac (from the server's hello). */
+	remoteMac: boolean;
 	inIframe: boolean;
 	/** Desktop size in pixels; 0 until the server says hello. */
 	desk: { w: number; h: number };

@@ -1,18 +1,31 @@
-//! voxl: low-latency X11 desktop streaming (H.264 over WebSocket) for the browser.
+//! voxl: low-latency desktop streaming (H.264 over WebSocket) for the browser, from an
+//! X11 display on Linux or the screen of a Mac.
 
+#[cfg(target_os = "linux")]
 mod audio;
+#[cfg(target_os = "linux")]
 mod capture;
 mod convert;
+#[cfg(target_os = "linux")]
 mod corners;
+#[cfg(target_os = "linux")]
 mod desktop;
 mod encoder;
 mod files;
 mod hub;
+#[cfg(target_os = "linux")]
 mod input;
+#[cfg(target_os = "macos")]
+mod mac;
 mod mic;
+#[cfg(target_os = "linux")]
 mod screen;
 mod server;
 mod video;
+
+// The macOS backend provides the same modules with the same interfaces.
+#[cfg(target_os = "macos")]
+use mac::{audio, capture, desktop, input, screen};
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -51,14 +64,46 @@ fn truthy(v: Option<&String>, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() {
+fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    // AppKit and the keyboard layout APIs want the main thread, so on macOS it runs the
+    // main dispatch queue and the server runs beside it.
+    #[cfg(target_os = "macos")]
+    {
+        std::thread::spawn(move || rt.block_on(run()));
+        dispatch2::dispatch_main();
+    }
+    #[cfg(not(target_os = "macos"))]
+    rt.block_on(run());
+}
+
+async fn run() {
     let a = parse_args();
+    // macOS: --display picks a screen (index or display ID); DISPLAY there belongs to XQuartz.
+    #[cfg(target_os = "linux")]
     let display = std::env::var("DISPLAY")
         .ok()
         .or_else(|| a.get("display").cloned());
-    let addr = a.get("addr").cloned().unwrap_or_else(|| "0.0.0.0".into());
+    #[cfg(target_os = "macos")]
+    let display = a.get("display").cloned();
+    #[cfg(target_os = "macos")]
+    mac::init(&a);
+    // A Mac's own screen is only served locally unless --addr says otherwise; a VM's
+    // display sits behind the platform's proxy.
+    let default_addr = if cfg!(target_os = "macos") {
+        "127.0.0.1"
+    } else {
+        "0.0.0.0"
+    };
+    let addr = a
+        .get("addr")
+        .cloned()
+        .unwrap_or_else(|| default_addr.into());
     let port: u16 = a.get("port").and_then(|p| p.parse().ok()).unwrap_or(6901);
     let ncpu = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -117,8 +162,13 @@ async fn main() {
         .flatten();
     let resize_on = screen.is_some();
     // Desktop pixels per CSS pixel of the viewer's window. The default matches a
-    // 144 DPI desktop (apps drawn at 1.5x), so windows look as big as in the viewer.
-    let resize_scale = range_max(a.get("resize-scale"), 1.5);
+    // 144 DPI desktop (apps drawn at 1.5x), so windows look as big as in the viewer;
+    // on a Mac, the capture's pixels per point.
+    #[cfg(target_os = "linux")]
+    let default_scale = 1.5;
+    #[cfg(target_os = "macos")]
+    let default_scale = mac::capture_scale();
+    let resize_scale = range_max(a.get("resize-scale"), default_scale);
     if let Err(e) = video::spawn(vcfg, hub.clone(), screen) {
         log::error!("video init failed: {e}");
         std::process::exit(1);
@@ -137,9 +187,12 @@ async fn main() {
         })
         .unwrap_or_default();
     if radius > 0 || !named.is_empty() {
+        #[cfg(target_os = "linux")]
         if let Err(e) = corners::spawn(display.clone(), radius, named) {
             log::warn!("rounded corners unavailable: {e}");
         }
+        #[cfg(target_os = "macos")]
+        log::info!("--round-corners/--round-windows: macOS windows are already rounded");
     }
     let clipboard = match desktop::spawn(display.clone(), hub.clone(), clip_mode) {
         Ok(h) => Some(h),
@@ -187,16 +240,25 @@ async fn main() {
     });
     log::info!("file transfer: {transfers} under {}", files.root.display());
     // --microphone-enabled (as in selkies): browser microphone -> a FIFO that a
-    // PulseAudio module-pipe-source reads as the VM's microphone.
-    let mic = truthy(a.get("microphone-enabled"), false).then(|| {
-        let fifo = a
-            .get("microphone-fifo")
+    // PulseAudio module-pipe-source reads as the VM's microphone, or on macOS an
+    // output device that loops back to an input (BlackHole and the like).
+    #[cfg(target_os = "linux")]
+    let mic_sink = Some(
+        a.get("microphone-fifo")
             .cloned()
-            .unwrap_or_else(|| "/tmp/voxl-mic.fifo".into());
-        mic::spawn(fifo, hub.clone())
-    });
+            .unwrap_or_else(|| "/tmp/voxl-mic.fifo".into()),
+    );
+    #[cfg(target_os = "macos")]
+    let mic_sink = truthy(a.get("microphone-enabled"), false)
+        .then(|| mac::mic::find_device(a.get("microphone-device").map(|s| s.as_str())))
+        .flatten();
+    let mic = truthy(a.get("microphone-enabled"), false)
+        .then_some(())
+        .and(mic_sink)
+        .map(|sink| mic::spawn(sink, hub.clone()));
     {
         let mut extra = hub.hello_extra.lock();
+        extra.insert("os".into(), std::env::consts::OS.into());
         extra.insert("audio".into(), audio_on.into());
         extra.insert("mic".into(), mic.is_some().into());
         extra.insert(

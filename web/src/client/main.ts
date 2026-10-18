@@ -49,6 +49,7 @@ function main() {
 		kbd: el<HTMLTextAreaElement>('kbd'),
 		tools: el('tools'),
 		isMac: /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent),
+		remoteMac: false,
 		inIframe: window !== window.top,
 		desk: { w: 0, h: 0 },
 		view: { scale: 1 },
@@ -108,6 +109,7 @@ function main() {
 			case 'hello':
 				app.desk.w = m.w;
 				app.desk.h = m.h;
+				app.remoteMac = m.os === 'macos';
 				video.build(m.stripes && m.stripes.length ? m.stripes : [[0, m.h]]);
 				video.layout();
 				files.setup(m.files);

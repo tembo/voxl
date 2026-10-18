@@ -44,6 +44,8 @@ fn err(code: StatusCode, msg: &str) -> Response {
 impl Files {
     /// Resolves a client path ("Downloads/report.pdf") under the root. Absolute paths and
     /// `..` are rejected; symlinks are followed only if they stay inside the root.
+    // The error is the HTTP response to send, as is usual with axum.
+    #[allow(clippy::result_large_err)]
     fn resolve(&self, rel: &str, must_exist: bool) -> Result<PathBuf, Response> {
         let bad = || err(StatusCode::BAD_REQUEST, "invalid path");
         let mut p = self.root.clone();

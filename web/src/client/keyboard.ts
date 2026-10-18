@@ -53,21 +53,35 @@ export function setupKeyboard(
 	onInteract: () => void
 ) {
 	const { kbd, surface, send, isMac } = app;
+	const XK_CONTROL_L = 0xffe3,
+		XK_CONTROL_R = 0xffe4,
+		XK_SUPER_L = 0xffeb,
+		XK_SUPER_R = 0xffec;
 	const BY_CODE: Record<string, number> = {
 		ShiftLeft: 0xffe1,
 		ShiftRight: 0xffe2,
-		ControlLeft: 0xffe3,
-		ControlRight: 0xffe4,
 		AltLeft: 0xffe9,
 		AltRight: 0xffea,
-		MetaLeft: isMac ? 0xffe3 : 0xffeb,
-		MetaRight: isMac ? 0xffe4 : 0xffec,
-		OSLeft: 0xffeb,
-		OSRight: 0xffec,
 		NumpadEnter: 0xff0d,
 	};
+	// The shortcut key is Command on a Mac and Control elsewhere. Linux desktops get
+	// Control for a Mac viewer's Command; a Mac desktop gets Command for another
+	// viewer's Control (and Control for its Windows/Super key).
+	function modifierKeysym(code: string): number | undefined {
+		const isCtrl = code.startsWith('Control');
+		const isMeta = code.startsWith('Meta') || code.startsWith('OS');
+		if (!isCtrl && !isMeta) return undefined;
+		const right = code.endsWith('Right');
+		const ctrl = right ? XK_CONTROL_R : XK_CONTROL_L;
+		const sup = right ? XK_SUPER_R : XK_SUPER_L;
+		if (app.remoteMac) return isMac === isCtrl ? ctrl : sup;
+		if (isMac && code.startsWith('Meta')) return ctrl;
+		return isCtrl ? ctrl : sup;
+	}
 
 	function keysymOf(e: KeyboardEvent): number {
+		const mod = modifierKeysym(e.code);
+		if (mod !== undefined) return mod;
 		if (BY_CODE[e.code] !== undefined) {
 			if (e.code === 'AltRight' && e.key === 'AltGraph') return 0xfe03;
 			return BY_CODE[e.code];

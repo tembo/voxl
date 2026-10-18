@@ -1,7 +1,15 @@
 fn main() {
     let x264 = pkg_config::probe_library("x264").expect("x264");
-    let others =
-        ["libyuv", "opus", "libpulse-simple"].map(|l| pkg_config::probe_library(l).expect(l));
+    // macOS captures NV12 (no libyuv) and gets audio from ScreenCaptureKit (no PulseAudio).
+    let libs: &[&str] = if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        &["opus"]
+    } else {
+        &["libyuv", "opus", "libpulse-simple"]
+    };
+    let others: Vec<_> = libs
+        .iter()
+        .map(|l| pkg_config::probe_library(l).expect(l))
+        .collect();
     // Embed library dirs so the binary runs outside the build shell.
     for lib in std::iter::once(&x264).chain(others.iter()) {
         for p in &lib.link_paths {
@@ -18,10 +26,19 @@ fn main() {
         b = b.clang_arg(format!("-I{}", p.display()));
     }
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    b.generate()
-        .expect("bindgen x264")
-        .write_to_file(out.join("x264.rs"))
-        .unwrap();
+    let mut code = b.generate().expect("bindgen x264").to_string();
+    // x264.h renames x264_encoder_open after the library's build number (a macro
+    // bindgen can't follow); alias whichever version this x264 has.
+    let open = code
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .find(|w| {
+            w.strip_prefix("x264_encoder_open_")
+                .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+        })
+        .expect("x264_encoder_open_<build> in x264.h")
+        .to_string();
+    code.push_str(&format!("\npub use {open} as x264_encoder_open;\n"));
+    std::fs::write(out.join("x264.rs"), code).unwrap();
     bundle_web(&out);
     println!("cargo:rerun-if-changed=build.rs");
 }
