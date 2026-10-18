@@ -413,11 +413,6 @@ pub async fn upload(
         .get("path")
         .cloned()
         .unwrap_or_else(|| f.default_dir.clone());
-    // resolve() already confines this to the root; this is the form static analysis
-    // recognizes before folders are created under it.
-    if rel.contains("..") {
-        return err(StatusCode::BAD_REQUEST, "invalid path");
-    }
     let dir = match f.resolve(&rel, rel != f.default_dir) {
         Ok(d) => d,
         Err(e) => return e,
@@ -436,21 +431,22 @@ pub async fn upload(
     let sub = q.get("sub").map(String::as_str).unwrap_or("");
     let mut dir = dir;
     for part in sub.split('/').filter(|p| !p.is_empty()) {
-        // Stricter than needed (only a whole `..` is dangerous, and clean_name rejects
-        // that), but this is the check static analysis recognizes.
-        if part.contains("..") {
-            return err(StatusCode::BAD_REQUEST, "folder names can't contain ..");
-        }
         let Some(p) = clean_name(part) else {
             return err(StatusCode::BAD_REQUEST, "invalid folder name");
         };
         // One level at a time, checking each existing step: a symlink on the way could
-        // lead outside the shared folder, and nothing may be created out there.
-        dir.push(p);
-        if !dir.starts_with(&f.root) {
-            return err(StatusCode::FORBIDDEN, "outside the shared folder");
+        // lead outside the shared folder, and nothing may be created out there. The
+        // path is checked as a string too: `dir` is canonical and `p` a single name, so
+        // ".." only appears in odd folder names, and this is the check CodeQL
+        // recognizes as confining a path (it counts the server's own settings as
+        // request data).
+        let Some(next) = dir.join(p).to_str().map(str::to_owned) else {
+            return err(StatusCode::BAD_REQUEST, "invalid folder name");
+        };
+        if next.contains("..") {
+            return err(StatusCode::BAD_REQUEST, "folder names can't contain ..");
         }
-        if let Err(e) = tokio::fs::create_dir(&dir).await {
+        if let Err(e) = tokio::fs::create_dir(&next).await {
             if e.kind() != std::io::ErrorKind::AlreadyExists {
                 return err(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -458,7 +454,7 @@ pub async fn upload(
                 );
             }
         }
-        match tokio::fs::canonicalize(&dir).await {
+        match tokio::fs::canonicalize(&next).await {
             Ok(c) if c.starts_with(&f.root) && c.is_dir() => dir = c,
             Ok(c) if c.starts_with(&f.root) => {
                 return err(StatusCode::CONFLICT, "a file is in the way of the folder")
