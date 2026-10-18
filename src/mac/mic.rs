@@ -129,9 +129,13 @@ struct Ctx {
 
 extern "C" fn refill(user: *mut c_void, aq: AudioQueueRef, buf: *mut AudioQueueBuffer) {
     unsafe {
-        let ctx = &mut *(user as *mut Ctx);
+        let (Some(ctx), Some(b)) = ((user as *mut Ctx).as_mut(), buf.as_mut()) else {
+            return;
+        };
+        if b.mAudioData.is_null() || (b.mAudioDataBytesCapacity as usize) < FRAME * 2 {
+            return;
+        }
         next_frame(&ctx.queue, &mut ctx.frame);
-        let b = &mut *buf;
         std::ptr::copy_nonoverlapping(ctx.frame.as_ptr(), b.mAudioData as *mut i16, FRAME);
         b.mAudioDataByteSize = (FRAME * 2) as u32;
         AudioQueueEnqueueBuffer(aq, buf, 0, std::ptr::null());
@@ -151,7 +155,7 @@ pub fn play(uid: &str, queue: Arc<Mutex<Queue>>) {
         mBitsPerChannel: 16,
         mReserved: 0,
     };
-    // Lives as long as the queue, which is never disposed.
+    // Lives as long as the queue, which runs until voxl exits.
     let ctx = Box::into_raw(Box::new(Ctx {
         queue,
         frame: vec![0; FRAME],
@@ -169,6 +173,7 @@ pub fn play(uid: &str, queue: Arc<Mutex<Queue>>) {
         );
         if st != 0 {
             log::error!("microphone: AudioQueueNewOutput failed ({st})");
+            drop(Box::from_raw(ctx));
             return;
         }
         let uid = objc2_core_foundation::CFString::from_str(uid);
@@ -182,12 +187,13 @@ pub fn play(uid: &str, queue: Arc<Mutex<Queue>>) {
         if st != 0 {
             log::error!("microphone: cannot select the output device ({st})");
             AudioQueueDispose(aq, true);
+            drop(Box::from_raw(ctx));
             return;
         }
         // Three 20 ms buffers: 40-60 ms between the jitter queue and the device.
         for _ in 0..3 {
             let mut b: *mut AudioQueueBuffer = std::ptr::null_mut();
-            if AudioQueueAllocateBuffer(aq, (FRAME * 2) as u32, &mut b) == 0 {
+            if AudioQueueAllocateBuffer(aq, (FRAME * 2) as u32, &mut b) == 0 && !b.is_null() {
                 refill(ctx as *mut c_void, aq, b);
             }
         }
