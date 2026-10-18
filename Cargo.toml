@@ -37,7 +37,9 @@ futures-util = { version = "0.3", default-features = false, features = [
 	"sink",
 ] }
 nix = { version = "0.31", features = ["fs", "poll", "time"] }
-zip = { version = "7", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "7", default-features = false, features = [
+	"deflate-flate2-zlib-rs",
+] }
 
 [build-dependencies]
 bindgen = "0.71"

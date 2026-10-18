@@ -437,6 +437,9 @@ pub async fn upload(
         // One level at a time, checking each existing step: a symlink on the way could
         // lead outside the shared folder, and nothing may be created out there.
         dir.push(p);
+        if !dir.starts_with(&f.root) {
+            return err(StatusCode::FORBIDDEN, "outside the shared folder");
+        }
         if let Err(e) = tokio::fs::create_dir(&dir).await {
             if e.kind() != std::io::ErrorKind::AlreadyExists {
                 return err(
