@@ -435,6 +435,18 @@
 			.f-row:hover svg.i {
 				color: var(--icon-strong);
 			}
+			/* Download a folder as a zip: shown in place of the date on hover. */
+			.f-row .f-dl {
+				display: none;
+				margin: 0 -4px 0 0;
+			}
+			.f-row:hover .f-dl,
+			.f-row .f-dl:focus-visible {
+				display: inline-flex;
+			}
+			.f-row:hover .f-dl + .f-meta {
+				display: none;
+			}
 			.f-empty {
 				display: flex;
 				flex-direction: column;
@@ -682,6 +694,33 @@
 					><span>Upload</span>
 				</button>
 				<button
+					id="files-upload-dir"
+					class="ib sm"
+					type="button"
+					title="Upload a folder to this folder"
+					aria-label="Upload a folder">
+					<svg class="i" viewBox="0 0 24 24" fill="none">
+						<path
+							d="M17 19H19C20.1046 19 21 18.1046 21 17V9C21 7.89543 20.1046 7 19 7H12.5352C12.2008 7 11.8886 6.8329 11.7031 6.5547L10.5937 4.8906C10.2228 4.3342 9.59834 4 8.92963 4H5C3.89543 4 3 4.89543 3 6V17C3 18.1046 3.89543 19 5 19H7"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round" />
+						<path
+							d="M12 19V13.5"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round" />
+						<path
+							d="M9.5 15.5L12 13L14.5 15.5"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round" />
+					</svg>
+				</button>
+				<button
 					id="files-refresh"
 					class="ib sm"
 					type="button"
@@ -724,6 +763,7 @@
 			</div>
 			<footer></footer>
 			<input id="files-input" type="file" multiple hidden />
+			<input id="files-input-dir" type="file" webkitdirectory multiple hidden />
 		</div>
 		<div id="drop">
 			<div class="frame">

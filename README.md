@@ -122,11 +122,16 @@ the full-screen animation).
   The toolbar stays visible while the mic is live. An embedding page must allow
   `microphone` on the iframe.
 - **Files:** a Files button (top-right on hover) opens a panel to browse the
-  desktop user's home folder and download files, newest first. Files dropped
-  anywhere on the screen, or picked with Upload, go to the open folder
-  (`~/Downloads` by default). Transfers use their own HTTP requests, so they never
-  hold up the stream. Uploads are written to a hidden temporary file and renamed
-  when complete, and existing names get a ` (1)` suffix instead of being replaced.
+  desktop user's home folder and download files, newest first. Folders download as
+  zips, built while they stream (nothing is staged on disk, memory stays at a few
+  chunks; already-compressed formats are stored, the rest deflated at the fastest
+  level; symlinks are left out). Files and folders dropped anywhere on the screen, or
+  picked with Upload and the folder button next to it, go to the open folder
+  (`~/Downloads` by default), keeping their folder structure; a folder gets one
+  progress row. Transfers use their own HTTP requests, so they never hold up the
+  stream. Uploads are written to a hidden temporary file and renamed when complete,
+  existing names get a ` (1)` suffix instead of being replaced, and existing folders
+  are merged into.
 - **Look:** the toolbar and Files panel use the Tembo app's UI tokens, icons and
   Inter (`web/inter.woff2`, a Latin subset under the SIL Open Font License, see
   `web/inter-LICENSE.txt`).
@@ -225,8 +230,9 @@ short comma-separated commands: `a,<frame>` ack, `m,x,y` move, `b,btn,0|1`,
 mono 48 kHz) microphone audio, `kf` keyframe request, `po,<t>` pong.
 
 Files are plain HTTP: `GET /files/list?path=<dir>` returns JSON entries (`name`, `dir`, `size`, `mtime` in ms),
-`GET /files/download?path=<file>` streams a file as an attachment, and
-`PUT /files/upload?path=<dir>&name=<file>` takes the raw file as the body. Uploads
+`GET /files/download?path=<file>` streams a file as an attachment (a folder as a zip),
+and `PUT /files/upload?path=<dir>&name=<file>[&sub=<folder/inside>]` takes the raw file
+as the body, creating `sub` under `path` for folder uploads. Uploads
 must send an `X-Voxl-Upload` header; browsers only send custom headers cross-origin
 after a CORS preflight, which voxl never answers, so other sites can't upload.
 Paths are relative to `--files-root`; `..`, absolute paths and symlinks leading
@@ -234,5 +240,4 @@ outside it are refused.
 
 ## Limitations
 
-X11 only, single display, H.264 4:2:0, resizing only up to the size Xvfb started with, single files only (no folder
-upload or download).
+X11 only, single display, H.264 4:2:0, resizing only up to the size Xvfb started with.

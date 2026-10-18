@@ -57,6 +57,8 @@ For smooth scrolling, start that display with the patched server:
 - `fstest.mjs`, `fsiframe.mjs`: fullscreen toolbar and Keyboard Lock, top level and embedded.
 - `resizetest.mjs`: re-fit in a resizable sidebar iframe and at several tab sizes.
 - `filestest.mjs`: file panel, uploads (button and drag and drop) and downloads; starts its own voxl.
+- `foldertest.mjs`: folders download as zips (checked byte for byte) and upload through
+  the API and the folder picker, merged and confined to the root; starts its own voxl.
 - `resizedyn.mjs`: dynamic resolution end to end with its own Xvfb (`XVFB`) and voxl:
   desktop follows the window, clamping, decoded size, pointer mapping, zero-copy capture.
 - `mictest.mjs`: microphone end to end with a fake 440 Hz microphone, a private PulseAudio

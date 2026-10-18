@@ -1,5 +1,6 @@
-// Files panel: browse the shared folder and download, upload with the button or by
-// dropping files anywhere on the page. Uses the server's /files HTTP API.
+// Files panel: browse the shared folder and download (folders as zips), upload files
+// and folders with the buttons or by dropping them anywhere on the page. Uses the
+// server's /files HTTP API.
 import type { FilesConfig } from '../protocol';
 import type { App } from './app';
 import { el } from './app';
@@ -15,10 +16,27 @@ interface Listing {
 	path: string;
 	entries: Entry[];
 }
+/** A file to upload, with its folder inside the upload ('' for a plain file). */
+interface Picked {
+	f: File;
+	sub: string;
+}
+/** A dropped or picked folder: one progress row for all its files. */
+interface Group {
+	name: string;
+	row: HTMLElement;
+	files: number;
+	bytes: number;
+	done: number;
+	sent: number;
+	failed: number;
+}
 interface Upload {
 	f: File;
+	sub: string;
 	dir: string;
 	row: HTMLElement;
+	group?: Group;
 }
 
 // Icons from the Tembo UI package's icon set (16px with 2px padding).
@@ -29,6 +47,9 @@ const ICON_DIR = svg(
 );
 const ICON_FILE = svg(
 	'<path d="M12.1716 3H7C5.89543 3 5 3.89543 5 5V19C5 20.1046 5.89543 21 7 21H17C18.1046 21 19 20.1046 19 19V9.82843C19 9.29799 18.7893 8.78929 18.4142 8.41421L13.5858 3.58579C13.2107 3.21071 12.702 3 12.1716 3Z"/><path d="M13 3.5V7C13 8.10457 13.8954 9 15 9H18.5"/>'
+);
+const ICON_DOWNLOAD = svg(
+	'<path d="M12 4V15"/><path d="M7 10.5L12 15.5L17 10.5"/><path d="M5 20H19"/>'
 );
 const ICON_CHEVRON = svg(
 	'<path d="M10 16L13.2929 12.7071C13.6834 12.3166 13.6834 11.6834 13.2929 11.2929L10 8"/>'
@@ -65,15 +86,47 @@ function status(row: HTMLElement, text: string, cls?: 'done' | 'err') {
 const hasFiles = (e: DragEvent) =>
 	!!e.dataTransfer && [...e.dataTransfer.types].includes('Files');
 
+/** Every entry of a dropped folder: readEntries returns at most ~100 per call. */
+async function readAll(
+	reader: FileSystemDirectoryReader
+): Promise<FileSystemEntry[]> {
+	const batch = await new Promise<FileSystemEntry[]>((res, rej) =>
+		reader.readEntries(res, rej)
+	).catch(() => [] as FileSystemEntry[]);
+	return batch.length ? [...batch, ...(await readAll(reader))] : [];
+}
+
+/** All files under a dropped entry, with their folder paths relative to its parent. */
+async function walk(entry: FileSystemEntry): Promise<Picked[]> {
+	if (entry.isFile) {
+		const f = await new Promise<File>((res, rej) =>
+			(entry as FileSystemFileEntry).file(res, rej)
+		).catch(() => null);
+		const sub = entry.fullPath
+			.split('/')
+			.filter(Boolean)
+			.slice(0, -1)
+			.join('/');
+		return f ? [{ f, sub }] : [];
+	}
+	if (!entry.isDirectory) return [];
+	const children = await readAll(
+		(entry as FileSystemDirectoryEntry).createReader()
+	);
+	return (await Promise.all(children.map(walk))).flat();
+}
+
 export function createFiles(app: App) {
 	const panel = el('files');
 	const list = el('files-list');
 	const crumbs = el('files-crumbs');
 	const uploads = el('files-uploads');
 	const input = el<HTMLInputElement>('files-input');
+	const dirInput = el<HTMLInputElement>('files-input-dir');
 	const drop = el('drop');
 	const dropDir = el('drop-dir');
 	const uploadBtn = el('files-upload');
+	const uploadDirBtn = el('files-upload-dir');
 	const footer = panel.querySelector('footer')!;
 
 	let cfg: FilesConfig | null = null;
@@ -98,9 +151,11 @@ export function createFiles(app: App) {
 		if (!cwd) cwd = cfg.dir || '';
 		dropDir.textContent = label(cwd);
 		uploadBtn.style.display = cfg.upload ? '' : 'none';
+		uploadDirBtn.style.display = cfg.upload ? '' : 'none';
 		footer.textContent = [
-			cfg.upload && 'Drop files anywhere on the screen to upload them here.',
-			cfg.download && 'Click a file to download it.',
+			cfg.upload &&
+				'Drop files or folders anywhere on the screen to upload them here.',
+			cfg.download && 'Click a file to download it; folders download as zips.',
 		]
 			.filter(Boolean)
 			.join(' ');
@@ -183,6 +238,19 @@ export function createFiles(app: App) {
 			const row = document.createElement('div');
 			row.className = 'f-row' + (en.dir ? ' dir' : '');
 			row.innerHTML = `<span class="f-ico">${en.dir ? ICON_DIR : ICON_FILE}</span><span class="f-name"></span><span class="f-meta"></span>`;
+			if (en.dir && cfg?.download) {
+				const b = document.createElement('button');
+				b.className = 'ib sm f-dl';
+				b.type = 'button';
+				b.title = `Download ${en.name} as a zip`;
+				b.setAttribute('aria-label', b.title);
+				b.innerHTML = ICON_DOWNLOAD;
+				b.addEventListener('click', (e) => {
+					e.stopPropagation();
+					download(join(cwd, en.name));
+				});
+				row.querySelector('.f-meta')!.before(b);
+			}
 			row.querySelector('.f-name')!.textContent = en.name;
 			row.querySelector('.f-meta')!.textContent = en.dir
 				? when(en.mtime)
@@ -212,32 +280,66 @@ export function createFiles(app: App) {
 	}
 
 	// Uploads run one at a time, each to the folder that was open when it was added.
+	// A folder gets one row for all of its files.
 	const queue: Upload[] = [];
 	let busy = false;
-	function upload(picked: File[], skipped = 0) {
+	function upload(picked: Picked[]) {
 		if (!cfg?.upload) return;
 		open();
-		for (const f of picked) {
-			const row = document.createElement('div');
-			row.className = 'f-up';
-			row.innerHTML =
-				'<div class="f-up-top"><span class="f-name"></span><span class="f-meta">Waiting…</span></div><div class="f-bar"><i></i></div>';
-			row.querySelector('.f-name')!.textContent = f.name;
-			uploads.prepend(row);
-			queue.push({ f, dir: cwd, row });
+		const groups = new Map<string, Group>();
+		for (const { f, sub } of picked) {
+			const top = sub.split('/')[0];
+			let group = top ? groups.get(top) : undefined;
+			if (top && !group) {
+				group = {
+					name: top,
+					row: newRow(top),
+					files: 0,
+					bytes: 0,
+					done: 0,
+					sent: 0,
+					failed: 0,
+				};
+				groups.set(top, group);
+			}
+			if (group) {
+				group.files++;
+				group.bytes += f.size;
+			}
+			queue.push({
+				f,
+				sub,
+				dir: cwd,
+				row: group?.row ?? newRow(f.name),
+				group,
+			});
 		}
-		if (skipped) {
-			const row = document.createElement('div');
-			row.className = 'f-up err';
-			row.innerHTML =
-				'<div class="f-up-top"><span class="f-name"></span><span class="f-meta"></span></div>';
-			row.querySelector('.f-name')!.textContent =
-				`${skipped} folder${skipped > 1 ? 's' : ''} skipped`;
-			status(row, 'Upload the files inside instead');
-			uploads.prepend(row);
-			setTimeout(() => row.remove(), 8000);
-		}
+		for (const g of groups.values()) groupStatus(g);
 		pump();
+	}
+	function newRow(name: string) {
+		const row = document.createElement('div');
+		row.className = 'f-up';
+		row.innerHTML =
+			'<div class="f-up-top"><span class="f-name"></span><span class="f-meta">Waiting…</span></div><div class="f-bar"><i></i></div>';
+		row.querySelector('.f-name')!.textContent = name;
+		uploads.prepend(row);
+		return row;
+	}
+	function groupStatus(g: Group, current = 0) {
+		const pct = g.bytes ? ((g.sent + current) / g.bytes) * 100 : 100;
+		g.row.querySelector<HTMLElement>('.f-bar i')!.style.width = `${pct}%`;
+		const n = `${g.done} of ${g.files} file${g.files === 1 ? '' : 's'}`;
+		status(g.row, `${n} · ${Math.floor(pct)}% of ${size(g.bytes)}`);
+	}
+	function groupFinished(g: Group, dir: string) {
+		if (g.done + g.failed < g.files) return;
+		if (g.failed)
+			status(g.row, `${g.failed} of ${g.files} files failed`, 'err');
+		else {
+			status(g.row, `Uploaded to ${label(dir)}`, 'done');
+			setTimeout(() => g.row.remove(), 6000);
+		}
 	}
 	function pump() {
 		const u = busy ? undefined : queue.shift();
@@ -249,12 +351,16 @@ export function createFiles(app: App) {
 			busy = false;
 			pump();
 		};
-		xhr.open('PUT', api('upload', { path: u.dir, name: u.f.name }));
+		const q: Record<string, string> = { path: u.dir, name: u.f.name };
+		if (u.sub) q.sub = u.sub;
+		xhr.open('PUT', api('upload', q));
 		// Required by the server: browsers only send custom headers cross-origin after a
 		// CORS preflight, which it never answers, so other sites can't upload.
 		xhr.setRequestHeader('X-Voxl-Upload', '1');
+		const g = u.group;
 		xhr.upload.addEventListener('progress', (e) => {
 			if (!e.lengthComputable) return;
+			if (g) return groupStatus(g, e.loaded);
 			bar.style.width = `${(e.loaded / e.total) * 100}%`;
 			status(
 				u.row,
@@ -266,7 +372,15 @@ export function createFiles(app: App) {
 			try {
 				d = JSON.parse(xhr.responseText);
 			} catch {}
-			if (xhr.status === 200) {
+			if (g) {
+				if (xhr.status === 200) {
+					g.done++;
+					g.sent += u.f.size;
+				} else g.failed++;
+				groupStatus(g);
+				groupFinished(g, u.dir);
+				if (xhr.status === 200 && u.dir === cwd) load(cwd, true);
+			} else if (xhr.status === 200) {
 				const saved = (d.path || '').split('/').pop();
 				if (saved && saved !== u.f.name)
 					u.row.querySelector('.f-name')!.textContent = saved;
@@ -277,7 +391,10 @@ export function createFiles(app: App) {
 			finish();
 		});
 		xhr.addEventListener('error', () => {
-			status(u.row, 'Connection lost', 'err');
+			if (g) {
+				g.failed++;
+				groupFinished(g, u.dir);
+			} else status(u.row, 'Connection lost', 'err');
 			finish();
 		});
 		xhr.send(u.f);
@@ -289,9 +406,20 @@ export function createFiles(app: App) {
 	el('files-close').addEventListener('click', close);
 	el('files-refresh').addEventListener('click', () => load(cwd));
 	uploadBtn.addEventListener('click', () => input.click());
+	uploadDirBtn.addEventListener('click', () => dirInput.click());
 	input.addEventListener('change', () => {
-		upload([...(input.files ?? [])]);
+		upload([...(input.files ?? [])].map((f) => ({ f, sub: '' })));
 		input.value = '';
+	});
+	dirInput.addEventListener('change', () => {
+		// webkitRelativePath is "Folder/sub/file.txt".
+		upload(
+			[...(dirInput.files ?? [])].map((f) => ({
+				f,
+				sub: f.webkitRelativePath.split('/').slice(0, -1).join('/'),
+			}))
+		);
+		dirInput.value = '';
 	});
 	// Esc closes the panel unless the remote screen has focus (it goes to the desktop then).
 	document.addEventListener('keydown', (e) => {
@@ -322,18 +450,23 @@ export function createFiles(app: App) {
 		e.preventDefault();
 		depth = 0;
 		drop.classList.remove('show');
-		const picked: File[] = [];
-		let skipped = 0;
+		if (!cfg?.upload) return;
+		// Entries must be taken during the event; the walk can finish afterwards.
+		const entries: FileSystemEntry[] = [];
+		const plain: Picked[] = [];
 		for (const it of e.dataTransfer!.items) {
 			if (it.kind !== 'file') continue;
-			if (it.webkitGetAsEntry?.()?.isDirectory) {
-				skipped++;
-				continue;
+			const entry = it.webkitGetAsEntry?.();
+			if (entry?.isDirectory) entries.push(entry);
+			else {
+				const f = it.getAsFile();
+				if (f) plain.push({ f, sub: '' });
 			}
-			const f = it.getAsFile();
-			if (f) picked.push(f);
 		}
-		upload(picked, skipped);
+		if (!entries.length) return upload(plain);
+		void Promise.all(entries.map(walk)).then((found) =>
+			upload([...plain, ...found.flat()])
+		);
 	});
 
 	return { setup };
