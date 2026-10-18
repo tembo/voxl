@@ -127,6 +127,16 @@ the full-screen animation).
   (`~/Downloads` by default). Transfers use their own HTTP requests, so they never
   hold up the stream. Uploads are written to a hidden temporary file and renamed
   when complete, and existing names get a ` (1)` suffix instead of being replaced.
+- **Screenshots and recordings:** `GET /screenshot` returns the screen as a PNG.
+  `GET /record?seconds=N` returns an MP4 of the next N seconds; `POST /record/start`
+  returns `{"id": n}` and `POST /record/stop?id=n` the MP4 of everything in between
+  (at most `--max-record-seconds`). A recording is the H.264 voxl already encodes,
+  rewrapped without re-encoding: the recorder joins as a viewer that acknowledges
+  each frame at once, so it adds no measurable CPU and never slows real viewers down.
+  Frames are kept only when the screen changes (variable frame rate), the cursor
+  isn't in them (viewers draw it), and a resize ends the recording. Handy for agents
+  attaching clips to pull requests:
+  `curl -o clip.mp4 -X POST "localhost:6901/record/stop?id=1"`.
 - **Look:** the toolbar and Files panel use the Tembo app's UI tokens, icons and
   Inter (`web/inter.woff2`, a Latin subset under the SIL Open Font License, see
   `web/inter-LICENSE.txt`).
@@ -204,6 +214,7 @@ adds ~15 ms).
 | `--files-root`                                                 | `$HOME`                            | folder the Files panel can see; nothing outside it is reachable                   |
 | `--upload-dir`                                                 | `Downloads`                        | folder (under the root) the panel opens and uploads into; created on first upload |
 | `--max-upload-mb`                                              | `0` (no limit)                     | largest accepted upload                                                           |
+| `--max-record-seconds`                                         | `300`                              | longest recording (`/record`)                                                     |
 | `--convert-threads`, `--coalesce-us`                           | `4`, `0`                           | tuning                                                                            |
 
 Other selkies flags are accepted and ignored. `GET /stats` returns server counters,
@@ -231,6 +242,9 @@ must send an `X-Voxl-Upload` header; browsers only send custom headers cross-ori
 after a CORS preflight, which voxl never answers, so other sites can't upload.
 Paths are relative to `--files-root`; `..`, absolute paths and symlinks leading
 outside it are refused.
+
+`GET /screenshot` (PNG), `GET /record?seconds=N`, `POST /record/start` and
+`POST /record/stop?id=n` (MP4) are described under How it works.
 
 ## Limitations
 

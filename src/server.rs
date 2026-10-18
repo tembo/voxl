@@ -22,6 +22,7 @@ pub struct AppState {
     pub mic: Option<std::sync::mpsc::Sender<crate::mic::MicMsg>>,
     /// Clients may resize the desktop to their window (--enable-resize).
     pub resize: bool,
+    pub recorder: Arc<crate::record::Recorder>,
 }
 
 macro_rules! asset {
@@ -60,6 +61,13 @@ pub fn router(state: AppState) -> Router {
         .route("/files/download", get(files::download))
         .route("/files/upload", axum::routing::put(files::upload))
         .with_state(state.files.clone());
+    use crate::record;
+    let record_routes = Router::new()
+        .route("/screenshot", get(record::screenshot))
+        .route("/record", get(record::record))
+        .route("/record/start", axum::routing::post(record::start))
+        .route("/record/stop", axum::routing::post(record::stop))
+        .with_state(state.recorder.clone());
     Router::new()
         .route("/", asset!("index.html", "text/html; charset=utf-8"))
         .route(
@@ -77,6 +85,7 @@ pub fn router(state: AppState) -> Router {
         .route("/ws", get(ws_handler))
         .with_state(state)
         .merge(file_routes)
+        .merge(record_routes)
 }
 
 async fn stats(State(s): State<AppState>) -> Response {

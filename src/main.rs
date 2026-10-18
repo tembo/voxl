@@ -10,6 +10,8 @@ mod files;
 mod hub;
 mod input;
 mod mic;
+mod mp4;
+mod record;
 mod screen;
 mod server;
 mod video;
@@ -217,6 +219,11 @@ async fn main() {
         files,
         mic,
         resize: resize_on,
+        // GET /screenshot, /record; --max-record-seconds caps a recording's length.
+        recorder: record::Recorder::new(
+            hub.clone(),
+            std::time::Duration::from_secs_f64(range_max(a.get("max-record-seconds"), 300.0)),
+        ),
     };
     let app = server::router(state);
     let listener = tokio::net::TcpListener::bind((addr.as_str(), port))

@@ -487,6 +487,24 @@ fn capture_loop(
         }
         cap.pump()?;
         hub.drain_wake();
+        let snaps = std::mem::take(&mut *hub.snapshots.lock());
+        if !snaps.is_empty() {
+            // The whole current screen, whether or not anyone is watching. Damage
+            // stays pending, so the stream still sends what changed.
+            cap.grab(cap.full())?;
+            let mut shot = I420::new(w, h);
+            convert_band(
+                cap.pixels(),
+                cap.stride,
+                &mut shot,
+                0,
+                h,
+                cfg.convert_threads,
+            );
+            for tx in snaps {
+                let _ = tx.send(shot.clone());
+            }
+        }
         while let Ok((i, b)) = ret_rx.try_recv() {
             pool[i] = Some(b);
         }
