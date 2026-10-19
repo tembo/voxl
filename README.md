@@ -2,7 +2,7 @@
 
 Low-latency desktop streaming for the browser, written in Rust. voxl streams an X11
 display as H.264 over a WebSocket to a small web client that decodes with WebCodecs,
-with input, clipboard, audio, microphone, file transfer and dynamic resolution.
+with input, clipboard, audio, microphone, file and folder transfer and dynamic resolution.
 
 ## Benchmarks
 
