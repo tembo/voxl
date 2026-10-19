@@ -31,6 +31,15 @@ sleep 1; BENCH_DISPLAY=:5 env/openbox.sh &
   including JPEG, WebP and CopyRect, continuous updates and fences), keeps a full
   framebuffer, decodes images in parallel and reads the marker after each update.
   Same JSON as `nclient.py`.
+- `nkclient.py host:port secs [x y]`: native Neko client. Logs in and signals over
+  Neko's WebSocket API like its web client, receives the WebRTC video with aiortc and
+  reads the marker from every decoded frame. Needs aiortc (`pip install aiortc`). Same JSON.
+- `suite2.sh`: noVNC, Neko and tuned Neko through the same workloads and links as
+  `suite.sh`; `cpusuite2.sh`: their server CPU. Start the servers with
+  `env/novnc.sh` (x11vnc + websockify + noVNC, as E2B ships them; `X11VNC`, `NOVNC`,
+  `WEBSOCKIFY`), `env/neko.sh` (Neko's official image against the benchmark display;
+  `NEKO_SHAPE=mbps/rtt` shapes its UDP media with `tc netem` in its own container
+  network) or `env/neko-tuned.sh` (60 FPS x264).
 - `suite.sh`: every config (`CONFIGS`: selkies with and without picom, voxl and
   KasmVNC with and without picom) x workload
   (Chromium scroll, 1080p and full-screen animation) x link (LAN, 10 Mbps/40 ms,
@@ -39,7 +48,7 @@ sleep 1; BENCH_DISPLAY=:5 env/openbox.sh &
 - `cpusuite.sh`: server CPU (X server + streamer) per workload with one client connected.
 - `scroll.html`: the long page `scrolltarget.mjs` smooth-scrolls, with a marker drawn every frame.
 - `cpu.sh <pid> <secs>`, `rate.sh <secs>` (voxl `/stats`), `srcfps.py` (true
-  source frame rate from the Xvfb framebuffer), `measure.mjs` (in-browser unique FPS).
+  source frame rate from the Xvfb framebuffer), `measure.mjs` (in-browser unique FPS; `VIEWPORT=WxH`).
 - `inputtest.mjs`, `keytest.sh`: input and clipboard checks through the web client.
 
 ## Feature tests

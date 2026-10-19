@@ -9,7 +9,8 @@ const browser = await chromium.launch({
   args: ['--autoplay-policy=no-user-gesture-required', '--no-sandbox', ...(process.env.EXTRA_ARGS ? process.env.EXTRA_ARGS.split(' ') : [])],
   headless: process.env.HEADFUL ? false : true,
 });
-const page = await browser.newPage({ viewport: { width: 1707, height: 1067 } });
+const [vw, vh] = (process.env.VIEWPORT || '1707x1067').split('x').map(Number);
+const page = await browser.newPage({ viewport: { width: vw, height: vh } });
 page.on('console', m => { if (process.env.VERBOSE) console.log('[page]', m.text()); });
 await page.goto(url);
 await page.waitForTimeout(+(process.env.WARMUP || 6000));
