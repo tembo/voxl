@@ -61,6 +61,7 @@ try {
 	check((await up({ path: '', name: 'a.txt', sub: 'Up/one/two' }, 'A')).ok && fs.readFileSync(path.join(root, 'Up/one/two/a.txt'), 'utf8') === 'A', 'upload with sub creates nested folders');
 	check((await up({ path: '', name: 'b.txt', sub: 'Up/one' }, 'B')).ok && fs.existsSync(path.join(root, 'Up/one/two/a.txt')) && fs.existsSync(path.join(root, 'Up/one/b.txt')), 'an existing folder is merged into');
 	check((await up({ path: '', name: 'x', sub: 'Up/../..' }, 'x')).status === 400, 'sub rejects ..');
+	check((await up({ path: '', name: 'n.txt', sub: 'v1..2/a..b' }, 'n')).ok && fs.existsSync(path.join(root, 'v1..2/a..b/n.txt')), 'folder names with .. inside them (v1..2) are fine');
 	check((await up({ path: '', name: 'x', sub: 'project/etc-link/evil' }, 'x')).status === 403, 'sub refuses symlinks leading outside the root');
 
 	// Folder upload through the panel's folder picker.
