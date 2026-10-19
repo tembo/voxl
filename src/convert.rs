@@ -15,7 +15,6 @@ extern "C" {
     ) -> i32;
 }
 
-#[derive(Clone)]
 pub struct I420 {
     pub width: usize,
     pub y: Vec<u8>,
@@ -36,29 +35,6 @@ impl I420 {
     }
     pub fn stride_uv(&self) -> usize {
         self.width.div_ceil(2)
-    }
-
-    pub fn height(&self) -> usize {
-        self.y.len() / self.width.max(1)
-    }
-
-    /// RGB (8 bits per channel), from BT.601 limited range as converted for encoding.
-    pub fn to_rgb(&self) -> Vec<u8> {
-        let (w, h, suv) = (self.width, self.height(), self.stride_uv());
-        let mut out = vec![0u8; w * h * 3];
-        let clamp = |v: i32| (v >> 8).clamp(0, 255) as u8;
-        for (row, line) in out.chunks_exact_mut(w * 3).enumerate() {
-            let (yr, cr) = (&self.y[row * w..][..w], (row / 2) * suv);
-            for (x, px) in line.chunks_exact_mut(3).enumerate() {
-                let c = 298 * (yr[x] as i32 - 16);
-                let d = self.u[cr + x / 2] as i32 - 128;
-                let e = self.v[cr + x / 2] as i32 - 128;
-                px[0] = clamp(c + 409 * e + 128);
-                px[1] = clamp(c - 100 * d - 208 * e + 128);
-                px[2] = clamp(c + 516 * d + 128);
-            }
-        }
-        out
     }
 }
 

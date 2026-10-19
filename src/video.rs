@@ -490,17 +490,19 @@ fn capture_loop(
         let snaps = std::mem::take(&mut *hub.snapshots.lock());
         if !snaps.is_empty() {
             // The whole current screen, whether or not anyone is watching. Damage
-            // stays pending, so the stream still sends what changed.
+            // stays pending, so the stream still sends what changed. Only the pixels
+            // are copied here (the framebuffer is live); the PNG is made off this thread.
             cap.grab(cap.full())?;
-            let mut shot = I420::new(w, h);
-            convert_band(
-                cap.pixels(),
-                cap.stride,
-                &mut shot,
-                0,
-                h,
-                cfg.convert_threads,
-            );
+            let row = w * 4;
+            let mut bgrx = Vec::with_capacity(row * h);
+            for line in cap.pixels().chunks_exact(cap.stride).take(h) {
+                bgrx.extend_from_slice(&line[..row]);
+            }
+            let shot = Arc::new(crate::record::Snapshot {
+                width: w,
+                height: h,
+                bgrx,
+            });
             for tx in snaps {
                 let _ = tx.send(shot.clone());
             }
