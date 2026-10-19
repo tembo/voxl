@@ -435,17 +435,9 @@ pub async fn upload(
             return err(StatusCode::BAD_REQUEST, "invalid folder name");
         };
         // One level at a time, checking each existing step: a symlink on the way could
-        // lead outside the shared folder, and nothing may be created out there. The
-        // path is checked as a string too: `dir` is canonical and `p` a single name, so
-        // ".." only appears in odd folder names, and this is the check CodeQL
-        // recognizes as confining a path (it counts the server's own settings as
-        // request data).
-        let Some(next) = dir.join(p).to_str().map(str::to_owned) else {
-            return err(StatusCode::BAD_REQUEST, "invalid folder name");
-        };
-        if next.contains("..") {
-            return err(StatusCode::BAD_REQUEST, "folder names can't contain ..");
-        }
+        // lead outside the shared folder, and nothing may be created out there. `dir` is
+        // canonical and `p` a single plain name (clean_name rejects `.` and `..`).
+        let next = dir.join(p);
         if let Err(e) = tokio::fs::create_dir(&next).await {
             if e.kind() != std::io::ErrorKind::AlreadyExists {
                 return err(
