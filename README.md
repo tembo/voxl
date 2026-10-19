@@ -89,4 +89,18 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 | `--files-root`                                                 | `$HOME`                            | folder the Files panel can see; nothing outside it is reachable                   |
 | `--upload-dir`                                                 | `Downloads`                        | folder (under the root) the panel opens and uploads into; created on first upload |
 | `--max-upload-mb`                                              | `0` (no limit)                     | largest accepted upload                                                           |
+| `--max-record-seconds`                                         | `300`                              | longest recording (`/record`)                                                     |
 | `--convert-threads`, `--coalesce-us`                           | `4`, `0`                           | tuning                                                                            |
+
+Screenshots and recordings, for agents and scripts:
+
+```sh
+curl -o shot.png localhost:6901/screenshot                  # the screen as a PNG
+curl -o clip.mp4 "localhost:6901/record?seconds=10"         # an MP4 of the next 10 s
+id=$(curl -s -X POST localhost:6901/record/start | jq .id)  # or start...
+curl -o clip.mp4 -X POST "localhost:6901/record/stop?id=$id" # ...and stop when done
+```
+
+A recording is the H.264 voxl already sends to viewers, saved as MP4 without encoding
+it again, so it costs no extra CPU. It doesn't include the cursor (viewers draw it), and
+a resize ends it.
