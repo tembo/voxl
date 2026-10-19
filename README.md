@@ -2,13 +2,11 @@
 
 Low-latency desktop streaming for the browser, written in Rust. voxl streams an X11
 display as H.264 over a WebSocket to a small web client that decodes with WebCodecs,
-with input, clipboard, audio, microphone, file transfer and dynamic resolution. It
-powers the Computer preview in Tembo, replacing
-[selkies](https://github.com/selkies-project/selkies).
+with input, clipboard, audio, microphone, file transfer and dynamic resolution.
 
 ## Benchmarks
 
-Tembo VM (16 vCPU AMD EPYC 9334, no GPU), 2560x1600 Xvfb desktop, same workloads, each
+A 16 vCPU AMD EPYC 9334 VM (no GPU), 2560x1600 Xvfb desktop, same workloads, each
 stream decoded by a native client that reads a pixel marker drawn into the content.
 Cells are FPS (worst second), then latency p50/p99 from the content being drawn to the
 frame being decoded. voxl's column is its best run of each test. To reproduce, see
@@ -33,9 +31,9 @@ frame being decoded. voxl's column is its best run of each test. To reproduce, s
 | Neko, tuned                             | 1.90 | 2.28             | 2.30             | 2.52             |
 | noVNC                                   | 0.01 | 0.55 (at 8 FPS)  | 0.58 (at 7 FPS)  | 0.64 (at 6 FPS)  |
 
-- **selkies:** as deployed in Tembo before voxl, picom on.
-- **KasmVNC:** 1.4.0 with Tembo's `kasmvnc` settings (60 FPS cap, JPEG/WebP quality
-  8–9, video mode), no compositor.
+- **selkies:** [selkies](https://github.com/selkies-project/selkies) with picom running.
+- **KasmVNC:** 1.4.0 with a 60 FPS cap, JPEG/WebP quality 8–9 and video mode, no
+  compositor.
 - **Neko:** [m1k1o/neko](https://github.com/m1k1o/neko) 3.2 with its defaults (VP8, 25
   FPS). **Neko, tuned** captures at 60 FPS and encodes with x264 `ultrafast`/
   `zerolatency` at up to 30 Mbps, like voxl. Neither adapts its bitrate (Neko's
@@ -82,7 +80,7 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 | `--audio-enabled`, `--audio-device-name`, `--audio-bitrate`    | `true`, `output.monitor`, `128000` | desktop audio                                                                     |
 | `--enable-resize`, `--resize-scale`                            | `false`, `1.5`                     | desktop follows the viewer's window; desktop pixels per CSS pixel                 |
 | `--microphone-enabled`, `--microphone-fifo`                    | `false`, `/tmp/voxl-mic.fifo`      | browser microphone into the FIFO a PulseAudio pipe source reads                   |
-| `--round-corners`                                              | `0` (off)                          | corner radius in pixels for top-level windows (Tembo uses `12`)                   |
+| `--round-corners`                                              | `0` (off)                          | corner radius in pixels for top-level windows                                     |
 | `--round-windows`                                              | none                               | `title:radius,...` rounds windows with that title, docks included                 |
 | `--adaptive-threads`                                           | `false`                            | encode on one thread, fanning out only under sustained heavy motion               |
 | `--stripes`                                                    | `1`                                | encode the screen as N independent horizontal streams (experimental)              |
