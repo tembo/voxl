@@ -22,6 +22,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
+/// How long a started recording that ran into the length limit waits for its
+/// `/record/stop` before it is discarded (the caller may have crashed or forgotten).
+const UNCLAIMED: Duration = Duration::from_secs(60);
+
 pub struct Recorder {
     pub hub: Arc<Hub>,
     /// Longest recording; a started one stops on its own after this.
@@ -208,6 +212,15 @@ pub async fn start(State(r): State<Arc<Recorder>>) -> Response {
         },
     );
     log::info!("recording {id} started");
+    // Nobody may ever stop it: once it has ended on its own, drop it after a grace period
+    // instead of holding the clip in memory forever.
+    let rec = r.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(rec.max + UNCLAIMED).await;
+        if rec.active.lock().remove(&id).is_some() {
+            log::info!("recording {id} was never stopped; discarded");
+        }
+    });
     (
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::json!({ "id": id, "max_seconds": r.max.as_secs() }).to_string(),
