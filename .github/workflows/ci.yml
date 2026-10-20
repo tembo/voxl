@@ -127,7 +127,7 @@ jobs:
           pip install websockets
           Start-Process notepad -WindowStyle Maximized
           Start-Sleep 2
-          $voxl = Start-Process target\release\voxl.exe -ArgumentList '--port=6901' -PassThru -RedirectStandardError voxl.log
+          $voxl = Start-Process target\release\voxl.exe -ArgumentList '--port=6901' -PassThru -NoNewWindow -RedirectStandardError voxl.log
           Start-Sleep 5
           $env:SMOKE_SHOT = 'smoke.png'
           python bench/smoke.py 127.0.0.1:6901 windows
