@@ -26,7 +26,8 @@ pub enum MicMsg {
     Stop(u64),
 }
 
-#[link(name = "opus")]
+// On Windows, build.rs links the static Opus from vcpkg (a #[link] would ask for a DLL).
+#[cfg_attr(not(windows), link(name = "opus"))]
 extern "C" {
     fn opus_decoder_create(fs: i32, channels: c_int, error: *mut c_int) -> *mut c_void;
     fn opus_decode(

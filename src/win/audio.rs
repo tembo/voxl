@@ -20,7 +20,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
 };
 
-#[link(name = "opus")]
+// build.rs links the static Opus from vcpkg (a #[link] would ask for a DLL).
 extern "C" {
     fn opus_encoder_create(
         fs: i32,
