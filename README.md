@@ -87,7 +87,7 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 | `--microphone-enabled`, `--microphone-fifo`                    | `false`, `/tmp/voxl-mic.fifo`      | browser microphone into the FIFO a PulseAudio pipe source reads                   |
 | `--round-corners`                                              | `0` (off)                          | corner radius in pixels for top-level windows                                     |
 | `--round-windows`                                              | none                               | `title:radius,...` rounds windows with that title, docks included                 |
-| `--adaptive-threads`                                           | `true`                             | encode on one thread, fanning out only under sustained heavy motion               |
+| `--adaptive-threads`                                           | `false`                            | encode on one thread, fanning out only under sustained heavy motion               |
 | `--stripes`                                                    | `1`                                | encode the screen as N independent horizontal streams (experimental)              |
 | `--scroll-px-per-notch`                                        | `180`                              | desktop pixels one wheel notch scrolls (calibrates smooth scrolling)              |
 | `--file-transfers`                                             | `upload,download`                  | `upload`, `download`, both, or `none`                                             |

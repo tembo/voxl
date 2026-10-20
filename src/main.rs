@@ -72,8 +72,8 @@ async fn main() {
             .get("preset")
             .cloned()
             .unwrap_or_else(|| "ultrafast".into()),
-        // Up to four sliced threads, used only under sustained heavy motion (see
-        // adaptive_threads); beyond four, x264's slicing overhead only adds CPU.
+        // Four sliced threads: lower latency than one, and x264's slicing overhead grows
+        // with thread count, so more threads only add CPU (measured on 2560x1600).
         threads: a
             .get("encoder-threads")
             .and_then(|v| v.parse().ok())
@@ -90,9 +90,10 @@ async fn main() {
         paintover_delay_ms: range_max(a.get("paintover-delay-ms"), 150.0) as u64,
         min_kbps: range_max(a.get("min-kbps"), 2000.0) as u32,
         stripes: range_max(a.get("stripes"), 1.0) as u32,
-        // One thread unless a frame would miss the frame budget: on desktop content x264's
-        // sliced threads cost ~3x the CPU, and on small updates are even slower.
-        adaptive_threads: truthy(a.get("adaptive-threads"), true),
+        // Opt-in: one thread unless a frame would miss the frame budget. x264's sliced
+        // threads cost ~3x the CPU on desktop content, so this saves 20-55% CPU, but
+        // small updates encode a few ms slower on one thread.
+        adaptive_threads: truthy(a.get("adaptive-threads"), false),
         coalesce: std::time::Duration::from_micros(range_max(a.get("coalesce-us"), 0.0) as u64),
     };
     let clip = a
