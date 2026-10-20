@@ -257,6 +257,16 @@ impl Capturer {
         crate::convert::convert_band(self.pixels(), self.stride, dst, y0, y1, threads);
     }
 
+    /// The current frame as packed BGRX (`width * 4` bytes per row), for screenshots.
+    pub fn snapshot(&self) -> Vec<u8> {
+        let (row, h) = (self.width as usize * 4, self.height as usize);
+        let mut out = Vec::with_capacity(row * h);
+        for line in self.pixels().chunks_exact(self.stride).take(h) {
+            out.extend_from_slice(&line[..row]);
+        }
+        out
+    }
+
     /// The current frame as BGRX pixels and their stride (debug marker probe).
     pub fn bgrx(&self) -> Option<(&[u8], usize)> {
         Some((self.pixels(), self.stride))

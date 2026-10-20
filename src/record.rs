@@ -50,6 +50,24 @@ impl Recorder {
     }
 }
 
+/// The screen as captured (BGRX, 4 bytes a pixel, rows packed), for a screenshot.
+pub struct Snapshot {
+    pub width: usize,
+    pub height: usize,
+    pub bgrx: Vec<u8>,
+}
+
+impl Snapshot {
+    /// RGB (8 bits per channel), exactly as on screen.
+    fn to_rgb(&self) -> Vec<u8> {
+        let mut out = vec![0u8; self.width * self.height * 3];
+        for (o, p) in out.chunks_exact_mut(3).zip(self.bgrx.chunks_exact(4)) {
+            o.copy_from_slice(&[p[2], p[1], p[0]]);
+        }
+        out
+    }
+}
+
 fn err(code: StatusCode, msg: impl Into<String>) -> Response {
     (
         code,
@@ -78,7 +96,7 @@ pub async fn screenshot(State(r): State<Arc<Recorder>>) -> Response {
         return err(StatusCode::SERVICE_UNAVAILABLE, "no frame from capture");
     };
     let png = tokio::task::spawn_blocking(move || {
-        let (w, h) = (frame.width as u32, frame.height() as u32);
+        let (w, h) = (frame.width as u32, frame.height as u32);
         let mut out = Vec::new();
         let mut enc = png::Encoder::new(&mut out, w, h);
         enc.set_color(png::ColorType::Rgb);
@@ -105,6 +123,7 @@ pub async fn screenshot(State(r): State<Arc<Recorder>>) -> Response {
 }
 
 /// Joins as a viewer and collects frames until `stop`, `max` or a geometry change.
+#[allow(clippy::result_large_err)]
 fn begin(
     r: &Arc<Recorder>,
     stop: oneshot::Receiver<()>,

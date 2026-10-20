@@ -325,6 +325,35 @@ impl Capturer {
         }
     }
 
+    /// The current frame as packed BGRX (`width * 4` bytes per row), for screenshots.
+    pub fn snapshot(&self) -> Vec<u8> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let mut out = vec![0u8; w * h * 4];
+        let Some(f) = &self.current else {
+            return out;
+        };
+        unsafe {
+            let pb = f.pb;
+            if CVPixelBufferGetWidth(pb) != w || CVPixelBufferGetHeight(pb) != h {
+                return out;
+            }
+            let (ys, uvs) = (
+                CVPixelBufferGetBytesPerRowOfPlane(pb, 0),
+                CVPixelBufferGetBytesPerRowOfPlane(pb, 1),
+            );
+            let y = std::slice::from_raw_parts(
+                CVPixelBufferGetBaseAddressOfPlane(pb, 0),
+                ys * h,
+            );
+            let uv = std::slice::from_raw_parts(
+                CVPixelBufferGetBaseAddressOfPlane(pb, 1),
+                uvs * h.div_ceil(2),
+            );
+            crate::convert::nv12_to_bgrx(y, ys, uv, uvs, w, h, &mut out);
+        }
+        out
+    }
+
     /// Frames are NV12 here, so the BGRX debug marker probe doesn't apply.
     pub fn bgrx(&self) -> Option<(&[u8], usize)> {
         None
