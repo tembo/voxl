@@ -83,19 +83,17 @@ pub fn write(frames: &[Frame], width: u32, height: u32, end_ms: u64) -> Result<V
         return Err("bad SPS".into());
     }
 
-    // Samples: length-prefixed NAL units, parameter sets and delimiters left out.
-    let mut mdat = Vec::new();
+    // Samples: length-prefixed NAL units, parameter sets and delimiters left out. They
+    // are only sized here and copied once, straight into the output, at the end.
+    let mut samples: Vec<Vec<&[u8]>> = Vec::with_capacity(frames.len());
     let (mut sizes, mut durations, mut sync) = (Vec::new(), Vec::new(), Vec::new());
     for (i, f) in frames.iter().enumerate() {
-        let start = mdat.len();
-        for n in nals(&f.data) {
-            if matches!(n[0] & 0x1f, 7..=9) {
-                continue;
-            }
-            mdat.extend_from_slice(&(n.len() as u32).to_be_bytes());
-            mdat.extend_from_slice(n);
-        }
-        sizes.push((mdat.len() - start) as u32);
+        let units: Vec<&[u8]> = nals(&f.data)
+            .into_iter()
+            .filter(|n| !matches!(n[0] & 0x1f, 7..=9))
+            .collect();
+        sizes.push(units.iter().map(|n| n.len() as u32 + 4).sum::<u32>());
+        samples.push(units);
         let next = frames
             .get(i + 1)
             .map(|n| n.ms)
@@ -107,13 +105,14 @@ pub fn write(frames: &[Frame], width: u32, height: u32, end_ms: u64) -> Result<V
     }
     let total: u64 = durations.iter().map(|&d| d as u64).sum();
     let n = frames.len() as u32;
+    let mdat_len: u64 = sizes.iter().map(|&s| s as u64).sum();
 
     let ftyp = bx(b"ftyp", b"isom\0\0\x02\0isomiso2avc1mp41");
-    if mdat.len() as u64 + 8 > u32::MAX as u64 {
+    if mdat_len + 8 > u32::MAX as u64 {
         return Err("recording too large".into());
     }
-    let mdat_box = bx(b"mdat", &mdat);
-    let chunk_offset = (ftyp.len() + 8) as u32;
+    // Patched in once moov's size is known (it doesn't depend on this value).
+    let chunk_offset = 0;
 
     let mut avcc = vec![1, sps[1], sps[2], sps[3], 0xff, 0xe1];
     avcc.extend_from_slice(&(sps.len() as u16).to_be_bytes());
@@ -192,9 +191,24 @@ pub fn write(frames: &[Frame], width: u32, height: u32, end_ms: u64) -> Result<V
     mvhd.extend_from_slice(&u32s(&MATRIX));
     mvhd.extend_from_slice(&[0u8; 24]); // pre-defined
     mvhd.extend_from_slice(&u32s(&[2])); // next track id
-    let moov = bx(b"moov", &[fbx(b"mvhd", 0, &mvhd), trak].concat());
+    let mut moov = bx(b"moov", &[fbx(b"mvhd", 0, &mvhd), trak].concat());
 
-    Ok([ftyp, mdat_box, moov].concat())
+    // moov goes first, so a player can start before the whole file has arrived. stco is
+    // the last box in moov, and its one chunk offset the last 4 bytes: the samples start
+    // right after ftyp, moov and mdat's header.
+    let offset = (ftyp.len() + moov.len() + 8) as u32;
+    let at = moov.len() - 4;
+    moov[at..].copy_from_slice(&offset.to_be_bytes());
+    let mut out = Vec::with_capacity(offset as usize + mdat_len as usize);
+    out.extend_from_slice(&ftyp);
+    out.extend_from_slice(&moov);
+    out.extend_from_slice(&(mdat_len as u32 + 8).to_be_bytes());
+    out.extend_from_slice(b"mdat");
+    for n in samples.iter().flatten() {
+        out.extend_from_slice(&(n.len() as u32).to_be_bytes());
+        out.extend_from_slice(n);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -210,6 +224,37 @@ mod tests {
         assert_eq!(
             n,
             vec![&[0x67, 1, 2][..], &[0x68, 3][..], &[0x65, 4, 5][..]]
+        );
+    }
+
+    #[test]
+    fn moov_first_and_chunk_offset_points_at_the_samples() {
+        let key = bytes::Bytes::from_static(&[
+            0, 0, 0, 1, 0x67, 100, 0, 40, 0xac, 0, 0, 0, 1, 0x68, 0xee, 0, 0, 0, 1, 0x65, 0xaa,
+        ]);
+        let delta = bytes::Bytes::from_static(&[0, 0, 0, 1, 0x41, 0xbb, 0xcc]);
+        let frames = [
+            Frame {
+                ms: 0,
+                key: true,
+                data: key,
+            },
+            Frame {
+                ms: 40,
+                key: false,
+                data: delta,
+            },
+        ];
+        let out = write(&frames, 64, 32, 100).unwrap();
+        let pos = |t: &[u8]| out.windows(4).position(|w| w == t).unwrap();
+        assert!(pos(b"moov") < pos(b"mdat"));
+        let stco = pos(b"stco");
+        let off = u32::from_be_bytes(out[stco + 12..stco + 16].try_into().unwrap()) as usize;
+        assert_eq!(off, pos(b"mdat") + 4);
+        // Both samples, length-prefixed, parameter sets left out.
+        assert_eq!(
+            &out[off..],
+            &[0, 0, 0, 2, 0x65, 0xaa, 0, 0, 0, 3, 0x41, 0xbb, 0xcc]
         );
     }
 }
