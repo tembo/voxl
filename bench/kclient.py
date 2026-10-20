@@ -2,7 +2,10 @@
 client does (same pixel format and encodings, continuous updates, fences), keeps a
 full framebuffer and reads the loadgen pixel marker after every update. Reports the
 same JSON as nclient.py: unique displayed frames/s, draw->display latency and Mbps.
-Usage: kclient.py <host:port> <secs> [markerX markerY]"""
+Usage: kclient.py <host:port> <secs> [markerX markerY]
+KC_URL overrides the WebSocket URL (e.g. a wss:// preview link) and KC_HEADERS adds
+request headers (JSON object), for VNC servers behind an authenticating proxy;
+KC_CONNECT=host:port dials that address instead (e.g. shaper.py in front of the proxy)."""
 import asyncio, io, json, os, struct, sys, time, zlib
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
@@ -63,8 +66,16 @@ class Conn:
 
 
 async def main():
-    url = f'ws://{hostport}/websockify'
-    async with websockets.connect(url, subprotocols=['binary'], origin=f'http://{hostport}', max_size=None, compression=None) as ws:
+    url = os.environ.get('KC_URL') or f'ws://{hostport}/websockify'
+    origin = url.replace('wss://', 'https://').replace('ws://', 'http://').split('/websockify')[0]
+    headers = json.loads(os.environ.get('KC_HEADERS') or '{}')
+    via = {}
+    if os.environ.get('KC_CONNECT'):
+        ch, cp = os.environ['KC_CONNECT'].rsplit(':', 1)
+        via = {'host': ch, 'port': int(cp)}
+        if url.startswith('wss://'):
+            via['server_hostname'] = url.split('/')[2].split(':')[0]
+    async with websockets.connect(url, subprotocols=['binary'], origin=origin, additional_headers=headers, max_size=None, compression=None, **via) as ws:
         c = Conn(ws)
         ver = await c.read(12)
         await ws.send(b'RFB 003.008\n')
