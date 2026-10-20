@@ -73,7 +73,10 @@ impl Encoder {
             param.b_annexb = 1;
             param.b_repeat_headers = 1;
             param.b_aud = 0;
-            param.i_log_level = if std::env::var("VOXL_X264_INFO").is_ok() {
+            param.i_log_level = if std::env::var("VOXL_X264_INFO").as_deref() == Ok("debug") {
+                // Per-frame QP, macroblock types and size.
+                ffi::X264_LOG_DEBUG
+            } else if std::env::var("VOXL_X264_INFO").is_ok() {
                 ffi::X264_LOG_INFO
             } else {
                 ffi::X264_LOG_WARNING
@@ -199,5 +202,88 @@ impl Encoder {
 impl Drop for Encoder {
     fn drop(&mut self) {
         unsafe { ffi::x264_encoder_close(self.h) }
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// cargo test --release encode_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn encode_cost() {
+        let (w, h) = (2560usize, 1600usize);
+        let mbs = (w / 16) * (h / 16);
+        let threads: u32 = std::env::var("T")
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(1);
+        let cpu = || unsafe {
+            let mut r: libc::rusage = std::mem::zeroed();
+            libc::getrusage(libc::RUSAGE_SELF, &mut r);
+            (r.ru_utime.tv_sec + r.ru_stime.tv_sec) as f64 * 1e3
+                + (r.ru_utime.tv_usec + r.ru_stime.tv_usec) as f64 / 1e3
+        };
+        for (label, hint) in [("no hints", false), ("hints", true)] {
+            let mut enc = Encoder::new(&EncoderConfig {
+                width: w as u32,
+                height: h as u32,
+                fps: 60,
+                preset: "ultrafast".into(),
+                threads,
+                crf: 24.0,
+                max_kbps: 30000,
+            })
+            .unwrap();
+            let mut y = vec![0u8; w * h];
+            let (u, v) = (vec![128u8; w * h / 4], vec![128u8; w * h / 4]);
+            for (i, p) in y.iter_mut().enumerate() {
+                *p = ((i % w) ^ (i / w)) as u8;
+            }
+            let mut out = Vec::new();
+            let mut total = std::time::Duration::ZERO;
+            let mut cpu_ms = 0.0;
+            for f in 0..120 {
+                // A 640x360 region changes every frame; the rest stays still.
+                for row in 0..360 {
+                    for x in 0..640 {
+                        y[row * w + x] = (x + row + f * 7) as u8;
+                    }
+                }
+                let mut info: Vec<u8> = (0..mbs)
+                    .map(|i| ((i % (w / 16)) >= 40 || (i / (w / 16)) >= 23) as u8)
+                    .collect();
+                let planes = Planes {
+                    y: &y,
+                    u: &u,
+                    v: &v,
+                    stride_y: w,
+                    stride_uv: w / 2,
+                };
+                out.clear();
+                let t = std::time::Instant::now();
+                let c0 = cpu();
+                enc.encode(
+                    &planes,
+                    f as i64 * 16,
+                    f == 0,
+                    None,
+                    if hint { Some(&mut info) } else { None },
+                    &mut out,
+                )
+                .unwrap();
+                if f >= 20 {
+                    total += t.elapsed();
+                    cpu_ms += cpu() - c0;
+                }
+            }
+            println!(
+                "{threads}t {label}: {:.2} ms/frame wall, {:.2} ms CPU, {} bytes last",
+                total.as_secs_f64() * 1000.0 / 100.0,
+                cpu_ms / 100.0,
+                out.len()
+            );
+        }
     }
 }

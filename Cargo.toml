@@ -27,6 +27,10 @@ futures-util = { version = "0.3", default-features = false, features = [
 	"sink",
 ] }
 nix = { version = "0.31", features = ["fs", "poll", "time"] }
+png = "0.18"
+zip = { version = "7", default-features = false, features = [
+	"deflate-flate2-zlib-rs",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = [

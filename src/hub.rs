@@ -161,6 +161,8 @@ pub struct Hub {
     pub resize_max: Mutex<Option<(u32, u32)>>,
     /// Server settings sent in every `hello` besides the geometry (audio, files, ...).
     pub hello_extra: Mutex<serde_json::Map<String, serde_json::Value>>,
+    /// Screenshot requests, answered by the capture thread with the current screen.
+    pub snapshots: Mutex<Vec<tokio::sync::oneshot::Sender<crate::convert::I420>>>,
 }
 
 impl Hub {
@@ -182,6 +184,7 @@ impl Hub {
             resize_req: Mutex::new(None),
             resize_max: Mutex::new(None),
             hello_extra: Mutex::new(serde_json::Map::new()),
+            snapshots: Mutex::new(Vec::new()),
         })
     }
 

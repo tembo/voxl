@@ -487,6 +487,17 @@ fn capture_loop(
         }
         cap.pump()?;
         hub.drain_wake();
+        let snaps = std::mem::take(&mut *hub.snapshots.lock());
+        if !snaps.is_empty() {
+            // The whole current screen, whether or not anyone is watching. Damage
+            // stays pending, so the stream still sends what changed.
+            cap.grab(cap.full())?;
+            let mut shot = I420::new(w, h);
+            cap.convert(&mut shot, 0, h, cfg.convert_threads);
+            for tx in snaps {
+                let _ = tx.send(shot.clone());
+            }
+        }
         while let Ok((i, b)) = ret_rx.try_recv() {
             pool[i] = Some(b);
         }
@@ -753,30 +764,80 @@ struct StripeJob {
 
 type StripeResult = (usize, Option<(bool, Vec<u8>)>);
 
-/// x264's sliced threading costs ~3x the CPU of one thread on desktop content, so a
-/// stripe encodes single-threaded and only fans out while sustained heavy motion
-/// would otherwise blow the frame budget.
+/// x264's sliced threading costs ~3x the CPU of one thread on desktop content (and on
+/// small updates is even slower), so a stripe encodes single-threaded and only fans out
+/// while sustained heavy motion would otherwise blow the frame budget.
 struct ThreadGovernor {
     threads: u32,
     ewma_ms: f64,
     heavy: u32,
     light_since: Option<Instant>,
     budget_ms: f64,
+    /// One-thread encode time as a function of changed macroblocks, learned from
+    /// single-threaded frames, to tell when one thread would fit again.
+    fit: CostFit,
+    /// Predicted one-thread time while threaded.
+    predicted_ms: f64,
+}
+
+/// Exponentially weighted least squares fit of encode ms = a + b * changed MBs.
+#[derive(Default)]
+struct CostFit {
+    w: f64,
+    x: f64,
+    y: f64,
+    xx: f64,
+    xy: f64,
+}
+
+impl CostFit {
+    fn add(&mut self, x: f64, y: f64) {
+        let k = 0.995;
+        self.w = self.w * k + 1.0;
+        self.x = self.x * k + x;
+        self.y = self.y * k + y;
+        self.xx = self.xx * k + x * x;
+        self.xy = self.xy * k + x * y;
+    }
+    fn predict(&self, x: f64) -> Option<f64> {
+        if self.w < 30.0 {
+            return None;
+        }
+        let var = self.xx * self.w - self.x * self.x;
+        if var <= f64::EPSILON * self.w * self.w {
+            return Some(self.y / self.w);
+        }
+        let b = (self.xy * self.w - self.x * self.y) / var;
+        let a = (self.y - b * self.x) / self.w;
+        Some(a + b * x)
+    }
 }
 
 impl ThreadGovernor {
-    fn want(&mut self, enc_ms: f64, max: u32) -> Option<u32> {
+    fn want(&mut self, enc_ms: f64, changed_mbs: f64, max: u32) -> Option<u32> {
         self.ewma_ms = self.ewma_ms * 0.8 + enc_ms * 0.2;
         if self.threads == 1 {
-            // Only when one thread can no longer hold the frame rate.
-            self.heavy = if self.ewma_ms > self.budget_ms * 0.9 {
+            self.fit.add(changed_mbs, enc_ms);
+            // Before one thread runs out of frame budget: encode times vary from frame to
+            // frame, and at ~90% of the budget on average enough frames miss it to drop
+            // the frame rate.
+            self.heavy = if self.ewma_ms > self.budget_ms * 0.65 {
                 self.heavy + 1
             } else {
                 0
             };
-            (self.heavy >= 30).then_some(max)
-        } else if self.ewma_ms < self.budget_ms * 0.45 {
-            // Threaded encode is ~2x faster, so this means one thread would fit again.
+            if self.heavy >= 20 {
+                self.predicted_ms = self.ewma_ms;
+                return Some(max);
+            }
+            return None;
+        }
+        // Without enough one-thread history, assume one thread is no faster than these.
+        let one = self.fit.predict(changed_mbs).unwrap_or(enc_ms);
+        self.predicted_ms = self.predicted_ms * 0.8 + one * 0.2;
+        if self.predicted_ms < self.budget_ms * 0.5 {
+            // One thread would fit with room to spare (switching reopens the encoder,
+            // which costs a keyframe, so not on a brief lull).
             let since = *self.light_since.get_or_insert_with(Instant::now);
             (since.elapsed() >= Duration::from_secs(2)).then_some(1)
         } else {
@@ -799,6 +860,8 @@ fn stripe_worker(
         heavy: 0,
         light_since: None,
         budget_ms: 1000.0 / s.cfg.fps as f64,
+        fit: CostFit::default(),
+        predicted_ms: 0.0,
     };
     while let Ok(job) = rx.recv() {
         let buf = unsafe { &*job.buf.0 };
@@ -858,7 +921,13 @@ fn stripe_worker(
             );
         }
         if s.max_threads > 1 {
-            if let Some(t) = gov.want(te.elapsed().as_secs_f64() * 1000.0, s.max_threads) {
+            // Changed macroblocks in this stripe (all of them without a damage map).
+            let changed = info
+                .as_ref()
+                .map_or((s.h.div_ceil(16) * job.mb_cols) as f64, |m| {
+                    m.iter().filter(|&&c| c == 0).count() as f64
+                });
+            if let Some(t) = gov.want(te.elapsed().as_secs_f64() * 1000.0, changed, s.max_threads) {
                 match Encoder::new(&EncoderConfig {
                     threads: t,
                     ..s.cfg.clone()

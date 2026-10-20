@@ -18,6 +18,8 @@ mod input;
 #[cfg(target_os = "macos")]
 mod mac;
 mod mic;
+mod mp4;
+mod record;
 #[cfg(target_os = "linux")]
 mod screen;
 mod server;
@@ -133,6 +135,9 @@ async fn run() {
         paintover_delay_ms: range_max(a.get("paintover-delay-ms"), 150.0) as u64,
         min_kbps: range_max(a.get("min-kbps"), 2000.0) as u32,
         stripes: range_max(a.get("stripes"), 1.0) as u32,
+        // Opt-in: one thread unless a frame would miss the frame budget. x264's sliced
+        // threads cost ~3x the CPU on desktop content, so this saves 20-55% CPU, but
+        // small updates encode a few ms slower on one thread.
         adaptive_threads: truthy(a.get("adaptive-threads"), false),
         coalesce: std::time::Duration::from_micros(range_max(a.get("coalesce-us"), 0.0) as u64),
     };
@@ -279,6 +284,11 @@ async fn run() {
         files,
         mic,
         resize: resize_on,
+        // GET /screenshot, /record; --max-record-seconds caps a recording's length.
+        recorder: record::Recorder::new(
+            hub.clone(),
+            std::time::Duration::from_secs_f64(range_max(a.get("max-record-seconds"), 300.0)),
+        ),
     };
     let app = server::router(state);
     let listener = tokio::net::TcpListener::bind((addr.as_str(), port))

@@ -1,6 +1,6 @@
 //! File transfer over plain HTTP, next to the stream: list a directory, download a
-//! file, upload a file. Everything is confined to one root directory (the desktop
-//! user's home by default). Transfers use their own connections, so a large upload
+//! file or a folder (zipped on the fly), upload files, folders included. Everything is
+//! confined to one root directory (the desktop user's home by default). Transfers use their own connections, so a large upload
 //! or download never queues behind (or in front of) video frames.
 
 use axum::body::Body;
@@ -142,6 +142,13 @@ pub async fn download(State(f): State<Arc<Files>>, Query(q): Q) -> Response {
         Ok(p) => p,
         Err(e) => return e,
     };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Home".into());
+    if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_dir()) {
+        return zip_folder(path, name);
+    }
     let Ok(file) = tokio::fs::File::open(&path).await else {
         return err(StatusCode::NOT_FOUND, "not found");
     };
@@ -151,10 +158,6 @@ pub async fn download(State(f): State<Arc<Files>>, Query(q): Q) -> Response {
     if !md.is_file() {
         return err(StatusCode::BAD_REQUEST, "not a file");
     }
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "download".into());
     let stream = futures_util::stream::unfold(Some(file), |file| async move {
         let mut file = file?;
         let mut buf = Vec::with_capacity(256 << 10);
@@ -164,6 +167,13 @@ pub async fn download(State(f): State<Arc<Files>>, Query(q): Q) -> Response {
             Err(e) => Some((Err(e), None)),
         }
     });
+    let mut h = attachment(&name, "application/octet-stream");
+    h.insert(header::CONTENT_LENGTH, md.len().into());
+    (h, Body::from_stream(stream)).into_response()
+}
+
+/// Headers for a download saved as `name`.
+fn attachment(name: &str, content_type: &'static str) -> HeaderMap {
     let ascii: String = name
         .chars()
         .map(|c| {
@@ -176,19 +186,171 @@ pub async fn download(State(f): State<Arc<Files>>, Query(q): Q) -> Response {
         .collect();
     let disposition = format!(
         "attachment; filename=\"{ascii}\"; filename*=UTF-8''{}",
-        pct_encode(&name)
+        pct_encode(name)
     );
     let mut h = HeaderMap::new();
-    h.insert(
-        header::CONTENT_TYPE,
-        "application/octet-stream".parse().unwrap(),
-    );
-    h.insert(header::CONTENT_LENGTH, md.len().into());
+    h.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     if let Ok(v) = disposition.parse() {
         h.insert(header::CONTENT_DISPOSITION, v);
     }
-    (h, Body::from_stream(stream)).into_response()
+    h
+}
+
+/// Streams a folder as a zip, built while it downloads: nothing is staged on disk and
+/// memory stays at a few chunks however big the folder is. Symlinks are left out (they
+/// could lead outside the shared folder, or loop).
+fn zip_folder(dir: PathBuf, name: String) -> Response {
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(4);
+    let top = name.clone();
+    tokio::task::spawn_blocking(move || {
+        let out = ChunkWriter {
+            tx: tx.clone(),
+            buf: Vec::with_capacity(CHUNK),
+        };
+        if let Err(e) = write_zip(&dir, &top, out) {
+            log::warn!("zipping {}: {e}", dir.display());
+            // Ends the response with an error, so the browser marks the download failed.
+            let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
+        }
+    });
+    let stream =
+        futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|c| (c, rx)) });
+    (
+        attachment(&format!("{name}.zip"), "application/zip"),
+        Body::from_stream(stream),
+    )
+        .into_response()
+}
+
+const CHUNK: usize = 256 << 10;
+
+/// Hands the zip to the HTTP response in chunks; blocks while the client catches up.
+struct ChunkWriter {
+    tx: tokio::sync::mpsc::Sender<std::io::Result<bytes::Bytes>>,
+    buf: Vec<u8>,
+}
+
+impl ChunkWriter {
+    fn send(&mut self) -> std::io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::replace(&mut self.buf, Vec::with_capacity(CHUNK));
+        self.tx
+            .blocking_send(Ok(chunk.into()))
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "download cancelled"))
+    }
+}
+
+impl std::io::Write for ChunkWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        if self.buf.len() >= CHUNK {
+            self.send()?;
+        }
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.send()
+    }
+}
+
+impl Drop for ChunkWriter {
+    fn drop(&mut self) {
+        let _ = self.send();
+    }
+}
+
+/// Formats that are already compressed: stored as they are rather than deflated again.
+const COMPRESSED: &[&str] = &[
+    "zip", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "br", "jar", "whl", "apk", "dmg", "iso",
+    "jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "mp3", "m4a", "aac", "ogg", "opus",
+    "flac", "mp4", "m4v", "mov", "mkv", "webm", "avi", "woff", "woff2", "pdf", "docx", "xlsx",
+    "pptx",
+];
+
+/// Zip time (local fields, no zone) for a modification time, read as UTC.
+fn zip_time(t: std::time::SystemTime) -> Option<zip::DateTime> {
+    let secs = t.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+    let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    let year = (yoe + era * 400 + i64::from(month <= 2)) as u16;
+    zip::DateTime::from_date_and_time(
+        year,
+        month,
+        day,
+        (rem / 3600) as u8,
+        (rem % 3600 / 60) as u8,
+        (rem % 60) as u8,
+    )
+    .ok()
+}
+
+fn write_zip(dir: &Path, top: &str, out: ChunkWriter) -> zip::result::ZipResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use zip::write::SimpleFileOptions;
+    let mut z = zip::ZipWriter::new_stream(out);
+    let base = SimpleFileOptions::default();
+    let mut todo = vec![(dir.to_path_buf(), top.to_string())];
+    while let Some((path, rel)) = todo.pop() {
+        z.add_directory(format!("{rel}/"), base)?;
+        let mut entries: Vec<_> = match std::fs::read_dir(&path) {
+            Ok(rd) => rd.filter_map(Result::ok).collect(),
+            // Unreadable folders are left empty rather than failing the whole download.
+            Err(_) => continue,
+        };
+        entries.sort_by_key(|e| e.file_name());
+        // Pushed in reverse so folders come out in name order.
+        let mut dirs = Vec::new();
+        for e in entries {
+            let Ok(md) = e.path().symlink_metadata() else {
+                continue;
+            };
+            let name = e.file_name().to_string_lossy().into_owned();
+            let rel = format!("{rel}/{name}");
+            if md.is_dir() {
+                dirs.push((e.path(), rel));
+                continue;
+            }
+            if !md.is_file() {
+                continue;
+            }
+            let Ok(mut file) = std::fs::File::open(e.path()) else {
+                continue;
+            };
+            let stored = Path::new(&name)
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| COMPRESSED.contains(&x.to_ascii_lowercase().as_str()));
+            let mut opts = base
+                .large_file(md.len() >= u32::MAX as u64)
+                .unix_permissions(md.permissions().mode() & 0o777);
+            opts = if stored {
+                opts.compression_method(zip::CompressionMethod::Stored)
+            } else {
+                // Fastest level: the VM's CPU is busy streaming the desktop.
+                opts.compression_method(zip::CompressionMethod::Deflated)
+                    .compression_level(Some(1))
+            };
+            if let Some(t) = md.modified().ok().and_then(zip_time) {
+                opts = opts.last_modified_time(t);
+            }
+            z.start_file(rel, opts)?;
+            std::io::copy(&mut file, &mut z)?;
+        }
+        todo.extend(dirs.into_iter().rev());
+    }
+    z.finish()?;
+    Ok(())
 }
 
 fn pct_encode(s: &str) -> String {
@@ -265,6 +427,34 @@ pub async fn upload(
     }
     if !dir.is_dir() {
         return err(StatusCode::NOT_FOUND, "not a folder");
+    }
+    // Folder uploads: `sub` is the file's folder inside the upload ("Photos/2024"),
+    // created as needed. Folders that already exist are merged into.
+    let sub = q.get("sub").map(String::as_str).unwrap_or("");
+    let mut dir = dir;
+    for part in sub.split('/').filter(|p| !p.is_empty()) {
+        let Some(p) = clean_name(part) else {
+            return err(StatusCode::BAD_REQUEST, "invalid folder name");
+        };
+        // One level at a time, checking each existing step: a symlink on the way could
+        // lead outside the shared folder, and nothing may be created out there. `dir` is
+        // canonical and `p` a single plain name (clean_name rejects `.` and `..`).
+        let next = dir.join(p);
+        if let Err(e) = tokio::fs::create_dir(&next).await {
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("cannot create the folder: {e}"),
+                );
+            }
+        }
+        match tokio::fs::canonicalize(&next).await {
+            Ok(c) if c.starts_with(&f.root) && c.is_dir() => dir = c,
+            Ok(c) if c.starts_with(&f.root) => {
+                return err(StatusCode::CONFLICT, "a file is in the way of the folder")
+            }
+            _ => return err(StatusCode::FORBIDDEN, "outside the shared folder"),
+        }
     }
     // Write to a hidden temporary file and rename once complete, so nothing in the
     // VM sees (or opens) a half-uploaded file.

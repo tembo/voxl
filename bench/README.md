@@ -40,6 +40,10 @@ sleep 1; BENCH_DISPLAY=:5 env/openbox.sh &
   `WEBSOCKIFY`), `env/neko.sh` (Neko's official image against the benchmark display;
   `NEKO_SHAPE=mbps/rtt` shapes its UDP media with `tc netem` in its own container
   network) or `env/neko-tuned.sh` (60 FPS x264).
+- `daytona_bench.py up|run|down`: a Daytona sandbox (default size, 2560x1600 desktop
+  with x11vnc + noVNC) with the workloads in it, measured with `kclient.py` through
+  Daytona's signed preview proxy (`KC_URL`, `KC_HEADERS`; `KC_CONNECT` to go through
+  `shaper.py`). Needs the `daytona` SDK and `DAYTONA_API_KEY`.
 - `suite.sh`: every config (`CONFIGS`: selkies with and without picom, voxl and
   KasmVNC with and without picom) x workload
   (Chromium scroll, 1080p and full-screen animation) x link (LAN, 10 Mbps/40 ms,
@@ -66,6 +70,8 @@ For smooth scrolling, start that display with the patched server:
 - `fstest.mjs`, `fsiframe.mjs`: fullscreen toolbar and Keyboard Lock, top level and embedded.
 - `resizetest.mjs`: re-fit in a resizable sidebar iframe and at several tab sizes.
 - `filestest.mjs`: file panel, uploads (button and drag and drop) and downloads; starts its own voxl.
+- `foldertest.mjs`: folders download as zips (checked byte for byte) and upload through
+  the API and the folder picker, merged and confined to the root; starts its own voxl.
 - `resizedyn.mjs`: dynamic resolution end to end with its own Xvfb (`XVFB`) and voxl:
   desktop follows the window, clamping, decoded size, pointer mapping, zero-copy capture.
 - `mictest.mjs`: microphone end to end with a fake 440 Hz microphone, a private PulseAudio
