@@ -341,10 +341,7 @@ impl Capturer {
                 CVPixelBufferGetBytesPerRowOfPlane(pb, 0),
                 CVPixelBufferGetBytesPerRowOfPlane(pb, 1),
             );
-            let y = std::slice::from_raw_parts(
-                CVPixelBufferGetBaseAddressOfPlane(pb, 0),
-                ys * h,
-            );
+            let y = std::slice::from_raw_parts(CVPixelBufferGetBaseAddressOfPlane(pb, 0), ys * h);
             let uv = std::slice::from_raw_parts(
                 CVPixelBufferGetBaseAddressOfPlane(pb, 1),
                 uvs * h.div_ceil(2),
