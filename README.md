@@ -1,7 +1,7 @@
 # voxl
 
 Low-latency desktop streaming for the browser, written in Rust. voxl streams an X11
-display or a Mac's screen as H.264 over a WebSocket to a small web client that decodes with WebCodecs,
+display, a Mac's screen or a Windows desktop as H.264 over a WebSocket to a small web client that decodes with WebCodecs,
 with input, clipboard, audio, microphone, file and folder transfer and dynamic resolution.
 
 ## Benchmarks
@@ -137,3 +137,36 @@ blackhole-2ch`) and pick it as the input in the apps that should hear you.
 
 The other flags work as on Linux; `--audio-device-name`, `--microphone-fifo` and the
 rounded-corner flags don't apply.
+
+### Windows
+
+voxl also streams a Windows desktop (Windows 10 or later), with every feature of the
+Linux version (DXGI Desktop Duplication capture, SendInput, clipboard text and images,
+WASAPI system audio). Build it with Rust, [vcpkg](https://vcpkg.io), LLVM (for bindgen)
+and esbuild:
+
+```powershell
+vcpkg install x264 libyuv opus --triplet x64-windows-static-md
+$env:VCPKGRS_TRIPLET = 'x64-windows-static-md'
+npm install -g esbuild
+cargo build --release
+.\target\release\voxl.exe --port=6901
+```
+
+Open `http://localhost:6901/`. As on a Mac, voxl listens on `127.0.0.1` unless `--addr`
+says otherwise. It streams the desktop of the session it runs in, so start it in the
+user's session (not as a service); Windows hides the lock screen and UAC prompts from
+it unless it runs as SYSTEM. For the microphone, install a virtual audio cable
+([VB-CABLE](https://vb-audio.com/Cable/)): voxl plays into "CABLE Input" and apps
+record from "CABLE Output".
+
+| Windows flag          | Default                   |                                                                    |
+| --------------------- | ------------------------- | ------------------------------------------------------------------ |
+| `--display`           | primary display           | display to stream, by index (0 is the primary); logged at startup  |
+| `--audio-device-name` | default output device     | output device (name or prefix) whose sound to stream               |
+| `--microphone-device` | first virtual cable found | output device (name or prefix) to play the browser microphone into |
+| `--resize-scale`      | the display's scaling     | so a viewer's window maps to the same size on the desktop          |
+
+The other flags work as on Linux; `--microphone-fifo` and the rounded-corner flags don't
+apply. Dynamic resolution picks the largest display mode that fits the viewer's window,
+and Windows restores the original mode when voxl exits.

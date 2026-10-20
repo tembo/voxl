@@ -1,11 +1,8 @@
 //! Shared state between media producers (video/audio/cursor/clipboard) and websocket clients.
 
 use bytes::Bytes;
-use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
-use nix::unistd::{pipe, read, write};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -109,13 +106,112 @@ impl Client {
 
 /// A non-blocking, close-on-exec pipe for waking a thread that polls file descriptors
 /// (`pipe2` with those flags, which macOS lacks).
-pub fn wake_pipe() -> nix::Result<(OwnedFd, OwnedFd)> {
-    let (r, w) = pipe()?;
+#[cfg(unix)]
+pub fn wake_pipe() -> nix::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
+    let (r, w) = nix::unistd::pipe()?;
     for fd in [&r, &w] {
         fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))?;
         fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
     }
     Ok((r, w))
+}
+
+/// Something `wait_any` can wait for: a file descriptor on Unix, a handle on Windows.
+#[cfg(unix)]
+pub type Waitable<'a> = std::os::fd::BorrowedFd<'a>;
+#[cfg(windows)]
+pub type Waitable<'a> = std::os::windows::io::BorrowedHandle<'a>;
+
+/// Wakes a thread blocked in `wait_any`: a pipe on Unix, an event on Windows.
+pub struct Wake {
+    #[cfg(unix)]
+    r: std::os::fd::OwnedFd,
+    #[cfg(unix)]
+    w: std::os::fd::OwnedFd,
+    #[cfg(windows)]
+    event: std::os::windows::io::OwnedHandle,
+}
+
+impl Wake {
+    #[cfg(unix)]
+    pub fn new() -> std::io::Result<Self> {
+        let (r, w) = wake_pipe()?;
+        Ok(Wake { r, w })
+    }
+
+    #[cfg(windows)]
+    pub fn new() -> std::io::Result<Self> {
+        use std::os::windows::io::FromRawHandle;
+        // Manual reset: signalled until drained, however many wakes came in between.
+        let h = unsafe { windows::Win32::System::Threading::CreateEventW(None, true, false, None) }
+            .map_err(std::io::Error::other)?;
+        Ok(Wake {
+            event: unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(h.0) },
+        })
+    }
+
+    pub fn signal(&self) {
+        #[cfg(unix)]
+        let _ = nix::unistd::write(&self.w, &[1u8]);
+        #[cfg(windows)]
+        unsafe {
+            use std::os::windows::io::AsRawHandle;
+            let _ = windows::Win32::System::Threading::SetEvent(
+                windows::Win32::Foundation::HANDLE(self.event.as_raw_handle()),
+            );
+        }
+    }
+
+    pub fn drain(&self) {
+        #[cfg(unix)]
+        {
+            let mut buf = [0u8; 64];
+            while matches!(nix::unistd::read(&self.r, &mut buf), Ok(n) if n > 0) {}
+        }
+        #[cfg(windows)]
+        unsafe {
+            use std::os::windows::io::AsRawHandle;
+            let _ = windows::Win32::System::Threading::ResetEvent(
+                windows::Win32::Foundation::HANDLE(self.event.as_raw_handle()),
+            );
+        }
+    }
+
+    pub fn waitable(&self) -> Waitable<'_> {
+        #[cfg(unix)]
+        return std::os::fd::AsFd::as_fd(&self.r);
+        #[cfg(windows)]
+        return std::os::windows::io::AsHandle::as_handle(&self.event);
+    }
+}
+
+/// Blocks until one of `w` is ready or `timeout_ms` passes (negative: no timeout).
+pub fn wait_any(w: &[Waitable], timeout_ms: i32) {
+    #[cfg(unix)]
+    {
+        use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+        let mut p: Vec<PollFd> = w
+            .iter()
+            .map(|&fd| PollFd::new(fd, PollFlags::POLLIN))
+            .collect();
+        let _ = poll(
+            &mut p,
+            PollTimeout::try_from(timeout_ms).unwrap_or(PollTimeout::NONE),
+        );
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        let hs: Vec<HANDLE> = w.iter().map(|h| HANDLE(h.as_raw_handle())).collect();
+        let ms = if timeout_ms < 0 {
+            windows::Win32::System::Threading::INFINITE
+        } else {
+            timeout_ms as u32
+        };
+        unsafe { windows::Win32::System::Threading::WaitForMultipleObjects(&hs, false, ms) };
+    }
 }
 
 fn wrapping_le(a: u32, b: u32) -> bool {
@@ -150,9 +246,8 @@ pub struct Hub {
     pub target_kbps: AtomicU32,
     /// Last cursor message, replayed to new clients.
     pub cursor: Mutex<Option<Bytes>>,
-    /// Pipe used to wake the capture thread (acks, joins, keyframe requests).
-    wake_w: OwnedFd,
-    pub wake_r: OwnedFd,
+    /// Wakes the capture thread (acks, joins, keyframe requests).
+    pub waker: Wake,
     pub input: Mutex<Option<std::sync::mpsc::Sender<crate::input::InputEvent>>>,
     pub last_clipboard: Mutex<Option<String>>,
     /// Desktop size a client asked for (dynamic resolution), applied by the video thread.
@@ -167,7 +262,6 @@ pub struct Hub {
 
 impl Hub {
     pub fn new() -> Arc<Self> {
-        let (wake_r, wake_w) = wake_pipe().expect("wake pipe");
         Arc::new(Hub {
             clients: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),
@@ -177,8 +271,7 @@ impl Hub {
             target_kbps: AtomicU32::new(0),
             stripes: Mutex::new(Vec::new()),
             cursor: Mutex::new(None),
-            wake_w,
-            wake_r,
+            waker: Wake::new().expect("wake"),
             input: Mutex::new(None),
             last_clipboard: Mutex::new(None),
             resize_req: Mutex::new(None),
@@ -189,12 +282,11 @@ impl Hub {
     }
 
     pub fn wake(&self) {
-        let _ = write(&self.wake_w, &[1u8]);
+        self.waker.signal();
     }
 
     pub fn drain_wake(&self) {
-        let mut buf = [0u8; 64];
-        while matches!(read(&self.wake_r, &mut buf), Ok(n) if n > 0) {}
+        self.waker.drain();
     }
 
     pub fn add_client(&self, tx: mpsc::UnboundedSender<Out>) -> Arc<Client> {

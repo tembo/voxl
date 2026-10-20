@@ -76,3 +76,70 @@ jobs:
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+
+  windows:
+    name: Windows (rustfmt, clippy, smoke test)
+    runs-on: windows-latest
+    env:
+      # Static x264, libyuv and Opus (with the DLL C runtime, as Rust uses), so
+      # voxl.exe runs on its own.
+      VCPKGRS_TRIPLET: x64-windows-static-md
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.93.0'
+          components: clippy, rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-${{ runner.os }}-x264-libyuv-opus-v1
+      - name: Native libraries (vcpkg) and esbuild
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force vcpkg-cache | Out-Null
+          vcpkg install x264 libyuv opus --triplet $env:VCPKGRS_TRIPLET
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          npm install -g esbuild
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --release --locked
+      # The runner has a desktop session: stream it, type into Notepad through voxl
+      # and check what comes back.
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          pip install websockets
+          Start-Process notepad -WindowStyle Maximized
+          Start-Sleep 2
+          $voxl = Start-Process target\release\voxl.exe -ArgumentList '--port=6901' -PassThru -RedirectStandardError voxl.log
+          Start-Sleep 5
+          $env:SMOKE_SHOT = 'smoke.png'
+          python bench/smoke.py 127.0.0.1:6901 windows
+          $ok = $LASTEXITCODE -eq 0
+          $clip = Get-Clipboard
+          Write-Output "clipboard: $clip"
+          if ($clip -ne 'voxl-clipboard-check') { Write-Output 'FAIL clipboard from the viewer'; $ok = $false }
+          Stop-Process $voxl
+          Get-Content voxl.log
+          if (-not $ok) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-smoke
+          path: |
+            smoke.png
+            voxl.log

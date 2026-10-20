@@ -1,28 +1,17 @@
 fn main() {
-    let x264 = pkg_config::probe_library("x264").expect("x264");
-    // macOS captures NV12 (no libyuv) and gets audio from ScreenCaptureKit (no PulseAudio).
-    let libs: &[&str] = if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        &["opus"]
+    let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let include_paths = if target == "windows" {
+        windows_libs()
     } else {
-        &["libyuv", "opus", "libpulse-simple"]
+        unix_libs(&target)
     };
-    let others: Vec<_> = libs
-        .iter()
-        .map(|l| pkg_config::probe_library(l).expect(l))
-        .collect();
-    // Embed library dirs so the binary runs outside the build shell.
-    for lib in std::iter::once(&x264).chain(others.iter()) {
-        for p in &lib.link_paths {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", p.display());
-        }
-    }
     let mut b = bindgen::Builder::default()
         .header_contents("wrap.h", "#include <stdint.h>\n#include <x264.h>\n")
         .allowlist_function("x264_.*")
         .allowlist_type("x264_.*")
         .allowlist_var("X264_.*")
         .layout_tests(false);
-    for p in &x264.include_paths {
+    for p in &include_paths {
         b = b.clang_arg(format!("-I{}", p.display()));
     }
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -41,6 +30,44 @@ fn main() {
     std::fs::write(out.join("x264.rs"), code).unwrap();
     bundle_web(&out);
     println!("cargo:rerun-if-changed=build.rs");
+}
+
+/// x264, libyuv, Opus and PulseAudio from pkg-config; returns x264's include paths.
+fn unix_libs(target: &str) -> Vec<std::path::PathBuf> {
+    let x264 = pkg_config::probe_library("x264").expect("x264");
+    // macOS captures NV12 (no libyuv) and gets audio from ScreenCaptureKit (no PulseAudio).
+    let libs: &[&str] = if target == "macos" {
+        &["opus"]
+    } else {
+        &["libyuv", "opus", "libpulse-simple"]
+    };
+    let others: Vec<_> = libs
+        .iter()
+        .map(|l| pkg_config::probe_library(l).expect(l))
+        .collect();
+    // Embed library dirs so the binary runs outside the build shell.
+    for lib in std::iter::once(&x264).chain(others.iter()) {
+        for p in &lib.link_paths {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", p.display());
+        }
+    }
+    x264.include_paths
+}
+
+/// x264, libyuv and Opus from vcpkg (`vcpkg install x264 libyuv opus`, triplet from
+/// VCPKGRS_TRIPLET, e.g. x64-windows-static-md for a self-contained voxl.exe); returns
+/// x264's include paths. Capture, audio and input use system DLLs.
+fn windows_libs() -> Vec<std::path::PathBuf> {
+    let x264 = vcpkg::Config::new()
+        .find_package("x264")
+        .expect("x264 from vcpkg");
+    for lib in ["libyuv", "opus"] {
+        vcpkg::Config::new()
+            .find_package(lib)
+            .unwrap_or_else(|e| panic!("{lib} from vcpkg: {e}"));
+    }
+    println!("cargo:rerun-if-env-changed=VCPKGRS_TRIPLET");
+    x264.include_paths
 }
 
 /// Bundles the TypeScript web client (web/src) into OUT_DIR/web, which the server

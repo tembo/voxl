@@ -1,7 +1,7 @@
 //! Conversion of captured frames to I420, split across threads by row bands: BGRX via
-//! libyuv on Linux, NV12 (already YUV, from ScreenCaptureKit) on macOS.
+//! libyuv on Linux and Windows, NV12 (already YUV, from ScreenCaptureKit) on macOS.
 
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 extern "C" {
     fn ARGBToI420(
         src_argb: *const u8,
@@ -102,7 +102,7 @@ fn split_rows(y0: usize, y1: usize, threads: usize, run: impl Fn(usize, usize) +
 }
 
 /// Convert rows [y0, y1) (even-aligned) of `src` into `dst`.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 pub fn convert_band(
     src: &[u8],
     src_stride: usize,
