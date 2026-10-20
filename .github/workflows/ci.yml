@@ -117,6 +117,8 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --release --locked
+      - name: Build
+        run: cargo build --release --locked
       # The runner has a desktop session: stream it, type into Notepad through voxl
       # and check what comes back.
       - name: Smoke test
