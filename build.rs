@@ -73,7 +73,13 @@ fn windows_libs() -> Vec<std::path::PathBuf> {
 /// Bundles the TypeScript web client (web/src) into OUT_DIR/web, which the server
 /// embeds. Needs esbuild on PATH (or ESBUILD); shell.nix and default.nix provide it.
 fn bundle_web(out: &std::path::Path) {
-    let esbuild = std::env::var("ESBUILD").unwrap_or_else(|_| "esbuild".into());
+    // npm installs esbuild on Windows as a .cmd shim.
+    let default = if cfg!(windows) {
+        "esbuild.cmd"
+    } else {
+        "esbuild"
+    };
+    let esbuild = std::env::var("ESBUILD").unwrap_or_else(|_| default.into());
     let status = std::process::Command::new(&esbuild)
         .args([
             "client=web/src/client/main.ts",
