@@ -90,6 +90,9 @@ async fn main() {
         paintover_delay_ms: range_max(a.get("paintover-delay-ms"), 150.0) as u64,
         min_kbps: range_max(a.get("min-kbps"), 2000.0) as u32,
         stripes: range_max(a.get("stripes"), 1.0) as u32,
+        // Opt-in: one thread unless a frame would miss the frame budget. x264's sliced
+        // threads cost ~3x the CPU on desktop content, so this saves 20-55% CPU, but
+        // small updates encode a few ms slower on one thread.
         adaptive_threads: truthy(a.get("adaptive-threads"), false),
         coalesce: std::time::Duration::from_micros(range_max(a.get("coalesce-us"), 0.0) as u64),
     };
