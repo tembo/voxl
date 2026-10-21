@@ -52,6 +52,10 @@ jobs:
         run: nix-shell --arg withRust true --run 'cargo fmt --check'
       - name: Clippy
         run: nix-shell --arg withRust true --run 'cargo clippy --all-targets --locked -- -D warnings'
+      # Builds the crate from exactly the files `cargo publish` uploads, so a file
+      # missing from `include` in Cargo.toml fails here rather than at release.
+      - name: Package
+        run: nix-shell --arg withRust true --run 'cargo package --locked'
 
   macos:
     name: macOS (rustfmt, clippy)

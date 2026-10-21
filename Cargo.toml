@@ -1,8 +1,28 @@
 [package]
-name = "voxl"
+# `voxl` on crates.io belongs to an unrelated crate; the binary is still `voxl`.
+name = "voxl-server"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+description = "Low-latency desktop streaming for the browser: an X11 display or a Mac's screen as H.264 over a WebSocket"
+repository = "https://github.com/tembo/voxl"
+readme = "README.md"
+keywords = ["remote-desktop", "streaming", "x11", "h264", "websocket"]
+categories = ["command-line-utilities", "multimedia::video"]
+# What `cargo publish` uploads: the sources build.rs and the server need, nothing from bench/.
+include = [
+	"/Cargo.toml",
+	"/Cargo.lock",
+	"/build.rs",
+	"/src",
+	"/web",
+	"/README.md",
+	"/LICENSE",
+]
+
+[[bin]]
+name = "voxl"
+path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = [

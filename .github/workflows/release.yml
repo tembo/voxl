@@ -1,0 +1,33 @@
+name: Release
+
+# Publishes to crates.io when a version tag (v0.2.0, ...) is pushed. Bump `version` in
+# Cargo.toml on main first; the tag has to match it.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml"
+            exit 1
+          fi
+      # Same toolchain and native libraries as CI: `cargo publish` builds the packaged
+      # crate before uploading it.
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-25.05
+      - name: Publish
+        run: nix-shell --arg withRust true --run 'cargo publish --locked'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
