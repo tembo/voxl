@@ -141,6 +141,30 @@ impl Encoder {
         }
     }
 
+    /// Start a new stream (its first frame is an IDR) with this rate control and a full
+    /// VBV buffer. Reconfiguring a running encoder raises the cap but not the buffer's
+    /// fill, which only grows by a frame's worth per encoded frame, so a keyframe would
+    /// still be squeezed into the old one- or two-frame budget.
+    pub fn restart(&mut self, crf: f32, max_kbps: u32, buf_kbit: u32) -> Result<(), String> {
+        let mut param = self.param;
+        param.rc.f_rf_constant = crf;
+        if max_kbps > 0 {
+            param.rc.i_vbv_max_bitrate = max_kbps as i32;
+            param.rc.i_vbv_buffer_size = buf_kbit.max(1) as i32;
+            param.rc.f_vbv_buffer_init = 1.0;
+        }
+        unsafe {
+            let h = ffi::x264_encoder_open(&mut param);
+            if h.is_null() {
+                return Err("x264_encoder_open failed".into());
+            }
+            ffi::x264_encoder_close(self.h);
+            self.h = h;
+        }
+        self.param = param;
+        Ok(())
+    }
+
     /// Encode one picture. `force_idr` requests a keyframe, `qp` (if set) forces the frame QP.
     /// Appends Annex-B output to `out` and returns whether it is a keyframe.
     /// `mb_info` (one byte per macroblock, X264_MBINFO_CONSTANT for unchanged ones) lets

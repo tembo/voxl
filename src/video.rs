@@ -663,8 +663,11 @@ fn capture_loop(
             for c in &clients {
                 c.needs_keyframe.store(false, Ordering::Relaxed);
             }
-            // A keyframe is squeezed into the rate cap; sharpen all of it once still.
+            // A keyframe carries motion quality; sharpen all of it once still, even when
+            // nothing on screen moved (a viewer joining or recovering from a lost frame).
             refiner.mark_all();
+            last_motion = Instant::now();
+            paintover_left = cfg.paintover_burst;
         }
         let frame_paintover = paintover && refine.is_none();
         if frame_paintover && paintover_left == 0 {
@@ -871,10 +874,14 @@ fn stripe_worker(
         let buf = unsafe { &*job.buf.0 };
         if job.force_idr {
             // A keyframe is what a new viewer sees first; don't starve it to the
-            // steady-state frame budget (up to ~8 frames' worth at 4x the cap).
+            // steady-state frame budget (up to ~8 frames' worth at 4x the cap). Only a
+            // fresh encoder starts with that budget available.
             let boost = job.cap.saturating_mul(4).max(16_000);
-            s.enc
-                .set_rate_buf(job.crf, boost, boost / s.cfg.fps.max(1) * 8);
+            let t = Instant::now();
+            match s.enc.restart(job.crf, boost, boost / s.cfg.fps.max(1) * 8) {
+                Ok(()) => log::debug!("stripe {i}: encoder restarted in {:?}", t.elapsed()),
+                Err(e) => log::error!("encoder restart failed: {e}"),
+            }
             s.applied_kbps = 0;
         } else {
             let moved = s.applied_kbps == 0
