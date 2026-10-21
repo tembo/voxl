@@ -480,6 +480,17 @@ impl Capturer {
         );
     }
 
+    /// The current frame as packed BGRX (`width * 4` bytes per row), for screenshots.
+    pub fn snapshot(&self) -> Vec<u8> {
+        let (row, h) = (self.width as usize * 4, self.height as usize);
+        let stride = self.geometry.width as usize * 4;
+        let mut out = Vec::with_capacity(row * h);
+        for line in self.frame.chunks_exact(stride).take(h) {
+            out.extend_from_slice(&line[..row]);
+        }
+        out
+    }
+
     /// The current frame as BGRX (BGRA, alpha unused) and its stride.
     pub fn bgrx(&self) -> Option<(&[u8], usize)> {
         Some((&self.frame, self.geometry.width as usize * 4))
