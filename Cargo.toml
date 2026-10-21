@@ -16,16 +16,6 @@ tokio = { version = "1", features = [
 	"io-util",
 ] }
 axum = { version = "0.8", features = ["ws"] }
-x11rb = { version = "0.13", features = [
-	"shm",
-	"damage",
-	"xfixes",
-	"xtest",
-	"shape",
-	"xinput",
-	"randr",
-	"allow-unsafe-code",
-] }
 libc = "0.2"
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
@@ -41,6 +31,28 @@ png = "0.18"
 zip = { version = "7", default-features = false, features = [
 	"deflate-flate2-zlib-rs",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = [
+	"shm",
+	"damage",
+	"xfixes",
+	"xtest",
+	"shape",
+	"xinput",
+	"randr",
+	"allow-unsafe-code",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-screen-capture-kit = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-media = "0.3"
+block2 = "0.6"
+dispatch2 = "0.3"
 
 [build-dependencies]
 bindgen = "0.71"

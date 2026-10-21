@@ -123,6 +123,7 @@ pub async fn screenshot(State(r): State<Arc<Recorder>>) -> Response {
 }
 
 /// Joins as a viewer and collects frames until `stop`, `max` or a geometry change.
+#[allow(clippy::result_large_err)]
 fn begin(
     r: &Arc<Recorder>,
     stop: oneshot::Receiver<()>,

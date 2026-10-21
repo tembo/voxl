@@ -1,7 +1,7 @@
 //! Video pipeline: damage-driven capture -> I420 -> x264 -> clients, with ack-based flow control.
 
 use crate::capture::{Band, Capturer};
-use crate::convert::{convert_band, I420};
+use crate::convert::I420;
 use crate::encoder::{Encoder, EncoderConfig, Planes};
 use crate::hub::{Hub, Inflight, Out};
 use bytes::Bytes;
@@ -482,7 +482,7 @@ fn capture_loop(
     let debug_marker = std::env::var("VOXL_DEBUG_MARKER").is_ok();
 
     loop {
-        if hub.resize_req.lock().is_some() {
+        if hub.resize_req.lock().is_some() || cap.needs_rebuild() {
             return Ok(());
         }
         cap.pump()?;
@@ -493,15 +493,10 @@ fn capture_loop(
             // stays pending, so the stream still sends what changed. Only the pixels
             // are copied here (the framebuffer is live); the PNG is made off this thread.
             cap.grab(cap.full())?;
-            let row = w * 4;
-            let mut bgrx = Vec::with_capacity(row * h);
-            for line in cap.pixels().chunks_exact(cap.stride).take(h) {
-                bgrx.extend_from_slice(&line[..row]);
-            }
             let shot = Arc::new(crate::record::Snapshot {
                 width: w,
                 height: h,
-                bgrx,
+                bgrx: cap.snapshot(),
             });
             for tx in snaps {
                 let _ = tx.send(shot.clone());
@@ -607,10 +602,9 @@ fn capture_loop(
                 (t1 - t0).as_micros()
             );
         }
-        let marker_ms = if debug_marker {
-            marker_probe(cap.pixels(), cap.stride, "grab")
-        } else {
-            -1
+        let marker_ms = match cap.bgrx() {
+            Some((px, stride)) if debug_marker => marker_probe(px, stride, "grab"),
+            _ => -1,
         };
         let is_motion = band.is_some();
         if !is_motion && !want_key && !paintover_due {
@@ -640,14 +634,7 @@ fn capture_loop(
         }
         pending[idx] = None;
         if let Some(t) = todo {
-            convert_band(
-                cap.pixels(),
-                cap.stride,
-                &mut buf,
-                t.y0 as usize,
-                t.y1 as usize,
-                cfg.convert_threads,
-            );
+            cap.convert(&mut buf, t.y0 as usize, t.y1 as usize, cfg.convert_threads);
         }
         let t2 = Instant::now();
         hub.stats

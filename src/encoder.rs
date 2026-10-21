@@ -101,7 +101,7 @@ impl Encoder {
             let profile = c"high";
             ffi::x264_param_apply_profile(&mut param, profile.as_ptr());
 
-            let h = ffi::x264_encoder_open_164(&mut param);
+            let h = ffi::x264_encoder_open(&mut param);
             if h.is_null() {
                 return Err("x264_encoder_open failed".into());
             }

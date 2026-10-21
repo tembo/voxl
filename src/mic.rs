@@ -1,5 +1,6 @@
 //! Microphone: Opus packets (or raw PCM) from a browser -> a FIFO that PulseAudio reads
-//! as the VM's microphone (module-pipe-source). One client holds the microphone at a
+//! as the VM's microphone (module-pipe-source), or on macOS an audio output device
+//! that loops back to an input (see `mac::mic`). One client holds the microphone at a
 //! time; a client that turns its microphone on takes it over.
 //!
 //! A writer thread feeds the FIFO a 20 ms frame on its own clock: the user's audio
@@ -11,17 +12,12 @@
 
 use crate::hub::{Hub, Out};
 use bytes::Bytes;
-use nix::errno::Errno;
-use nix::fcntl::{fcntl, open, FcntlArg, OFlag};
-use nix::sys::stat::Mode;
-use nix::unistd::write;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::ffi::{c_int, c_void, CStr, CString};
-use std::os::fd::OwnedFd;
+use std::ffi::{c_int, c_void};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub enum MicMsg {
     Start(u64),
@@ -43,15 +39,16 @@ extern "C" {
     ) -> c_int;
 }
 
-const RATE: i32 = 48000;
-const FRAME: usize = 960;
+pub const RATE: i32 = 48000;
+/// 20 ms, the pace at which the sink takes audio.
+pub const FRAME: usize = 960;
 /// Start playing once 40 ms is buffered, absorbing network jitter.
 const PREFILL: usize = 2 * FRAME;
 /// At most 120 ms of audio waits to be played.
 const MAX_QUEUED: usize = 6 * FRAME;
 
 #[derive(Default)]
-struct Queue {
+pub struct Queue {
     samples: VecDeque<i16>,
     playing: bool,
     dropped: usize,
@@ -59,10 +56,32 @@ struct Queue {
     underruns: usize,
 }
 
+/// The next 20 ms to play: queued audio once the jitter buffer has filled, else silence.
+pub fn next_frame(queue: &Mutex<Queue>, frame: &mut [i16]) {
+    let mut q = queue.lock();
+    if !q.playing && q.samples.len() >= PREFILL {
+        q.playing = true;
+    }
+    frame.fill(0);
+    if q.playing {
+        let n = q.samples.len().min(frame.len());
+        for (d, s) in frame.iter_mut().zip(q.samples.drain(..n)) {
+            *d = s;
+        }
+        if n < frame.len() {
+            q.playing = false; // ran dry: refill the jitter buffer first
+            q.underruns += 1;
+        }
+    }
+}
+
 /// Opens the FIFO without blocking (fails until PulseAudio has it open for reading)
 /// and shrinks its buffer, so audio that piles up while nobody records is at most
 /// ~40 ms stale when someone starts.
-fn open_fifo(path: &CStr) -> Option<OwnedFd> {
+#[cfg(target_os = "linux")]
+fn open_fifo(path: &std::ffi::CStr) -> Option<std::os::fd::OwnedFd> {
+    use nix::fcntl::{fcntl, open, FcntlArg, OFlag};
+    use nix::sys::stat::Mode;
     let fd = open(
         path,
         OFlag::O_WRONLY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
@@ -73,8 +92,12 @@ fn open_fifo(path: &CStr) -> Option<OwnedFd> {
     Some(fd)
 }
 
-fn writer(path: CString, queue: Arc<Mutex<Queue>>) {
-    let mut fd: Option<OwnedFd> = None;
+#[cfg(target_os = "linux")]
+fn writer(path: std::ffi::CString, queue: Arc<Mutex<Queue>>) {
+    use nix::errno::Errno;
+    use nix::unistd::write;
+    use std::time::Duration;
+    let mut fd: Option<std::os::fd::OwnedFd> = None;
     let mut warned = false;
     let mut frame = vec![0i16; FRAME];
     let mut next = Instant::now();
@@ -86,23 +109,7 @@ fn writer(path: CString, queue: Arc<Mutex<Queue>>) {
         } else if now - next > Duration::from_millis(200) {
             next = now; // fell behind (suspended?): don't try to catch up
         }
-        {
-            let mut q = queue.lock();
-            if !q.playing && q.samples.len() >= PREFILL {
-                q.playing = true;
-            }
-            frame.fill(0);
-            if q.playing {
-                let n = q.samples.len().min(FRAME);
-                for (d, s) in frame.iter_mut().zip(q.samples.drain(..n)) {
-                    *d = s;
-                }
-                if n < FRAME {
-                    q.playing = false; // ran dry: refill the jitter buffer first
-                    q.underruns += 1;
-                }
-            }
-        }
+        next_frame(&queue, &mut frame);
         if fd.is_none() {
             fd = open_fifo(&path);
             match fd {
@@ -130,15 +137,19 @@ fn writer(path: CString, queue: Arc<Mutex<Queue>>) {
     }
 }
 
-pub fn spawn(fifo: String, hub: Arc<Hub>) -> mpsc::Sender<MicMsg> {
+/// `sink` is the FIFO's path on Linux and the output device's name on macOS.
+pub fn spawn(sink: String, hub: Arc<Hub>) -> mpsc::Sender<MicMsg> {
     let (tx, rx) = mpsc::channel::<MicMsg>();
     let queue = Arc::new(Mutex::new(Queue::default()));
     {
         let queue = queue.clone();
-        let path = CString::new(fifo).unwrap();
+        #[cfg(target_os = "linux")]
+        let run = move || writer(std::ffi::CString::new(sink).unwrap(), queue);
+        #[cfg(target_os = "macos")]
+        let run = move || crate::mac::mic::play(&sink, queue);
         std::thread::Builder::new()
             .name("mic-out".into())
-            .spawn(move || writer(path, queue))
+            .spawn(run)
             .unwrap();
     }
     std::thread::Builder::new()
