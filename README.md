@@ -60,6 +60,13 @@ nix-shell
 cargo build --release
 ```
 
+Or install it from [crates.io](https://crates.io/crates/voxl-server) with the same
+libraries on your system (the crate is `voxl-server`, the binary is `voxl`):
+
+```sh
+cargo install voxl-server
+```
+
 Run it against an X display, then open `http://host:6901/` (`?stats` adds an FPS
 overlay):
 
