@@ -76,3 +76,19 @@ For smooth scrolling, start that display with the patched server:
   desktop follows the window, clamping, decoded size, pointer mapping, zero-copy capture.
 - `mictest.mjs`: microphone end to end with a fake 440 Hz microphone, a private PulseAudio
   pipe source and its own voxl (`PULSEAUDIO`: the pulseaudio package).
+
+## macOS
+
+`macos/` tests voxl on a Mac against a running instance (`PORT`, default 6960), as
+raw WebSocket clients plus Playwright (`playwright-core` and Google Chrome) where a
+page is the target. They act on the real desktop (pointer, keyboard, clipboard), so
+run them when nobody is using the Mac.
+
+- `features.js`: hello, keyframe, cursor image, clipboard text both ways, system audio,
+  typing and mouse in a scratch TextEdit document and, with `--enable-resize`, a
+  display mode switch and back.
+- `input.js`: clicks, typing (symbols, accents, CJK, emoji), Command shortcuts, drag
+  selection, pixel and wheel scrolling, cursor shape, on a page in a temporary Chrome.
+- `clipimage.js`: clipboard images both ways.
+- `mic.js`: a 440 Hz tone through the microphone path (see voxl's log for drops).
+- `perf.js`: full-screen animation; viewer FPS, pipeline and encode times.

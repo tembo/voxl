@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -49,3 +52,27 @@ jobs:
         run: nix-shell --arg withRust true --run 'cargo fmt --check'
       - name: Clippy
         run: nix-shell --arg withRust true --run 'cargo clippy --all-targets --locked -- -D warnings'
+
+  macos:
+    name: macOS (rustfmt, clippy)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.93.0'
+          components: clippy, rustfmt
+      # x264 and Opus for linking, esbuild for build.rs (libyuv and PulseAudio are Linux-only).
+      - run: brew install x264 opus pkgconf esbuild
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings

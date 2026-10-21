@@ -35,6 +35,8 @@ export interface Hello {
 	t: 'hello';
 	w: number;
 	h: number;
+	/** The server's platform: 'linux' (X11) or 'macos'. */
+	os?: string;
 	audio: boolean;
 	mic?: boolean;
 	stripes?: Stripe[];

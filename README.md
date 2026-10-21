@@ -1,7 +1,7 @@
 # voxl
 
 Low-latency desktop streaming for the browser, written in Rust. voxl streams an X11
-display as H.264 over a WebSocket to a small web client that decodes with WebCodecs,
+display or a Mac's screen as H.264 over a WebSocket to a small web client that decodes with WebCodecs,
 with input, clipboard, audio, microphone, file and folder transfer and dynamic resolution.
 
 ## Benchmarks
@@ -109,3 +109,31 @@ curl -o clip.mp4 -X POST "localhost:6901/record/stop?id=$id" # ...and stop when 
 A recording is the H.264 voxl already sends to viewers, saved as MP4 without encoding
 it again, so it costs no extra CPU. It doesn't include the cursor (viewers draw it), and
 a resize ends it.
+
+### macOS
+
+voxl also streams a Mac's own screen, with every feature of the Linux version
+(ScreenCaptureKit capture, CGEvent input, NSPasteboard clipboard, system audio).
+
+```sh
+brew install x264 opus pkgconf esbuild
+cargo build --release
+./target/release/voxl --port=6901
+```
+
+Open `http://localhost:6901/`. On a Mac voxl listens on `127.0.0.1` unless `--addr`
+says otherwise, since the stream is your whole screen and there is no login. macOS asks
+voxl (or the terminal that starts it) for Screen Recording and Accessibility
+permissions. For the microphone, install a loopback device (`brew install
+blackhole-2ch`) and pick it as the input in the apps that should hear you.
+
+| macOS flag             | Default                     |                                                                                        |
+| ---------------------- | --------------------------- | -------------------------------------------------------------------------------------- |
+| `--display`            | main display                | display to stream: an index (0 is the main display) or a display ID; logged at startup |
+| `--capture-scale`      | native, within the budget   | streamed pixels per point                                                              |
+| `--max-capture-pixels` | `4096000` (2560x1600)       | pixel budget for the automatic scale: x264's cost grows with area                      |
+| `--microphone-device`  | first loopback device found | output device (name or prefix) to play the browser microphone into                     |
+| `--resize-scale`       | the capture scale           | so a viewer's window maps to the same number of points on the Mac                      |
+
+The other flags work as on Linux; `--audio-device-name`, `--microphone-fifo` and the
+rounded-corner flags don't apply.
