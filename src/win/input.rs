@@ -1,8 +1,9 @@
 //! Input injection with SendInput. Keys arrive as X keysyms: characters are looked up
 //! in the current keyboard layout (so the right key, with Shift as the character
-//! needs, is pressed whatever the layout), named keys come from a table, and
-//! characters the layout can't type are sent as Unicode. Every key carries its scan
-//! code too, for apps that read those. Scrolling is high resolution.
+//! needs given the remote's Caps Lock, is pressed whatever the layout), named keys
+//! come from a table, and characters the layout can't type are sent as Unicode. Every
+//! key carries its scan code too, for apps that read those. Scrolling is high
+//! resolution.
 
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -195,6 +196,27 @@ fn layout() -> HKL {
     }
 }
 
+fn caps_lock_on() -> bool {
+    // The low bit is the toggle.
+    let state = unsafe { GetKeyState(VK_CAPITAL.0 as i32) };
+    state & 1 != 0
+}
+
+/// What `vk` types on `hkl` with Caps Lock on and Shift as given, leaving any pending
+/// dead key alone.
+fn typed_with_caps(vk: VIRTUAL_KEY, shift: bool, hkl: HKL) -> Option<u16> {
+    let mut state = [0u8; 256];
+    state[VK_CAPITAL.0 as usize] = 1;
+    if shift {
+        state[VK_SHIFT.0 as usize] = 0x80;
+    }
+    let scan = unsafe { MapVirtualKeyExW(vk.0 as u32, MAPVK_VK_TO_VSC, Some(hkl)) };
+    let mut buf = [0u16; 4];
+    // Flag 4: don't change the keyboard state (Windows 10 1607 and later).
+    let n = unsafe { ToUnicodeEx(vk.0 as u32, scan, &state, &mut buf, 4, Some(hkl)) };
+    (n == 1).then_some(buf[0])
+}
+
 struct Injector {
     /// keysym -> (virtual key, extended, Shift pressed or lifted around it).
     pressed: HashMap<u32, (VIRTUAL_KEY, bool, ShiftFix)>,
@@ -385,8 +407,9 @@ impl Injector {
         let units = c.encode_utf16(&mut utf16);
         // Where the character is on the layout: low byte the key, high byte the
         // modifiers it needs (1 Shift, 2 Ctrl, 4 Alt).
+        let hkl = layout();
         let scan = if units.len() == 1 {
-            unsafe { VkKeyScanExW(units[0], layout()) }
+            unsafe { VkKeyScanExW(units[0], hkl) }
         } else {
             -1
         };
@@ -395,11 +418,22 @@ impl Injector {
             ((scan as u16) >> 8) & 0xff,
         );
         let shortcut = self.shortcut_held();
-        if scan != -1 && (need & !1 == 0 || shortcut) {
+        let shift = if scan == -1 || (need & !1 != 0 && !shortcut) {
+            None
+        } else if shortcut || !caps_lock_on() {
+            Some(need & 1 != 0)
+        } else {
+            // Caps Lock on the remote flips Shift on the keys it affects, but the
+            // viewer sent the character already cased: pick the Shift that types it.
+            [need & 1 != 0, need & 1 == 0]
+                .into_iter()
+                .find(|&s| typed_with_caps(vk, s, hkl) == Some(units[0]))
+        };
+        if let Some(shift) = shift {
             let held = !self.shift_held().is_empty();
             // The character decides Shift (the viewer's layout already applied it);
             // Ctrl, Alt and the Windows key stay as held, for shortcuts.
-            let fix = match (need & 1 != 0, held) {
+            let fix = match (shift, held) {
                 (true, false) if !shortcut => ShiftFix::Add,
                 (false, true) if !shortcut => ShiftFix::Lift,
                 _ => ShiftFix::None,
@@ -408,7 +442,8 @@ impl Injector {
             self.press(vk, false, fix);
             return;
         }
-        // Not on the layout (or only with AltGr/Ctrl+Alt): type it as Unicode.
+        // Not on the layout (only with AltGr/Ctrl+Alt, or not as cased with Caps Lock
+        // on): type it as Unicode.
         let mut v = Vec::new();
         for &u in units.iter() {
             v.push(key_input(VIRTUAL_KEY(0), u, KEYEVENTF_UNICODE));

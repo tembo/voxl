@@ -250,7 +250,9 @@ fn capture_thread(mut d: Dup, shared: Arc<Mutex<Shared>>, wake: Arc<Wake>, stop:
                 // Access lost (or a broken device): open it again, at the same size or
                 // have the pipeline rebuilt.
                 log::info!("desktop duplication interrupted ({e}); reopening");
+                // DXGI won't duplicate an output twice: release the old one first.
                 drop(image);
+                drop(d);
                 loop {
                     if stop.load(Ordering::Relaxed) {
                         return;
