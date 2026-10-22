@@ -12,6 +12,7 @@ mod corners;
 mod desktop;
 mod encoder;
 mod files;
+mod h264;
 mod hub;
 #[cfg(target_os = "linux")]
 mod input;
@@ -127,10 +128,11 @@ async fn run() {
             .get("convert-threads")
             .and_then(|v| v.parse().ok())
             .unwrap_or(4),
-        crf: range_max(a.get("crf"), 24.0) as f32,
+        // Frame QP before the bitrate cap; --crf (the old rate control's knob) still works.
+        qp: range_max(a.get("qp").or(a.get("crf")), 20.0) as f32,
         // Selkies' --video-bitrate becomes the ceiling for adaptive bitrate.
         max_kbps: range_max(a.get("max-kbps").or(a.get("video-bitrate")), 30000.0) as u32,
-        paintover_crf: range_max(a.get("paintover-crf"), 16.0) as f32,
+        paintover_qp: range_max(a.get("paintover-qp").or(a.get("paintover-crf")), 16.0) as f32,
         paintover_burst: range_max(a.get("paintover-burst"), 3.0) as u32,
         paintover_delay_ms: range_max(a.get("paintover-delay-ms"), 150.0) as u64,
         min_kbps: range_max(a.get("min-kbps"), 2000.0) as u32,

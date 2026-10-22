@@ -20,16 +20,19 @@ pub struct EncoderConfig {
     pub fps: u32,
     pub preset: String,
     pub threads: u32,
-    pub crf: f32,
-    /// VBV cap in kbit/s (0 = uncapped).
-    pub max_kbps: u32,
 }
+
+/// Lowest QP a frame can ask for (the highest is H.264's 51).
+pub const MIN_QP: i32 = 11;
 
 pub struct Encoder {
     h: *mut ffi::x264_t,
-    param: ffi::x264_param_t,
     pic: ffi::x264_picture_t,
     pts: i64,
+    /// VOXL_PSNR: (frames, sum of luma PSNR) since the last report.
+    psnr: Option<(u32, f64)>,
+    /// SPS and PPS fields from the last keyframe, to read slice headers.
+    params: crate::h264::Params,
     pub width: u32,
     pub height: u32,
 }
@@ -72,27 +75,40 @@ impl Encoder {
             param.i_bframe = 0;
             param.b_annexb = 1;
             param.b_repeat_headers = 1;
+            // One older frame kept to fall back on when the newest is invalidated
+            // (`invalidate_last`); it isn't searched, so it costs no encoding time.
+            param.i_dpb_size = 2;
             param.b_aud = 0;
+            let psnr = std::env::var("VOXL_PSNR").is_ok();
+            // Luma PSNR of what viewers decode (x264 only measures it at INFO or above).
+            param.analyse.b_psnr = psnr as i32;
             param.i_log_level = if std::env::var("VOXL_X264_INFO").as_deref() == Ok("debug") {
                 // Per-frame QP, macroblock types and size.
                 ffi::X264_LOG_DEBUG
-            } else if std::env::var("VOXL_X264_INFO").is_ok() {
+            } else if std::env::var("VOXL_X264_INFO").is_ok() || psnr {
                 ffi::X264_LOG_INFO
             } else {
                 ffi::X264_LOG_WARNING
             } as i32;
-            param.rc.i_rc_method = ffi::X264_RC_CRF as i32;
-            param.rc.f_rf_constant = cfg.crf;
+            // Constant QP, chosen per frame by the caller. CRF and VBV need x264's lowres
+            // lookahead, a full-frame motion search that costs as much as encoding the
+            // frame and doesn't parallelize across sliced threads.
+            param.rc.i_rc_method = ffi::X264_RC_CQP as i32;
+            // x264 clamps forced QPs to the span of its I, P and B frame QPs, and those
+            // ratios to 10 (about 20 QP either way): MIN_QP..51 around 31.
+            param.rc.i_qp_constant = 31;
+            param.rc.f_ip_factor = 10.0;
+            param.rc.f_pb_factor = 10.0;
             param.rc.i_lookahead = 0;
+            // Without the lowres pass's motion vectors as candidates, ultrafast's diamond
+            // search loses scrolls. The uneven multi-hexagon search finds them on its own:
+            // on recorded Chromium scrolling it encodes a third smaller than CRF with the
+            // lowres pass, and no slower than diamond.
+            param.analyse.i_me_method = ffi::X264_ME_UMH as i32;
             // Per-macroblock "unchanged" hints from X damage let x264 skip analysis.
             param.analyse.b_mb_info = (std::env::var("VOXL_NO_MBINFO").is_err()) as i32;
             param.i_sync_lookahead = 0;
             param.rc.b_mb_tree = 0;
-            if cfg.max_kbps > 0 {
-                param.rc.i_vbv_max_bitrate = cfg.max_kbps as i32;
-                // ~2 frames of buffer keeps single-frame spikes bounded.
-                param.rc.i_vbv_buffer_size = (cfg.max_kbps / cfg.fps.max(1) * 5 / 4) as i32;
-            }
             // BT.601 limited range, matching libyuv ARGBToI420.
             param.vui.i_colorprim = 1;
             param.vui.i_transfer = 1;
@@ -111,37 +127,17 @@ impl Encoder {
             pic.img.i_plane = 3;
             Ok(Encoder {
                 h,
-                param,
                 pic,
                 pts: 0,
+                psnr: psnr.then_some((0, 0.0)),
+                params: Default::default(),
                 width: cfg.width,
                 height: cfg.height,
             })
         }
     }
 
-    /// Reconfigure rate control on the fly (buffer of ~1.25 frames at `max_kbps`).
-    pub fn set_rate(&mut self, crf: f32, max_kbps: u32) {
-        self.set_rate_buf(
-            crf,
-            max_kbps,
-            max_kbps / self.param.i_fps_num.max(1) * 5 / 4,
-        );
-    }
-
-    /// Reconfigure rate control with an explicit VBV buffer (kbit).
-    pub fn set_rate_buf(&mut self, crf: f32, max_kbps: u32, buf_kbit: u32) {
-        unsafe {
-            self.param.rc.f_rf_constant = crf;
-            if max_kbps > 0 {
-                self.param.rc.i_vbv_max_bitrate = max_kbps as i32;
-                self.param.rc.i_vbv_buffer_size = buf_kbit.max(1) as i32;
-            }
-            ffi::x264_encoder_reconfig(self.h, &mut self.param);
-        }
-    }
-
-    /// Encode one picture. `force_idr` requests a keyframe, `qp` (if set) forces the frame QP.
+    /// Encode one picture at `qp` (MIN_QP..=51). `force_idr` requests a keyframe.
     /// Appends Annex-B output to `out` and returns whether it is a keyframe.
     /// `mb_info` (one byte per macroblock, X264_MBINFO_CONSTANT for unchanged ones) lets
     /// x264 skip analysis of static areas; it is consumed before this returns.
@@ -150,7 +146,7 @@ impl Encoder {
         p: &Planes,
         ts_ms: i64,
         force_idr: bool,
-        qp: Option<i32>,
+        qp: i32,
         mb_info: Option<&mut [u8]>,
         out: &mut Vec<u8>,
     ) -> Result<bool, String> {
@@ -166,7 +162,7 @@ impl Encoder {
             } else {
                 ffi::X264_TYPE_AUTO as i32
             };
-            self.pic.i_qpplus1 = qp.map(|q| q + 1).unwrap_or(0);
+            self.pic.i_qpplus1 = qp + 1;
             self.pic.prop.mb_info = mb_info.map(|m| m.as_mut_ptr()).unwrap_or(ptr::null_mut());
             self.pic.prop.mb_info_free = None;
             // Strictly increasing pts even if the wall clock stalls.
@@ -183,7 +179,19 @@ impl Encoder {
             if size > 0 && !nals.is_null() {
                 // NAL payloads are contiguous in memory.
                 let first = &*nals;
+                let start = out.len();
                 out.extend_from_slice(std::slice::from_raw_parts(first.p_payload, size as usize));
+                if pic_out.b_keyframe != 0 {
+                    self.params.update(&out[start..]);
+                }
+            }
+            if let Some((n, sum)) = self.psnr.as_mut() {
+                *n += 1;
+                *sum += pic_out.prop.f_psnr[0];
+                if *n == 300 {
+                    log::info!("psnr Y {:.2} dB over {n} frames", *sum / *n as f64);
+                    (*n, *sum) = (0, 0.0);
+                }
             }
             if std::env::var("VOXL_DEBUG_MARKER").is_ok() {
                 log::info!(
@@ -199,9 +207,80 @@ impl Encoder {
     }
 }
 
+impl Encoder {
+    /// Make x264 forget the frame it just encoded: the next one refers to the frame
+    /// before. Send `skip_frame` of it instead, so the decoder's references match.
+    pub fn invalidate_last(&mut self) -> bool {
+        unsafe { ffi::x264_encoder_invalidate_reference(self.h, self.pts) == 0 }
+    }
+
+    /// A frame repeating the picture before `frame` (one of this encoder's P frames),
+    /// to send in its place after `invalidate_last` (see `h264::Params::skip_frame`).
+    pub fn skip_frame(&self, frame: &[u8]) -> Option<Vec<u8>> {
+        self.params.skip_frame(frame)
+    }
+}
+
 impl Drop for Encoder {
     fn drop(&mut self) {
         unsafe { ffi::x264_encoder_close(self.h) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overshoot_stand_in() {
+        let (w, h) = (640usize, 368usize);
+        let mut enc = Encoder::new(&EncoderConfig {
+            width: w as u32,
+            height: h as u32,
+            fps: 60,
+            preset: "ultrafast".into(),
+            threads: 4,
+        })
+        .unwrap();
+        let (u, v) = (vec![128u8; w * h / 4], vec![128u8; w * h / 4]);
+        let pic = |k: usize| -> Vec<u8> {
+            (0..w * h)
+                .map(|i| (((i % w) * (7 + k) + (i / w) * (3 + 2 * k)) % 251) as u8)
+                .collect()
+        };
+        let y0 = pic(0);
+        let p0 = Planes {
+            y: &y0,
+            u: &u,
+            v: &v,
+            stride_y: w,
+            stride_uv: w / 2,
+        };
+        let mut key = Vec::new();
+        assert!(enc.encode(&p0, 0, true, 22, None, &mut key).unwrap());
+        assert!(
+            enc.skip_frame(&key).is_none(),
+            "only P frames have stand-ins"
+        );
+        // A scene change: a different picture altogether.
+        let y1 = pic(5);
+        let p1 = Planes {
+            y: &y1,
+            u: &u,
+            v: &v,
+            stride_y: w,
+            stride_uv: w / 2,
+        };
+        let mut big = Vec::new();
+        assert!(!enc.encode(&p1, 16, false, 22, None, &mut big).unwrap());
+        let fill = enc.skip_frame(&big).expect("stand-in");
+        // Four slices (threads), each a header and one skip run.
+        assert_eq!(fill.windows(4).filter(|s| *s == [0, 0, 0, 1]).count(), 4);
+        assert!(fill.len() < 100, "{} bytes", fill.len());
+        assert!(enc.invalidate_last());
+        let mut again = Vec::new();
+        assert!(!enc.encode(&p1, 17, false, 45, None, &mut again).unwrap());
+        assert!(again.len() < big.len() / 2);
     }
 }
 
@@ -232,8 +311,6 @@ mod bench {
                 fps: 60,
                 preset: "ultrafast".into(),
                 threads,
-                crf: 24.0,
-                max_kbps: 30000,
             })
             .unwrap();
             let mut y = vec![0u8; w * h];
@@ -268,7 +345,7 @@ mod bench {
                     &planes,
                     f as i64 * 16,
                     f == 0,
-                    None,
+                    22,
                     if hint { Some(&mut info) } else { None },
                     &mut out,
                 )

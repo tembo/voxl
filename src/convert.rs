@@ -49,6 +49,21 @@ impl SendPtr {
     }
 }
 
+type Job = (
+    &'static (dyn Fn(usize, usize) + Sync),
+    usize,
+    usize,
+    std::sync::mpsc::Sender<()>,
+);
+
+/// Helper threads for `split_rows`, started on first use and kept: spawning threads
+/// for every frame costs about as much as converting a band, on cold cores.
+fn helpers() -> &'static parking_lot::Mutex<Vec<std::sync::mpsc::Sender<Job>>> {
+    static HELPERS: std::sync::OnceLock<parking_lot::Mutex<Vec<std::sync::mpsc::Sender<Job>>>> =
+        std::sync::OnceLock::new();
+    HELPERS.get_or_init(Default::default)
+}
+
 /// Runs `run(a, b)` over row chunks of [y0, y1) on up to `threads` threads; chunk
 /// edges stay even for 4:2:0.
 fn split_rows(y0: usize, y1: usize, threads: usize, run: impl Fn(usize, usize) + Sync) {
@@ -62,33 +77,57 @@ fn split_rows(y0: usize, y1: usize, threads: usize, run: impl Fn(usize, usize) +
         return;
     }
     let chunk = (rows.div_ceil(n) + 1) & !1;
-    std::thread::scope(|s| {
-        let mut a = y0;
+    let f: &(dyn Fn(usize, usize) + Sync) = &run;
+    // SAFETY: every job sent below has finished before this function returns.
+    let f: &'static (dyn Fn(usize, usize) + Sync) = unsafe { std::mem::transmute(f) };
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let mut sent = 0;
+    {
+        let mut helpers = helpers().lock();
+        let mut a = y0 + chunk;
         while a < y1 {
-            let b = (a + chunk).min(y1);
-            let run = &run;
-            if b == y1 {
-                run(a, b);
-            } else {
-                s.spawn(move || run(a, b));
+            if sent == helpers.len() {
+                let (tx, rx) = std::sync::mpsc::channel::<Job>();
+                std::thread::Builder::new()
+                    .name(format!("convert-{sent}"))
+                    .spawn(move || {
+                        while let Ok((f, a, b, done)) = rx.recv() {
+                            f(a, b);
+                            let _ = done.send(());
+                        }
+                    })
+                    .expect("convert thread");
+                helpers.push(tx);
             }
+            let b = (a + chunk).min(y1);
+            helpers[sent]
+                .send((f, a, b, done_tx.clone()))
+                .expect("convert thread gone");
+            sent += 1;
             a = b;
         }
-    });
+    }
+    run(y0, (y0 + chunk).min(y1));
+    for _ in 0..sent {
+        done_rx.recv().expect("convert thread gone");
+    }
 }
 
-/// Convert rows [y0, y1) (even-aligned) of `src` into `dst`.
+/// Convert rows [y0, y1) (even-aligned), columns [x0, x1) (x0 even) of `src` into `dst`.
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 pub fn convert_band(
     src: &[u8],
     src_stride: usize,
     dst: &mut I420,
     y0: usize,
     y1: usize,
+    x0: usize,
+    x1: usize,
     threads: usize,
 ) {
     let rows = y1 - y0;
-    if rows == 0 {
+    if rows == 0 || x1 <= x0 {
         return;
     }
     let w = dst.width;
@@ -101,15 +140,15 @@ pub fn convert_band(
     let src_p = SendPtr(src.as_ptr() as *mut u8);
     let run = |a: usize, b: usize| unsafe {
         ARGBToI420(
-            src_p.get().add(a * src_stride),
+            src_p.get().add(a * src_stride + x0 * 4),
             src_stride as i32,
-            yp.get().add(a * w),
+            yp.get().add(a * w + x0),
             w as i32,
-            up.get().add((a / 2) * suv),
+            up.get().add((a / 2) * suv + x0 / 2),
             suv as i32,
-            vp.get().add((a / 2) * suv),
+            vp.get().add((a / 2) * suv + x0 / 2),
             suv as i32,
-            w as i32,
+            (x1 - x0) as i32,
             (b - a) as i32,
         );
     };
