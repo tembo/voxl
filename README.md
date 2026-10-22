@@ -84,10 +84,10 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 | `--framerate`                                                  | `60`                               | max frames per second (`60-60` style ranges accepted)                             |
 | `--preset`                                                     | `ultrafast`                        | x264 preset                                                                       |
 | `--encoder-threads`                                            | `min(4, ncpu/4)`                   | x264 sliced threads                                                               |
-| `--crf`                                                        | `24`                               | base quality                                                                      |
+| `--qp` (or `--crf`)                                            | `20`                               | frame quality (lower is sharper), raised as far as the bitrate cap needs          |
 | `--max-kbps` / `--video-bitrate`                               | `30000`                            | adaptive bitrate ceiling                                                          |
 | `--min-kbps`                                                   | `2000`                             | adaptive bitrate floor                                                            |
-| `--paintover-crf`, `--paintover-burst`, `--paintover-delay-ms` | `16`, `3`, `150`                   | sharpening when the screen goes still                                             |
+| `--paintover-qp`, `--paintover-burst`, `--paintover-delay-ms`  | `16`, `3`, `150`                   | sharpening when the screen goes still (`--paintover-crf` also works)              |
 | `--enable-clipboard`                                           | `true`                             | `true`, `in`, `out` or `false`                                                    |
 | `--audio-enabled`, `--audio-device-name`, `--audio-bitrate`    | `true`, `output.monitor`, `128000` | desktop audio                                                                     |
 | `--enable-resize`, `--resize-scale`                            | `false`, `1.5`                     | desktop follows the viewer's window; desktop pixels per CSS pixel                 |

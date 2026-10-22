@@ -49,6 +49,15 @@ sleep 1; BENCH_DISPLAY=:5 env/openbox.sh &
   (Chromium scroll, 1080p and full-screen animation) x link (LAN, 10 Mbps/40 ms,
   5 Mbps/60 ms) via `shaper.py`, a userspace bottleneck proxy.
 - `ab.sh <workload> <reps>`: interleaved voxl vs selkies runs.
+- `perfab.py [--reps N] [--workloads ...] [--net lan,10/40,...] name=/path/to/voxl[:args] ...`:
+  interleaved A/B of voxl builds (or flags) on the benchmark display (workloads
+  `anim1080`, `animfull`, `scroll`, `animsmall`: a 512x288 update, `anim720`). Each run records
+  the native client's FPS and latency together with the server's CPU (voxl and Xvfb),
+  a per-thread breakdown of voxl and its `/stats` (encode and convert time, average QP).
+  JSON lines in `$OUT`.
+- `nclient.py` with `LATLOG=path` also writes every marker it reads as `time latency bytes`.
+- `VOXL_PSNR=1` in voxl's environment logs the luma PSNR of what viewers decode (x264's
+  own measurement against its input) every 300 frames: quality at a given bitrate.
 - `cpusuite.sh`: server CPU (X server + streamer) per workload with one client connected.
 - `scroll.html`: the long page `scrolltarget.mjs` smooth-scrolls, with a marker drawn every frame.
 - `cpu.sh <pid> <secs>`, `rate.sh <secs>` (voxl `/stats`), `srcfps.py` (true

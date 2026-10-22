@@ -21,9 +21,9 @@ pub struct VideoConfig {
     pub preset: String,
     pub threads: u32,
     pub convert_threads: usize,
-    pub crf: f32,
+    pub qp: f32,
     pub max_kbps: u32,
-    pub paintover_crf: f32,
+    pub paintover_qp: f32,
     pub paintover_burst: u32,
     pub paintover_delay_ms: u64,
     pub min_kbps: u32,
@@ -55,6 +55,50 @@ fn union(a: Option<Band>, b: Band) -> Band {
             y1: a.y1.max(b.y1),
         },
     }
+}
+
+/// Part of the screen a buffer needs converting: rows y0..y1, columns x0..x1.
+#[derive(Clone, Copy)]
+struct Area {
+    y0: usize,
+    y1: usize,
+    x0: usize,
+    x1: usize,
+}
+
+impl Area {
+    fn full(w: usize, h: usize) -> Self {
+        Area {
+            y0: 0,
+            y1: h,
+            x0: 0,
+            x1: w,
+        }
+    }
+
+    fn grow(a: Option<Area>, b: Area) -> Area {
+        match a {
+            None => b,
+            Some(a) => Area {
+                y0: a.y0.min(b.y0),
+                y1: a.y1.max(b.y1),
+                x0: a.x0.min(b.x0),
+                x1: a.x1.max(b.x1),
+            },
+        }
+    }
+}
+
+/// Columns spanned by the changed macroblocks of `map` (`cols` per row).
+fn dirty_cols(map: &[u8], cols: usize, width: usize) -> Option<(usize, usize)> {
+    let (mut c0, mut c1) = (cols, 0);
+    for row in map.chunks_exact(cols) {
+        if let Some(a) = row.iter().position(|&d| d != 0) {
+            c0 = c0.min(a);
+            c1 = c1.max(cols - row.iter().rev().position(|&d| d != 0).unwrap());
+        }
+    }
+    (c1 > c0).then(|| (c0 * 16, (c1 * 16).min(width)))
 }
 
 /// One capture/encode setup for the current screen size.
@@ -140,8 +184,6 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
             fps: cfg.fps,
             preset: cfg.preset.clone(),
             threads: fixed,
-            crf: cfg.crf,
-            max_kbps: cfg.max_kbps,
         };
         let max_threads = if cfg.adaptive_threads {
             (cfg.threads / layout.len() as u32).max(1)
@@ -154,16 +196,15 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
             enc: Encoder::new(&ecfg)?,
             cfg: ecfg,
             max_threads,
-            applied_kbps: 0,
-            applied_crf: -1.0,
+            rc: QpCtl::new(),
         });
     }
     *hub.stripes.lock() = layout;
     let hub2 = hub.clone();
-    let (crf, po_crf) = (cfg.crf, cfg.paintover_crf);
+    let (qp, po_qp, max_kbps) = (cfg.qp, cfg.paintover_qp, cfg.max_kbps);
     let encode = std::thread::Builder::new()
         .name("encode".into())
-        .spawn(move || encode_loop(stripes, job_rx, ret_tx, hub2, crf, po_crf))
+        .spawn(move || encode_loop(stripes, job_rx, ret_tx, hub2, qp, po_qp, max_kbps))
         .unwrap();
     // New geometry (and a keyframe) for clients already connected; no-op at startup.
     hub.restart_clients();
@@ -336,7 +377,25 @@ impl RateCtl {
                 self.last_inc = now;
             }
         }
+        // Never aim above what the link was measured to carry (with room to spare): an
+        // uncongested link only says the content didn't need more, and bursts after a
+        // scene change would otherwise queue up behind a target the link can't take.
+        let capacity = clients
+            .iter()
+            .filter(|c| c.started.load(Ordering::Relaxed))
+            .filter_map(|c| c.capacity_kbps())
+            .fold(f64::MAX, f64::min);
+        self.target = self.target.min(capacity * 0.8).max(self.min);
+        hub.link_kbps.store(
+            if capacity < f64::MAX {
+                capacity as u32
+            } else {
+                0
+            },
+            Ordering::Relaxed,
+        );
         hub.target_kbps.store(self.target as u32, Ordering::Relaxed);
+        hub.link_clear.store(clear && !congested, Ordering::Relaxed);
     }
 }
 
@@ -465,7 +524,8 @@ fn capture_loop(
         Some(Box::new(I420::new(w, h))),
         Some(Box::new(I420::new(w, h))),
     ];
-    let mut pending: [Option<Band>; 2] = [Some(cap.full()), Some(cap.full())];
+    // What each buffer is missing: the changes since it was last converted.
+    let mut pending: [Option<Area>; 2] = [Some(Area::full(w, h)), Some(Area::full(w, h))];
     let mut next_idx = 0usize;
     let interval = Duration::from_secs_f64(1.0 / cfg.fps as f64);
     // Allow slight early capture so source jitter doesn't alias into dropped frames.
@@ -523,7 +583,7 @@ fn capture_loop(
             had_clients = true;
             // Our shm copy may be stale: re-grab everything once.
             cap.grab(cap.full())?;
-            pending = [Some(cap.full()), Some(cap.full())];
+            pending = [Some(Area::full(w, h)), Some(Area::full(w, h))];
             cap.damaged = true;
             full_next = true;
         }
@@ -583,9 +643,17 @@ fn capture_loop(
             cap.take_mb_map();
             full_next = false;
         }
+        // Columns to convert: the changed macroblocks' (the screen's without a map).
+        let cols = mb_dirty
+            .as_ref()
+            .and_then(|m| dirty_cols(m, w.div_ceil(16), w))
+            .unwrap_or((0, w));
         match &mb_dirty {
             Some(m) => refiner.mark(m),
             None => refiner.mark_all(),
+        }
+        if hub.resharpen.swap(false, Ordering::Relaxed) {
+            refiner.mark_all();
         }
         if cap.damaged {
             band = cap.take_damage()?;
@@ -625,16 +693,22 @@ fn capture_loop(
         };
         let idx = next_idx;
         let mut buf = pool[idx].take().unwrap();
-        let todo = match (pending[idx], band) {
-            (p, Some(b)) => Some(union(p, b)),
+        let changed = band.map(|b| Area {
+            y0: b.y0 as usize,
+            y1: b.y1 as usize,
+            x0: cols.0,
+            x1: cols.1,
+        });
+        let todo = match (pending[idx], changed) {
+            (p, Some(c)) => Some(Area::grow(p, c)),
             (p, None) => p,
         };
-        if let Some(b) = band {
-            pending[1 - idx] = Some(union(pending[1 - idx], b));
+        if let Some(c) = changed {
+            pending[1 - idx] = Some(Area::grow(pending[1 - idx], c));
         }
         pending[idx] = None;
         if let Some(t) = todo {
-            cap.convert(&mut buf, t.y0 as usize, t.y1 as usize, cfg.convert_threads);
+            cap.convert(&mut buf, (t.y0, t.y1), (t.x0, t.x1), cfg.convert_threads);
         }
         let t2 = Instant::now();
         hub.stats
@@ -740,8 +814,268 @@ struct Stripe {
     cfg: EncoderConfig,
     /// Sliced threads to fan out to under sustained heavy motion (1 = never).
     max_threads: u32,
-    applied_kbps: u32,
-    applied_crf: f32,
+    rc: QpCtl,
+}
+
+/// Frame size relative to QP 22 at QPs from 16 to 51, measured on desktop text
+/// (keyframes and motion alike). It falls much slower than the textbook halving every
+/// 6 QP: sharp edges keep their coefficients until the quantizer is very coarse.
+const SIZE_AT_QP: [(f64, f64); 7] = [
+    (16.0, 1.3),
+    (22.0, 1.0),
+    (28.0, 0.77),
+    (34.0, 0.59),
+    (40.0, 0.44),
+    (45.0, 0.30),
+    (51.0, 0.14),
+];
+
+/// Size of a frame at `qp` relative to QP 22 (log-linear between measurements).
+fn size_at(qp: f64) -> f64 {
+    let t = &SIZE_AT_QP;
+    let i = t
+        .iter()
+        .rposition(|&(q, _)| q <= qp)
+        .unwrap_or(0)
+        .min(t.len() - 2);
+    let ((q0, s0), (q1, s1)) = (t[i], t[i + 1]);
+    let f = (qp - q0) / (q1 - q0);
+    (s0.ln() * (1.0 - f) + s1.ln() * f).exp()
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Motion,
+    /// Paint-over: re-encoding blocks that went still at sharper quality.
+    Refine,
+    Key,
+}
+
+/// Bytes per encoded macroblock at QP 22 for one kind of frame.
+struct Cost {
+    avg: f64,
+    /// Recent maximum, decaying: content can turn from cheap to expensive in one frame.
+    peak: f64,
+    /// Average of frames at about the QP asked for (0 until measured): what the
+    /// content costs when not repairing a coarser reference.
+    steady: f64,
+}
+
+/// Frame QPs under the bitrate cap. x264 runs at constant QP (its CRF and VBV need a
+/// lowres lookahead that costs as much as the encode itself), so the VBV lives here:
+/// frames draw on a buffer refilled at the cap, and each frame gets the QP it asks for,
+/// raised until its predicted size fits. Sizes are predicted from the macroblocks being
+/// encoded and the bytes per macroblock of recent frames of the same kind, scaled
+/// across QPs by `size_at`.
+struct QpCtl {
+    /// Bits in the buffer; negative after an overshoot, until the cap repays it.
+    fill: f64,
+    /// Buffer size (bits).
+    size: f64,
+    last: Instant,
+    cost: [Cost; 3],
+    /// QP of the last motion frame (or keyframe): the quality of the reference.
+    motion_qp: i32,
+    /// Size of the last motion frame (bytes).
+    motion_bytes: f64,
+    /// Bytes a motion frame costs per QP it comes down (repairing its reference), 0
+    /// until measured.
+    repair: f64,
+    /// Plenty of room (`is_roomy`) when the last budget was set.
+    roomy: bool,
+    /// QP added to what frames ask for while the average rate is over --max-kbps.
+    bias: f64,
+    /// Bits sent since `window`, to compare the average rate with --max-kbps.
+    sent: f64,
+    window: Instant,
+}
+
+impl QpCtl {
+    fn new() -> Self {
+        // Priors until frames are measured, on the dense side for desktop text.
+        let c = |b: f64| Cost {
+            avg: b,
+            peak: 0.0,
+            steady: 0.0,
+        };
+        QpCtl {
+            fill: 0.0,
+            size: 0.0,
+            last: Instant::now(),
+            cost: [c(20.0), c(8.0), c(30.0)],
+            motion_qp: crate::encoder::MIN_QP,
+            motion_bytes: 0.0,
+            repair: 0.0,
+            roomy: false,
+            bias: 0.0,
+            sent: 0.0,
+            window: Instant::now(),
+        }
+    }
+
+    /// Bytes the next frame may take: what the buffer holds after refilling at
+    /// `cap_kbps`, the buffer being `buf_frames` frames at the cap. A `fresh` buffer
+    /// (a keyframe for a new viewer) starts full. On a `clear` link a frame always gets
+    /// a quarter of the buffer, even in debt after an overshoot: crushing frames to
+    /// repay it there only lowers the quality every later frame starts from. Where
+    /// acks show queueing, the debt holds the rate down.
+    #[allow(clippy::too_many_arguments)]
+    fn budget(
+        &mut self,
+        cap_kbps: u32,
+        buf_frames: f64,
+        fps: u32,
+        fresh: bool,
+        clear: bool,
+        link_kbps: u32,
+        max_kbps: u32,
+        roomy: bool,
+    ) -> f64 {
+        let rate = cap_kbps as f64 * 1000.0;
+        self.size = rate / fps.max(1) as f64 * buf_frames;
+        self.roomy = roomy;
+        // It refills at the cap (a VBV's maximum rate), but no faster than the link was
+        // measured to carry (after a scene change, frames would otherwise queue up on
+        // a slow link; until a measurement, at half the cap) or than --max-kbps allows.
+        let refill = if link_kbps > 0 {
+            rate.min(link_kbps as f64 * 900.0)
+        } else {
+            rate * 0.5
+        };
+        // Bursts above --max-kbps are fine; a sustained rate isn't: past it, frames are
+        // asked for a coarser QP, a step every half second, until it holds.
+        let el = self.window.elapsed().as_secs_f64();
+        if el >= 0.5 {
+            let avg = self.sent / el;
+            let max = max_kbps as f64 * 1000.0;
+            if avg > max {
+                self.bias = (self.bias + 1.0).min(20.0);
+            } else if avg < max * 0.85 {
+                self.bias = (self.bias - 1.0).max(0.0);
+            }
+            self.sent = 0.0;
+            self.window = Instant::now();
+        }
+        self.fill = if fresh {
+            self.size
+        } else {
+            (self.fill + refill * self.last.elapsed().as_secs_f64()).min(self.size)
+        };
+        self.last = Instant::now();
+        let fill = if clear {
+            self.fill.max(self.size * 0.25)
+        } else {
+            self.fill
+        };
+        // Aim below it: predictions miss.
+        (fill * 0.85 / 8.0).max(1.0)
+    }
+
+    /// Plenty of room: a link measured at more than twice the cap, and a `budget` four
+    /// times what steady motion at `want` costs (a fast link, not just a low cap).
+    fn is_roomy(&self, want: f64, mbs: usize, budget: f64, cap_kbps: u32, link_kbps: u32) -> bool {
+        let steady = self.cost[Kind::Motion as usize].steady;
+        link_kbps as f64 >= cap_kbps as f64 * 2.0
+            && steady > 0.0
+            && mbs.max(1) as f64 * steady * size_at(want) * 4.0 <= budget
+    }
+
+    /// Predicted bytes of a frame of `kind` at `qp` encoding `mbs` macroblocks.
+    fn predict(&self, kind: Kind, qp: i32, mbs: usize) -> f64 {
+        let c = &self.cost[kind as usize];
+        mbs.max(1) as f64 * c.avg.max(c.peak) * size_at(qp as f64)
+    }
+
+    /// QP for a frame of `kind` that wants `want` and encodes `mbs` macroblocks: the
+    /// first from `want` up whose predicted size fits `budget` (51 if none does).
+    /// Motion QP rises to that at once but comes down in steps: a frame sharper than
+    /// its reference also re-encodes the detail the reference lost, at a cost per QP
+    /// learned from earlier steps, so it comes down as far as that cost fits the
+    /// budget (as a VBV lets the quantizer down).
+    fn qp(&self, kind: Kind, want: f64, mbs: usize, budget: f64) -> i32 {
+        let want = ((want + self.bias).round() as i32).clamp(crate::encoder::MIN_QP, 51);
+        let fit = (want..=51)
+            .find(|&q| self.predict(kind, q, mbs) <= budget)
+            .unwrap_or(51);
+        if kind != Kind::Motion || fit >= self.motion_qp {
+            return fit;
+        }
+        // Several steps only with plenty of room (a fast link recovering from a scene
+        // change): elsewhere the cost of a step grows faster as QP comes down than the
+        // steps before can tell. One at a time while frames leave half the budget
+        // unused.
+        let used = self.motion_bytes / budget;
+        let step = if self.fill < self.size * 0.5 || used >= 0.5 {
+            0
+        } else if self.roomy && self.repair > 0.0 {
+            ((budget * 0.85 / self.repair) as i32).clamp(1, 6)
+        } else {
+            1
+        };
+        (self.motion_qp - step).max(fit)
+    }
+
+    /// Learn from an encoded frame (sent or not) that wanted QP `want`.
+    fn learn(&mut self, kind: Kind, qp: i32, want: f64, mbs: usize, bytes: usize, slices: u32) {
+        // A motion frame that came down in QP was partly a repair (see `qp`): it says
+        // what coming down costs, not what steady motion does.
+        if !(kind == Kind::Motion && self.learn_repair(qp, bytes)) {
+            // Slice headers and the like cost the same whatever changed.
+            let payload = bytes.saturating_sub(8 * slices as usize) as f64;
+            let per_mb = payload / mbs.max(1) as f64 / size_at(qp as f64);
+            let c = &mut self.cost[kind as usize];
+            c.avg = c.avg * 0.6 + per_mb * 0.4;
+            c.peak = per_mb.max(c.peak * 0.85);
+            // Only frames at (about) the quality asked for: costs at coarse QPs don't
+            // carry over to fine ones.
+            if qp as f64 <= want.round() + 2.0 {
+                c.steady = if c.steady > 0.0 {
+                    c.steady * 0.8 + per_mb * 0.2
+                } else {
+                    per_mb
+                };
+            }
+        }
+        self.note(kind, qp, bytes);
+    }
+
+    /// Learn the cost of coming down in QP from a motion frame at `qp` that did
+    /// (whether or not it was sent); false if it didn't come down.
+    fn learn_repair(&mut self, qp: i32, bytes: usize) -> bool {
+        let down = self.motion_qp - qp;
+        if down <= 0 {
+            return false;
+        }
+        let per_qp = bytes as f64 / down as f64;
+        self.repair = if self.repair > 0.0 {
+            self.repair * 0.5 + per_qp * 0.5
+        } else {
+            per_qp
+        };
+        true
+    }
+
+    /// Remember the quality and size of the latest reference frame.
+    fn note(&mut self, kind: Kind, qp: i32, bytes: usize) {
+        if kind != Kind::Refine {
+            // A keyframe is the new reference for everything.
+            self.motion_qp = qp;
+            self.motion_bytes = bytes as f64;
+        }
+    }
+
+    /// Charge a sent frame to the buffer.
+    fn spend(&mut self, bytes: usize, fresh: bool) {
+        // A new viewer's keyframe had a buffer of its own; the stream after it starts
+        // from a full one (clamped to its size by the next `budget`), as under x264's
+        // VBV, rather than crushing the first frames a viewer sees.
+        self.fill = if fresh {
+            self.size
+        } else {
+            self.fill - bytes as f64 * 8.0
+        };
+        self.sent += bytes as f64 * 8.0;
+    }
 }
 
 const HDR: usize = 16;
@@ -760,13 +1094,23 @@ struct StripeJob {
     buf: SendPtr<I420>,
     ts: i64,
     force_idr: bool,
-    crf: f32,
+    kind: Kind,
+    /// QP the frame asks for (motion frames go lower when little changed).
+    qp: f32,
     cap: u32,
+    /// The link shows no queueing (`Hub::link_clear`).
+    clear: bool,
+    /// This stripe's share of the link's measured capacity (kbit/s), 0 if unknown.
+    link_kbps: u32,
+    /// This stripe's share of `--max-kbps`.
+    max_kbps: u32,
     mb_dirty: Option<Arc<Vec<u8>>>,
     mb_cols: usize,
 }
 
-type StripeResult = (usize, Option<(bool, Vec<u8>)>);
+/// Stripe index, its output (keyframe or not) if it produced any, the QP used, and a
+/// frame to send before the output (standing in for an overshoot that was re-encoded).
+type StripeResult = (usize, Option<(bool, Vec<u8>)>, i32, Option<Vec<u8>>);
 
 /// x264's sliced threading costs ~3x the CPU of one thread on desktop content (and on
 /// small updates is even slower), so a stripe encodes single-threaded and only fans out
@@ -867,24 +1211,9 @@ fn stripe_worker(
         fit: CostFit::default(),
         predicted_ms: 0.0,
     };
+    let mbs_total = s.h.div_ceil(16) * s.cfg.width.div_ceil(16) as usize;
     while let Ok(job) = rx.recv() {
         let buf = unsafe { &*job.buf.0 };
-        if job.force_idr {
-            // A keyframe is what a new viewer sees first; don't starve it to the
-            // steady-state frame budget (up to ~8 frames' worth at 4x the cap).
-            let boost = job.cap.saturating_mul(4).max(16_000);
-            s.enc
-                .set_rate_buf(job.crf, boost, boost / s.cfg.fps.max(1) * 8);
-            s.applied_kbps = 0;
-        } else {
-            let moved = s.applied_kbps == 0
-                || (job.cap as f64 - s.applied_kbps as f64).abs() > s.applied_kbps as f64 * 0.04;
-            if job.crf != s.applied_crf || moved {
-                s.enc.set_rate(job.crf, job.cap);
-                s.applied_crf = job.crf;
-                s.applied_kbps = job.cap;
-            }
-        }
         let suv = buf.stride_uv();
         let planes = Planes {
             y: &buf.y[s.y * buf.width..],
@@ -904,15 +1233,161 @@ fn stripe_worker(
                 .map(|&x| (x == 0) as u8)
                 .collect::<Vec<u8>>()
         });
+        let mbs = if job.force_idr {
+            mbs_total
+        } else {
+            info.as_ref()
+                .map_or(mbs_total, |m| m.iter().filter(|&&c| c == 0).count())
+        };
+        let (cap, buf_frames, want) = match job.kind {
+            // A keyframe is what a new viewer sees first; don't starve it to the
+            // steady-state frame budget (up to ~8 frames' worth at 4x the cap).
+            // Everything after refers back to it: 3 QP sharper, as x264's I/P ratio.
+            Kind::Key => (
+                job.cap.saturating_mul(4).max(16_000),
+                8.0,
+                job.qp as f64 - 3.0,
+            ),
+            // Small updates (typing, a spinner) are cheap: encode them sharper, as
+            // CRF would, by up to 6 QP for a sliver of the screen.
+            Kind::Motion => (
+                job.cap,
+                1.25,
+                job.qp as f64
+                    + (mbs.max(1) as f64 * 4.0 / mbs_total as f64)
+                        .log2()
+                        .clamp(-6.0, 0.0),
+            ),
+            Kind::Refine => (job.cap, 1.25, job.qp as f64),
+        };
+        let fresh = job.kind == Kind::Key;
+        // What a frame may take with the buffer full.
+        let nominal = cap as f64 * 1000.0 / s.cfg.fps.max(1) as f64 * buf_frames * 0.85 / 8.0;
+        let roomy = s.rc.is_roomy(want, mbs, nominal, cap, job.link_kbps);
+        let budget = s.rc.budget(
+            cap,
+            buf_frames,
+            s.cfg.fps,
+            fresh,
+            job.clear,
+            job.link_kbps,
+            job.max_kbps,
+            roomy,
+        );
+        let mut qp = s.rc.qp(job.kind, want, mbs, budget);
+        let mut filler = None;
         let te = Instant::now();
-        let r = s.enc.encode(
+        let mut r = s.enc.encode(
             &planes,
             job.ts,
             job.force_idr,
-            None,
+            qp,
             info.as_deref_mut(),
             &mut out,
         );
+        if let Ok(key) = r {
+            // A reopened encoder (adaptive threads) starts with an IDR of its own.
+            let kind = if key { Kind::Key } else { job.kind };
+            let bytes = out.len() - HDR;
+            if debug {
+                log::info!("stripe y{} qp {qp} (wants {want:.1}) {mbs} mbs {bytes} bytes (budget {budget:.0})", s.y);
+            }
+            // The content outran the model (a scene change: nothing on screen predicts
+            // it, or a frame repairing a coarser reference) and this frame would hold the
+            // link well past its turn. Have x264 forget it and encode the picture again
+            // from the frame before, at the QP its actual size says fits (the same
+            // picture, so a good estimate), as a VBV would have; static areas stay as
+            // they were. In its place goes a frame with every macroblock skipped, so
+            // frame numbers stay continuous.
+            // On a link measured far faster than the cap (the cap is policy), a frame a
+            // few times its budget costs no time on the wire: only re-encode when far
+            // over, and spare the encode time.
+            let limit = if job.link_kbps >= cap.saturating_mul(2) {
+                nominal * 3.0
+            } else {
+                budget * 1.5
+            };
+            let over = kind != Kind::Key
+                && qp < 51
+                && bytes as f64 > limit
+                && bytes as f64 > nominal * 0.5;
+            let fill = over
+                .then(|| s.enc.skip_frame(&out[HDR..]))
+                .flatten()
+                .filter(|_| s.enc.invalidate_last());
+            // Without that (streams the stand-in can't handle), a keyframe doesn't
+            // depend on the frame either: if one within a few frames' budget comes out
+            // much smaller, send the picture as that. The encode loop has the whole
+            // screen sharpened afterwards.
+            let key_budget = (bytes as f64 * 0.5).min(nominal * 4.0);
+            let key_qp = (over && kind == Kind::Motion && fill.is_none())
+                .then(|| s.rc.qp(Kind::Key, want - 3.0, mbs_total, key_budget))
+                .filter(|&q| s.rc.predict(Kind::Key, q, mbs_total) <= key_budget);
+            if let Some(f) = fill {
+                // A step down in QP that cost too much goes back to where it came
+                // from (the cost was the repair, which a coarser QP doesn't have);
+                // anything else, or far over, to the QP its size says fits.
+                let fits = (qp + 1..=51)
+                    .find(|&q| bytes as f64 * size_at(q as f64) / size_at(qp as f64) <= budget)
+                    .unwrap_or(51);
+                let q = if kind == Kind::Motion && qp < s.rc.motion_qp {
+                    if bytes as f64 <= budget * 4.0 {
+                        s.rc.motion_qp
+                    } else {
+                        fits.max(s.rc.motion_qp)
+                    }
+                } else {
+                    fits
+                };
+                out.truncate(HDR);
+                r = s
+                    .enc
+                    .encode(&planes, job.ts, false, q, info.as_deref_mut(), &mut out);
+                if debug {
+                    log::info!(
+                        "stripe y{} overshot {bytes} bytes at qp {qp}: again at qp {q}, {} bytes",
+                        s.y,
+                        out.len() - HDR
+                    );
+                }
+                // A one-off: it says nothing about the frames after it, unless it was
+                // a step down in QP that cost more than expected.
+                if kind == Kind::Motion {
+                    s.rc.learn_repair(qp, bytes);
+                }
+                qp = q;
+                s.rc.note(kind, qp, out.len() - HDR);
+                let mut v = vec![0u8; HDR];
+                v.extend_from_slice(&f);
+                filler = Some(v);
+            } else if let Some(q) = key_qp {
+                out.truncate(HDR);
+                qp = q;
+                r = s.enc.encode(&planes, job.ts, true, qp, None, &mut out);
+                if r.is_ok() {
+                    // Learn from the keyframe only: the frame it replaced says nothing
+                    // about the next one.
+                    s.rc.learn(
+                        Kind::Key,
+                        qp,
+                        want - 3.0,
+                        mbs_total,
+                        out.len() - HDR,
+                        s.cfg.threads,
+                    );
+                }
+                if debug {
+                    log::info!(
+                        "stripe y{} overshot {bytes} bytes: keyframe at qp {qp}, {} bytes",
+                        s.y,
+                        out.len() - HDR
+                    );
+                }
+            } else {
+                s.rc.learn(kind, qp, want, mbs, bytes, s.cfg.threads);
+            }
+            s.rc.spend(out.len() - HDR, fresh);
+        }
         if debug {
             let ts = clock_gettime(ClockId::CLOCK_THREAD_CPUTIME_ID).unwrap_or(TimeSpec::new(0, 0));
             let cpu_now = ts.tv_sec() as i64 * 1_000_000 + ts.tv_nsec() as i64 / 1000;
@@ -925,13 +1400,11 @@ fn stripe_worker(
             );
         }
         if s.max_threads > 1 {
-            // Changed macroblocks in this stripe (all of them without a damage map).
-            let changed = info
-                .as_ref()
-                .map_or((s.h.div_ceil(16) * job.mb_cols) as f64, |m| {
-                    m.iter().filter(|&&c| c == 0).count() as f64
-                });
-            if let Some(t) = gov.want(te.elapsed().as_secs_f64() * 1000.0, changed, s.max_threads) {
+            if let Some(t) = gov.want(
+                te.elapsed().as_secs_f64() * 1000.0,
+                mbs as f64,
+                s.max_threads,
+            ) {
                 match Encoder::new(&EncoderConfig {
                     threads: t,
                     ..s.cfg.clone()
@@ -943,7 +1416,7 @@ fn stripe_worker(
                         );
                         // A fresh encoder opens with an IDR on its next frame.
                         s.enc = e;
-                        s.applied_kbps = 0;
+                        s.cfg.threads = t;
                         gov.threads = t;
                         gov.heavy = 0;
                         gov.light_since = None;
@@ -960,7 +1433,7 @@ fn stripe_worker(
                 None
             }
         };
-        if done.send((i, res)).is_err() {
+        if done.send((i, res, qp, filler)).is_err() {
             return;
         }
     }
@@ -971,8 +1444,9 @@ fn encode_loop(
     rx: mpsc::Receiver<Job>,
     ret: mpsc::Sender<(usize, Box<I420>)>,
     hub: Arc<Hub>,
-    crf: f32,
-    po_crf: f32,
+    qp: f32,
+    po_qp: f32,
+    max_kbps: u32,
 ) {
     let epoch = Instant::now();
     let mut frame_id: u32 = 0;
@@ -1012,7 +1486,14 @@ fn encode_loop(
             continue;
         }
         let target = hub.target_kbps.load(Ordering::Relaxed);
-        let want_crf = if job.paintover { po_crf } else { crf };
+        let kind = if job.force_idr {
+            Kind::Key
+        } else if job.paintover {
+            Kind::Refine
+        } else {
+            Kind::Motion
+        };
+        let want_qp = if job.paintover { po_qp } else { qp };
         // Each stripe may use up to twice its area share of the budget; the delay-based
         // controller reins the total in if several stripes move at once.
         let share = ((target as u64 * 2) / n as u64).max(target as u64 / n as u64 + 1) as u32;
@@ -1031,8 +1512,12 @@ fn encode_loop(
                     buf: buf_ptr,
                     ts,
                     force_idr: job.force_idr,
-                    crf: want_crf,
+                    kind,
+                    qp: want_qp,
                     cap,
+                    clear: hub.link_clear.load(Ordering::Relaxed),
+                    link_kbps: hub.link_kbps.load(Ordering::Relaxed) / n as u32,
+                    max_kbps: max_kbps / n as u32,
                     mb_dirty: job.mb_dirty.clone(),
                     mb_cols: job.buf.width.div_ceil(16),
                 });
@@ -1040,9 +1525,17 @@ fn encode_loop(
             }
         }
         let mut results: Vec<Option<(bool, Vec<u8>)>> = (0..n).map(|_| None).collect();
+        let mut fillers = Vec::new();
         for _ in 0..pending {
-            if let Ok((i, r)) = done_rx.recv() {
+            if let Ok((i, r, qp, f)) = done_rx.recv() {
+                if r.is_some() {
+                    hub.stats.qp_total.fetch_add(qp as u64, Ordering::Relaxed);
+                    hub.stats.qp_frames.fetch_add(1, Ordering::Relaxed);
+                }
                 results[i] = r;
+                if let Some(f) = f {
+                    fillers.push((i, false, f));
+                }
             }
         }
         let _ = ret.send((job.idx, job.buf));
@@ -1065,6 +1558,11 @@ fn encode_loop(
         if parts.is_empty() {
             continue;
         }
+        if !job.force_idr && parts.iter().any(|p| p.1) {
+            // A stripe sent a keyframe of its own, most likely a scene change crushed to
+            // the budget, static areas included: sharpen everything once it's still.
+            hub.resharpen.store(true, Ordering::Relaxed);
+        }
         let enc_us = t0.elapsed().as_micros() as u64;
         let all_key = parts.len() == n && parts.iter().all(|p| p.1);
         let total: usize = parts.iter().map(|p| p.2.len()).sum();
@@ -1074,7 +1572,6 @@ fn encode_loop(
         if all_key {
             hub.stats.keyframes.fetch_add(1, Ordering::Relaxed);
         }
-        frame_id = frame_id.wrapping_add(1);
         // Server-side pipeline latency (capture -> sent) in 1/10 ms, for client stats.
         let mut pipe = (job.captured_at.elapsed().as_micros() / 100).min(u32::MAX as u128) as u32;
         if job.marker_ms >= 0 {
@@ -1084,50 +1581,25 @@ fn encode_loop(
                 .unwrap()
                 .as_millis() as u32;
         }
-        let nparts = parts.len() as u8;
-        let msgs: Vec<Bytes> = parts
-            .into_iter()
-            .map(|(i, key, mut out)| {
-                // type, flags, frame id, pipe, stripe, stripe count, parts in frame, reserved, y
-                out[0] = 0x01;
-                out[1] = (key as u8) | if job.paintover { 2 } else { 0 };
-                out[2..6].copy_from_slice(&frame_id.to_be_bytes());
-                out[6..10].copy_from_slice(&pipe.to_be_bytes());
-                out[10] = i as u8;
-                out[11] = n as u8;
-                out[12] = nparts;
-                out[13] = 0;
-                out[14..16].copy_from_slice(&(stripes[i].0 as u16).to_be_bytes());
-                Bytes::from(out)
-            })
-            .collect();
-        let now = Instant::now();
-        for c in hub.video_clients() {
-            if !c.started.load(Ordering::Relaxed) {
-                if !all_key {
-                    continue;
-                }
-                c.started.store(true, Ordering::Relaxed);
-                c.inflight.lock().clear();
-            }
-            {
-                let mut q = c.inflight.lock();
-                if q.len() > 600 {
-                    log::warn!("client {} hopelessly behind; dropping", c.id);
-                    drop(q);
-                    c.send(Out::Text("{\"t\":\"close\"}".into()));
-                    continue;
-                }
-                q.push_back(Inflight {
-                    id: frame_id,
-                    sent: now,
-                    bytes: total,
-                });
-            }
-            for m in &msgs {
-                c.send(Out::Bin(m.clone()));
-            }
+        let ys: Vec<usize> = stripes.iter().map(|s| s.0).collect();
+        if !fillers.is_empty() {
+            // Stand-ins for re-encoded overshoots: frames of their own, ahead of the
+            // re-encodes that refer past them.
+            hub.stats.bytes.fetch_add(
+                fillers.iter().map(|p| p.2.len() as u64).sum(),
+                Ordering::Relaxed,
+            );
+            send_frame(&hub, &mut frame_id, fillers, &ys, false, false, pipe);
         }
+        send_frame(
+            &hub,
+            &mut frame_id,
+            parts,
+            &ys,
+            all_key,
+            job.paintover,
+            pipe,
+        );
         hub.stats.send_lat_us.fetch_add(
             job.captured_at.elapsed().as_micros() as u64,
             Ordering::Relaxed,
@@ -1138,6 +1610,66 @@ fn encode_loop(
                 marker_age(job.marker_ms),
                 enc_us
             );
+        }
+    }
+}
+
+/// Sends one frame's stripe outputs `parts` (index, keyframe, output with HDR bytes
+/// reserved) to every viewer, as frame `frame_id + 1`.
+fn send_frame(
+    hub: &Hub,
+    frame_id: &mut u32,
+    parts: Vec<(usize, bool, Vec<u8>)>,
+    ys: &[usize],
+    all_key: bool,
+    paintover: bool,
+    pipe: u32,
+) {
+    *frame_id = frame_id.wrapping_add(1);
+    let id = *frame_id;
+    let total: usize = parts.iter().map(|p| p.2.len()).sum();
+    let nparts = parts.len() as u8;
+    let msgs: Vec<Bytes> = parts
+        .into_iter()
+        .map(|(i, key, mut out)| {
+            // type, flags, frame id, pipe, stripe, stripe count, parts in frame, reserved, y
+            out[0] = 0x01;
+            out[1] = (key as u8) | if paintover { 2 } else { 0 };
+            out[2..6].copy_from_slice(&id.to_be_bytes());
+            out[6..10].copy_from_slice(&pipe.to_be_bytes());
+            out[10] = i as u8;
+            out[11] = ys.len() as u8;
+            out[12] = nparts;
+            out[13] = 0;
+            out[14..16].copy_from_slice(&(ys[i] as u16).to_be_bytes());
+            Bytes::from(out)
+        })
+        .collect();
+    let now = Instant::now();
+    for c in hub.video_clients() {
+        if !c.started.load(Ordering::Relaxed) {
+            if !all_key {
+                continue;
+            }
+            c.started.store(true, Ordering::Relaxed);
+            c.inflight.lock().clear();
+        }
+        {
+            let mut q = c.inflight.lock();
+            if q.len() > 600 {
+                log::warn!("client {} hopelessly behind; dropping", c.id);
+                drop(q);
+                c.send(Out::Text("{\"t\":\"close\"}".into()));
+                continue;
+            }
+            q.push_back(Inflight {
+                id,
+                sent: now,
+                bytes: total,
+            });
+        }
+        for m in &msgs {
+            c.send(Out::Bin(m.clone()));
         }
     }
 }
