@@ -377,10 +377,17 @@ impl RateCtl {
         // Never aim above what the link was measured to carry (with room to spare): an
         // uncongested link only says the content didn't need more, and bursts after a
         // scene change would otherwise queue up behind a target the link can't take.
+        // Links change, though, and frames held small by an old estimate never get large
+        // enough to measure it again: one that holds the rate down is forgotten once
+        // stale (rate control goes back to its cautious unmeasured mode and probes). One
+        // above --max-kbps holds nothing down, and if that link slows, the frames it
+        // allows measure it.
         let capacity = clients
             .iter()
             .filter(|c| c.started.load(Ordering::Relaxed))
             .filter_map(|c| c.capacity_kbps())
+            .filter(|&(kbps, fresh)| fresh || kbps * 0.8 >= self.max)
+            .map(|(kbps, _)| kbps)
             .fold(f64::MAX, f64::min);
         self.target = self.target.min(capacity * 0.8).max(self.min);
         hub.link_kbps.store(
@@ -872,11 +879,8 @@ struct QpCtl {
     repair: f64,
     /// Plenty of room (`is_roomy`) when the last budget was set.
     roomy: bool,
-    /// QP added to what frames ask for while the average rate is over --max-kbps.
+    /// QP added to what frames ask for while the stream is over --max-kbps (`MaxRate`).
     bias: f64,
-    /// Bits sent since `window`, to compare the average rate with --max-kbps.
-    sent: f64,
-    window: Instant,
 }
 
 impl QpCtl {
@@ -897,8 +901,6 @@ impl QpCtl {
             repair: 0.0,
             roomy: false,
             bias: 0.0,
-            sent: 0.0,
-            window: Instant::now(),
         }
     }
 
@@ -917,7 +919,6 @@ impl QpCtl {
         fresh: bool,
         clear: bool,
         link_kbps: u32,
-        max_kbps: u32,
         roomy: bool,
     ) -> f64 {
         let rate = cap_kbps as f64 * 1000.0;
@@ -925,26 +926,12 @@ impl QpCtl {
         self.roomy = roomy;
         // It refills at the cap (a VBV's maximum rate), but no faster than the link was
         // measured to carry (after a scene change, frames would otherwise queue up on
-        // a slow link; until a measurement, at half the cap) or than --max-kbps allows.
+        // a slow link; until a measurement, at half the cap).
         let refill = if link_kbps > 0 {
             rate.min(link_kbps as f64 * 900.0)
         } else {
             rate * 0.5
         };
-        // Bursts above --max-kbps are fine; a sustained rate isn't: past it, frames are
-        // asked for a coarser QP, a step every half second, until it holds.
-        let el = self.window.elapsed().as_secs_f64();
-        if el >= 0.5 {
-            let avg = self.sent / el;
-            let max = max_kbps as f64 * 1000.0;
-            if avg > max {
-                self.bias = (self.bias + 1.0).min(20.0);
-            } else if avg < max * 0.85 {
-                self.bias = (self.bias - 1.0).max(0.0);
-            }
-            self.sent = 0.0;
-            self.window = Instant::now();
-        }
         self.fill = if fresh {
             self.size
         } else {
@@ -1063,6 +1050,47 @@ impl QpCtl {
         } else {
             self.fill - bytes as f64 * 8.0
         };
+    }
+}
+
+/// Bursts above --max-kbps are fine; a sustained rate isn't: past it, frames are asked
+/// for a coarser QP, a step every half second, until it holds. Over the whole stream,
+/// so one busy stripe may use what idle ones leave.
+struct MaxRate {
+    max_bps: f64,
+    /// Bits sent since `window`.
+    sent: f64,
+    window: Instant,
+    bias: f64,
+}
+
+impl MaxRate {
+    fn new(max_kbps: u32) -> Self {
+        MaxRate {
+            max_bps: max_kbps as f64 * 1000.0,
+            sent: 0.0,
+            window: Instant::now(),
+            bias: 0.0,
+        }
+    }
+
+    /// QP to add to what frames ask for.
+    fn bias(&mut self) -> f64 {
+        let el = self.window.elapsed().as_secs_f64();
+        if el >= 0.5 {
+            let avg = self.sent / el;
+            if avg > self.max_bps {
+                self.bias = (self.bias + 1.0).min(20.0);
+            } else if avg < self.max_bps * 0.85 {
+                self.bias = (self.bias - 1.0).max(0.0);
+            }
+            self.sent = 0.0;
+            self.window = Instant::now();
+        }
+        self.bias
+    }
+
+    fn sent(&mut self, bytes: usize) {
         self.sent += bytes as f64 * 8.0;
     }
 }
@@ -1091,8 +1119,8 @@ struct StripeJob {
     clear: bool,
     /// This stripe's share of the link's measured capacity (kbit/s), 0 if unknown.
     link_kbps: u32,
-    /// This stripe's share of `--max-kbps`.
-    max_kbps: u32,
+    /// QP the stream adds to what frames ask for (`MaxRate`).
+    bias: f64,
     mb_dirty: Option<Arc<Vec<u8>>>,
     mb_cols: usize,
 }
@@ -1260,9 +1288,9 @@ fn stripe_worker(
             fresh,
             job.clear,
             job.link_kbps,
-            job.max_kbps,
             roomy,
         );
+        s.rc.bias = job.bias;
         let mut qp = s.rc.qp(job.kind, want, mbs, budget);
         let mut filler = None;
         let te = Instant::now();
@@ -1376,6 +1404,9 @@ fn stripe_worker(
                 s.rc.learn(kind, qp, want, mbs, bytes, s.cfg.threads);
             }
             s.rc.spend(out.len() - HDR, fresh);
+            if r.is_ok() {
+                s.enc.count_psnr();
+            }
         }
         if debug {
             let cpu_now = thread_cpu_us();
@@ -1440,6 +1471,7 @@ fn encode_loop(
     let mut frame_id: u32 = 0;
     let n = stripes_in.len();
     let debug_stripes = std::env::var("VOXL_DEBUG_STRIPES").is_ok();
+    let mut max_rate = MaxRate::new(max_kbps);
     // Geometry and paint-over bookkeeping stay here; encoders move to their workers.
     let mut stripes: Vec<(usize, usize, bool)> =
         stripes_in.iter().map(|s| (s.y, s.h, false)).collect();
@@ -1486,6 +1518,7 @@ fn encode_loop(
         // controller reins the total in if several stripes move at once.
         let share = ((target as u64 * 2) / n as u64).max(target as u64 / n as u64 + 1) as u32;
         let ts = job.captured_at.duration_since(epoch).as_millis() as i64;
+        let bias = max_rate.bias();
         // Persistent per-stripe workers keep each encoder's state warm in one core's cache.
         let buf_ptr = SendPtr(&*job.buf as *const I420);
         let mut pending = 0;
@@ -1505,7 +1538,7 @@ fn encode_loop(
                     cap,
                     clear: hub.link_clear.load(Ordering::Relaxed),
                     link_kbps: hub.link_kbps.load(Ordering::Relaxed) / n as u32,
-                    max_kbps: max_kbps / n as u32,
+                    bias,
                     mb_dirty: job.mb_dirty.clone(),
                     mb_cols: job.buf.width.div_ceil(16),
                 });
@@ -1557,6 +1590,7 @@ fn encode_loop(
         hub.stats.encode_us.fetch_add(enc_us, Ordering::Relaxed);
         hub.stats.encoded.fetch_add(1, Ordering::Relaxed);
         hub.stats.bytes.fetch_add(total as u64, Ordering::Relaxed);
+        max_rate.sent(total + fillers.iter().map(|p| p.2.len()).sum::<usize>());
         if all_key {
             hub.stats.keyframes.fetch_add(1, Ordering::Relaxed);
         }
@@ -1718,4 +1752,22 @@ fn marker_age(ms: i64) -> i64 {
         .as_millis() as i64)
         & 0xffffff;
     now - ms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_rate_is_stream_wide() {
+        // One stripe of four sending 2 Mbps under --max-kbps=6000: nothing to correct.
+        let mut m = MaxRate::new(6000);
+        m.sent(125_000);
+        m.window -= Duration::from_millis(500);
+        assert_eq!(m.bias(), 0.0);
+        // The stream at 8 Mbps: a step coarser.
+        m.sent(500_000);
+        m.window -= Duration::from_millis(500);
+        assert_eq!(m.bias(), 1.0);
+    }
 }

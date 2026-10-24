@@ -5,8 +5,11 @@ use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+/// How long a link capacity sample stays good (`Client::capacity_kbps`).
+const CAPACITY_TTL: Duration = Duration::from_secs(20);
 
 pub enum Out {
     Bin(Bytes),
@@ -89,8 +92,8 @@ impl Client {
             if bytes >= 32_000 && rtt > 0.0 {
                 let mut c = self.capacity.lock();
                 c.push_back((bytes as f64 * 8.0 / (ms - rtt).max(1.0), Instant::now()));
-                // The last 20 s of samples (and always the newest): links change.
-                while c.len() > 1 && (c.len() > 32 || c[0].1.elapsed().as_secs() >= 20) {
+                // The last CAPACITY_TTL of samples, and always the newest.
+                while c.len() > 32 || (c.len() > 1 && c[0].1.elapsed() >= CAPACITY_TTL) {
                     c.pop_front();
                 }
             }
@@ -110,9 +113,12 @@ impl Client {
         }
     }
 
-    /// Link capacity (kbit/s): the best recent sample, if any.
-    pub fn capacity_kbps(&self) -> Option<f64> {
-        self.capacity.lock().iter().map(|s| s.0).reduce(f64::max)
+    /// Link capacity (kbit/s): the best recent sample, if any, and whether a frame
+    /// measured it within CAPACITY_TTL.
+    pub fn capacity_kbps(&self) -> Option<(f64, bool)> {
+        let c = self.capacity.lock();
+        let best = c.iter().map(|s| s.0).reduce(f64::max)?;
+        Some((best, c.back().is_some_and(|s| s.1.elapsed() < CAPACITY_TTL)))
     }
 
     /// Frames in flight and age of the oldest unacknowledged one.
@@ -389,5 +395,25 @@ impl Hub {
         for c in self.clients.lock().iter() {
             c.send(m());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capacity_goes_stale() {
+        let hub = Hub::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let c = hub.add_client(tx);
+        let now = Instant::now();
+        assert_eq!(c.capacity_kbps(), None);
+        c.capacity
+            .lock()
+            .push_back((5_000.0, now - Duration::from_secs(60)));
+        assert_eq!(c.capacity_kbps(), Some((5_000.0, false)));
+        c.capacity.lock().push_back((4_000.0, now));
+        assert_eq!(c.capacity_kbps(), Some((5_000.0, true)));
     }
 }

@@ -31,6 +31,8 @@ pub struct Encoder {
     pts: i64,
     /// VOXL_PSNR: (frames, sum of luma PSNR) since the last report.
     psnr: Option<(u32, f64)>,
+    /// Luma PSNR of the last encode, for `count_psnr`.
+    last_psnr: f64,
     /// SPS and PPS fields from the last keyframe, to read slice headers.
     params: crate::h264::Params,
     pub width: u32,
@@ -130,6 +132,7 @@ impl Encoder {
                 pic,
                 pts: 0,
                 psnr: psnr.then_some((0, 0.0)),
+                last_psnr: 0.0,
                 params: Default::default(),
                 width: cfg.width,
                 height: cfg.height,
@@ -185,14 +188,7 @@ impl Encoder {
                     self.params.update(&out[start..]);
                 }
             }
-            if let Some((n, sum)) = self.psnr.as_mut() {
-                *n += 1;
-                *sum += pic_out.prop.f_psnr[0];
-                if *n == 300 {
-                    log::info!("psnr Y {:.2} dB over {n} frames", *sum / *n as f64);
-                    (*n, *sum) = (0, 0.0);
-                }
-            }
+            self.last_psnr = pic_out.prop.f_psnr[0];
             if std::env::var("VOXL_DEBUG_MARKER").is_ok() {
                 log::info!(
                     "x264 out {} bytes, delayed {}, pts in {} out {}",
@@ -208,6 +204,19 @@ impl Encoder {
 }
 
 impl Encoder {
+    /// Count the last encode in VOXL_PSNR's average: once per frame viewers get, not
+    /// for one discarded and encoded again.
+    pub fn count_psnr(&mut self) {
+        if let Some((n, sum)) = self.psnr.as_mut() {
+            *n += 1;
+            *sum += self.last_psnr;
+            if *n == 300 {
+                log::info!("psnr Y {:.2} dB over {n} frames", *sum / *n as f64);
+                (*n, *sum) = (0, 0.0);
+            }
+        }
+    }
+
     /// Make x264 forget the frame it just encoded: the next one refers to the frame
     /// before. Send `skip_frame` of it instead, so the decoder's references match.
     pub fn invalidate_last(&mut self) -> bool {
