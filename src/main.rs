@@ -1,5 +1,5 @@
 //! voxl: low-latency desktop streaming (H.264 over WebSocket) for the browser, from an
-//! X11 display on Linux or the screen of a Mac.
+//! X11 display on Linux or the screen of a Mac or a Windows machine.
 
 #[cfg(target_os = "linux")]
 mod audio;
@@ -24,10 +24,14 @@ mod record;
 mod screen;
 mod server;
 mod video;
+#[cfg(windows)]
+mod win;
 
-// The macOS backend provides the same modules with the same interfaces.
+// The macOS and Windows backends provide the same modules with the same interfaces.
 #[cfg(target_os = "macos")]
 use mac::{audio, capture, desktop, input, screen};
+#[cfg(windows)]
+use win::{audio, capture, desktop, input, screen};
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -91,13 +95,15 @@ async fn run() {
     let display = std::env::var("DISPLAY")
         .ok()
         .or_else(|| a.get("display").cloned());
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     let display = a.get("display").cloned();
     #[cfg(target_os = "macos")]
     mac::init(&a);
-    // A Mac's own screen is only served locally unless --addr says otherwise; a VM's
-    // display sits behind the platform's proxy.
-    let default_addr = if cfg!(target_os = "macos") {
+    #[cfg(windows)]
+    win::init(&a);
+    // A Mac's or a PC's own screen is only served locally unless --addr says otherwise;
+    // a VM's X11 display sits behind the platform's proxy.
+    let default_addr = if cfg!(not(target_os = "linux")) {
         "127.0.0.1"
     } else {
         "0.0.0.0"
@@ -173,6 +179,9 @@ async fn run() {
     let default_scale = 1.5;
     #[cfg(target_os = "macos")]
     let default_scale = mac::capture_scale();
+    // On Windows, the display's scaling (150% -> 1.5).
+    #[cfg(windows)]
+    let default_scale = win::dpi_scale();
     let resize_scale = range_max(a.get("resize-scale"), default_scale);
     if let Err(e) = video::spawn(vcfg, hub.clone(), screen) {
         log::error!("video init failed: {e}");
@@ -196,8 +205,8 @@ async fn run() {
         if let Err(e) = corners::spawn(display.clone(), radius, named) {
             log::warn!("rounded corners unavailable: {e}");
         }
-        #[cfg(target_os = "macos")]
-        log::info!("--round-corners/--round-windows: macOS windows are already rounded");
+        #[cfg(not(target_os = "linux"))]
+        log::info!("--round-corners/--round-windows only apply to X11 desktops");
     }
     let clipboard = match desktop::spawn(display.clone(), hub.clone(), clip_mode) {
         Ok(h) => Some(h),
@@ -229,6 +238,7 @@ async fn run() {
         .get("files-root")
         .cloned()
         .or_else(|| std::env::var("HOME").ok())
+        .or_else(|| std::env::var("USERPROFILE").ok())
         .unwrap_or_else(|| "/".into());
     let root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.into());
     let files = std::sync::Arc::new(files::Files {
@@ -256,6 +266,11 @@ async fn run() {
     #[cfg(target_os = "macos")]
     let mic_sink = truthy(a.get("microphone-enabled"), false)
         .then(|| mac::mic::find_device(a.get("microphone-device").map(|s| s.as_str())))
+        .flatten();
+    // Windows: a virtual audio cable's playback side (VB-CABLE and the like).
+    #[cfg(windows)]
+    let mic_sink = truthy(a.get("microphone-enabled"), false)
+        .then(|| win::mic::find_device(a.get("microphone-device").map(|s| s.as_str())))
         .flatten();
     let mic = truthy(a.get("microphone-enabled"), false)
         .then_some(())
@@ -301,10 +316,15 @@ async fn run() {
     });
     let shutdown_hub = hub.clone();
     tokio::spawn(async move {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut term = signal(SignalKind::terminate()).unwrap();
-        let mut int = signal(SignalKind::interrupt()).unwrap();
-        tokio::select! { _ = term.recv() => {}, _ = int.recv() => {} }
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut term = signal(SignalKind::terminate()).unwrap();
+            let mut int = signal(SignalKind::interrupt()).unwrap();
+            tokio::select! { _ = term.recv() => {}, _ = int.recv() => {} }
+        }
+        #[cfg(windows)]
+        let _ = tokio::signal::ctrl_c().await;
         log::info!("shutting down");
         if let Some(tx) = shutdown_hub.input.lock().as_ref() {
             let _ = tx.send(input::InputEvent::Shutdown);

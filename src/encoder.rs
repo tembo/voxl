@@ -219,12 +219,16 @@ mod bench {
             .ok()
             .and_then(|t| t.parse().ok())
             .unwrap_or(1);
+        #[cfg(unix)]
         let cpu = || unsafe {
             let mut r: libc::rusage = std::mem::zeroed();
             libc::getrusage(libc::RUSAGE_SELF, &mut r);
             (r.ru_utime.tv_sec + r.ru_stime.tv_sec) as f64 * 1e3
                 + (r.ru_utime.tv_usec + r.ru_stime.tv_usec) as f64 / 1e3
         };
+        // Process CPU time isn't wired up on Windows; wall times still print.
+        #[cfg(windows)]
+        let cpu = || 0.0;
         for (label, hint) in [("no hints", false), ("hints", true)] {
             let mut enc = Encoder::new(&EncoderConfig {
                 width: w as u32,
