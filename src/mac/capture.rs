@@ -300,8 +300,15 @@ impl Capturer {
         Ok(())
     }
 
-    /// Convert rows [y0, y1) of the current frame into `dst`.
-    pub fn convert(&self, dst: &mut crate::convert::I420, y0: usize, y1: usize, threads: usize) {
+    /// Convert rows [y0, y1) of the current frame into `dst` (whole rows: copying NV12
+    /// costs too little to bother with columns).
+    pub fn convert(
+        &self,
+        dst: &mut crate::convert::I420,
+        (y0, y1): (usize, usize),
+        _cols: (usize, usize),
+        threads: usize,
+    ) {
         let Some(f) = &self.current else {
             return;
         };

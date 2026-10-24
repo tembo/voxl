@@ -5,8 +5,11 @@ use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+/// How long a link capacity sample stays good (`Client::capacity_kbps`).
+const CAPACITY_TTL: Duration = Duration::from_secs(20);
 
 pub enum Out {
     Bin(Bytes),
@@ -30,6 +33,9 @@ pub struct Client {
     /// Exponentially-weighted estimate of delivered bytes/sec, from acks.
     pub delivered: Mutex<RateEst>,
     pub needs_keyframe: AtomicBool,
+    /// Link capacity samples (kbit/s, when) from how much longer than a round trip
+    /// large frames took to be acknowledged: each is at most the true capacity.
+    pub capacity: Mutex<VecDeque<(f64, Instant)>>,
     /// Has received a keyframe since (re)starting video.
     pub started: AtomicBool,
     pub delay: Mutex<DelayEst>,
@@ -62,7 +68,7 @@ impl Client {
             if wrapping_le(f.id, id) {
                 acked += f.bytes;
                 if f.id == id {
-                    sample = Some(f.sent.elapsed().as_secs_f64() * 1000.0);
+                    sample = Some((f.sent.elapsed().as_secs_f64() * 1000.0, f.bytes));
                 }
                 q.pop_front();
             } else {
@@ -70,7 +76,7 @@ impl Client {
             }
         }
         drop(q);
-        if let Some(ms) = sample {
+        if let Some((ms, bytes)) = sample {
             let mut e = self.delay.lock();
             if ms < e.base_ms || e.base_at.elapsed().as_secs() >= 10 {
                 e.base_ms = ms;
@@ -78,6 +84,19 @@ impl Client {
             }
             let qd = ms - e.base_ms;
             e.queue_ms = e.queue_ms * 0.7 + qd * 0.3;
+            drop(e);
+            // A large frame's delay over the round trip is mostly its time on the wire
+            // (decoding, and queueing behind other frames, only make the estimate low:
+            // the safe side).
+            let rtt = self.min_rtt_ms.load(Ordering::Relaxed) as f64;
+            if bytes >= 32_000 && rtt > 0.0 {
+                let mut c = self.capacity.lock();
+                c.push_back((bytes as f64 * 8.0 / (ms - rtt).max(1.0), Instant::now()));
+                // The last CAPACITY_TTL of samples, and always the newest.
+                while c.len() > 32 || (c.len() > 1 && c[0].1.elapsed() >= CAPACITY_TTL) {
+                    c.pop_front();
+                }
+            }
         }
         let mut d = self.delivered.lock();
         d.bytes += acked;
@@ -92,6 +111,14 @@ impl Client {
             d.bytes = 0;
             d.window_start = Instant::now();
         }
+    }
+
+    /// Link capacity (kbit/s): the best recent sample, if any, and whether a frame
+    /// measured it within CAPACITY_TTL.
+    pub fn capacity_kbps(&self) -> Option<(f64, bool)> {
+        let c = self.capacity.lock();
+        let best = c.iter().map(|s| s.0).reduce(f64::max)?;
+        Some((best, c.back().is_some_and(|s| s.1.elapsed() < CAPACITY_TTL)))
     }
 
     /// Frames in flight and age of the oldest unacknowledged one.
@@ -232,6 +259,9 @@ pub struct Stats {
     pub refines: AtomicU64,
     pub damage_wait_us: AtomicU64,
     pub send_lat_us: AtomicU64,
+    /// Sum of the QPs of encoded stripe frames, and their count.
+    pub qp_total: AtomicU64,
+    pub qp_frames: AtomicU64,
 }
 
 pub struct Hub {
@@ -244,6 +274,13 @@ pub struct Hub {
     pub stripes: Mutex<Vec<(u32, u32)>>,
     /// Adaptive bitrate cap applied by the encoder (kbit/s).
     pub target_kbps: AtomicU32,
+    /// No viewer's acks show queueing: the link has room for a frame over budget.
+    pub link_clear: AtomicBool,
+    /// The slowest viewer's link capacity (kbit/s, `Client::capacity_kbps`), 0 until measured.
+    pub link_kbps: AtomicU32,
+    /// The encoder sent a keyframe nobody asked for (a scene change crushed to fit the
+    /// bitrate): the whole screen needs sharpening, not just what changed.
+    pub resharpen: AtomicBool,
     /// Last cursor message, replayed to new clients.
     pub cursor: Mutex<Option<Bytes>>,
     /// Wakes the capture thread (acks, joins, keyframe requests).
@@ -269,6 +306,9 @@ impl Hub {
             width: AtomicU32::new(0),
             height: AtomicU32::new(0),
             target_kbps: AtomicU32::new(0),
+            link_clear: AtomicBool::new(true),
+            link_kbps: AtomicU32::new(0),
+            resharpen: AtomicBool::new(false),
             stripes: Mutex::new(Vec::new()),
             cursor: Mutex::new(None),
             waker: Wake::new().expect("wake"),
@@ -303,6 +343,7 @@ impl Hub {
                 rate_bps: 0.0,
             }),
             needs_keyframe: AtomicBool::new(true),
+            capacity: Mutex::new(VecDeque::new()),
             started: AtomicBool::new(false),
             delay: Mutex::new(DelayEst {
                 base_ms: f64::MAX,
@@ -354,5 +395,25 @@ impl Hub {
         for c in self.clients.lock().iter() {
             c.send(m());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capacity_goes_stale() {
+        let hub = Hub::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let c = hub.add_client(tx);
+        let now = Instant::now();
+        assert_eq!(c.capacity_kbps(), None);
+        c.capacity
+            .lock()
+            .push_back((5_000.0, now - Duration::from_secs(60)));
+        assert_eq!(c.capacity_kbps(), Some((5_000.0, false)));
+        c.capacity.lock().push_back((4_000.0, now));
+        assert_eq!(c.capacity_kbps(), Some((5_000.0, true)));
     }
 }
