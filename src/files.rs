@@ -296,7 +296,6 @@ fn zip_time(t: std::time::SystemTime) -> Option<zip::DateTime> {
 }
 
 fn write_zip(dir: &Path, top: &str, out: ChunkWriter) -> zip::result::ZipResult<()> {
-    use std::os::unix::fs::PermissionsExt;
     use zip::write::SimpleFileOptions;
     let mut z = zip::ZipWriter::new_stream(out);
     let base = SimpleFileOptions::default();
@@ -331,9 +330,12 @@ fn write_zip(dir: &Path, top: &str, out: ChunkWriter) -> zip::result::ZipResult<
                 .extension()
                 .and_then(|x| x.to_str())
                 .is_some_and(|x| COMPRESSED.contains(&x.to_ascii_lowercase().as_str()));
-            let mut opts = base
-                .large_file(md.len() >= u32::MAX as u64)
-                .unix_permissions(md.permissions().mode() & 0o777);
+            let mut opts = base.large_file(md.len() >= u32::MAX as u64);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                opts = opts.unix_permissions(md.permissions().mode() & 0o777);
+            }
             opts = if stored {
                 opts.compression_method(zip::CompressionMethod::Stored)
             } else {

@@ -3,12 +3,9 @@
 use crate::capture::{Band, Capturer};
 use crate::convert::I420;
 use crate::encoder::{Encoder, EncoderConfig, Planes};
+use crate::hub::wait_any;
 use crate::hub::{Hub, Inflight, Out};
 use bytes::Bytes;
-use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-use nix::sys::time::TimeSpec;
-use nix::time::{clock_gettime, ClockId};
-use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -399,17 +396,6 @@ impl RateCtl {
     }
 }
 
-fn wait_fds(fds: &[BorrowedFd], timeout_ms: i32) {
-    let mut p: Vec<PollFd> = fds
-        .iter()
-        .map(|&fd| PollFd::new(fd, PollFlags::POLLIN))
-        .collect();
-    let _ = poll(
-        &mut p,
-        PollTimeout::try_from(timeout_ms).unwrap_or(PollTimeout::NONE),
-    );
-}
-
 /// Regional sharpening. Blocks encoded while they changed carry motion-level quality;
 /// once a block has been still for a while it is re-encoded at paint-over quality,
 /// even while other parts of the screen keep moving (a playing video would otherwise
@@ -572,7 +558,7 @@ fn capture_loop(
                 hub.target_kbps.store(rc.target as u32, Ordering::Relaxed);
             }
             had_clients = false;
-            wait_fds(&[cap.fd(), hub.wake_r.as_fd()], 500);
+            wait_any(&[cap.fd(), hub.waker.waitable()], 500);
             continue;
         }
         rc.update(&hub, &clients);
@@ -597,13 +583,16 @@ fn capture_loop(
                     .saturating_sub(last_motion.elapsed().as_millis() as u64) as i32
                     + 1
             };
-            wait_fds(&[cap.fd(), hub.wake_r.as_fd()], timeout);
+            wait_any(&[cap.fd(), hub.waker.waitable()], timeout);
             continue;
         }
         let since = last_capture.elapsed();
         if since < min_interval {
             let rem = min_interval - since;
-            wait_fds(&[hub.wake_r.as_fd()], (rem.as_micros() as i32 + 999) / 1000);
+            wait_any(
+                &[hub.waker.waitable()],
+                (rem.as_micros() as i32 + 999) / 1000,
+            );
             continue;
         }
         // Apps present a frame as a burst of puts; give the burst a moment to land so
@@ -618,7 +607,7 @@ fn capture_loop(
         }
         if !want_key && !flow_ok(&hub, interval_ms) {
             hub.stats.flow_blocked.fetch_add(1, Ordering::Relaxed);
-            wait_fds(&[cap.fd(), hub.wake_r.as_fd()], 4);
+            wait_any(&[cap.fd(), hub.waker.waitable()], 4);
             continue;
         }
         // Need a free buffer (the encoder may still hold the other).
@@ -1389,8 +1378,7 @@ fn stripe_worker(
             s.rc.spend(out.len() - HDR, fresh);
         }
         if debug {
-            let ts = clock_gettime(ClockId::CLOCK_THREAD_CPUTIME_ID).unwrap_or(TimeSpec::new(0, 0));
-            let cpu_now = ts.tv_sec() as i64 * 1_000_000 + ts.tv_nsec() as i64 / 1000;
+            let cpu_now = thread_cpu_us();
             log::info!(
                 "stripe y{} encode {} us wall, thread cpu total {} us, {} bytes",
                 s.y,
@@ -1675,6 +1663,27 @@ fn send_frame(
 }
 
 /// Debug: decode the bench loadgen marker at (300,150) and log its age.
+/// CPU time this thread has used, in microseconds.
+#[cfg(unix)]
+fn thread_cpu_us() -> i64 {
+    use nix::time::{clock_gettime, ClockId};
+    clock_gettime(ClockId::CLOCK_THREAD_CPUTIME_ID)
+        .map(|t| t.tv_sec() * 1_000_000 + t.tv_nsec() / 1000)
+        .unwrap_or(0)
+}
+
+#[cfg(windows)]
+fn thread_cpu_us() -> i64 {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    let (mut c, mut e, mut k, mut u) = Default::default();
+    let ft = |f: FILETIME| ((f.dwHighDateTime as i64) << 32 | f.dwLowDateTime as i64) / 10;
+    match unsafe { GetThreadTimes(GetCurrentThread(), &mut c, &mut e, &mut k, &mut u) } {
+        Ok(()) => ft(k) + ft(u),
+        Err(_) => 0,
+    }
+}
+
 fn marker_probe(buf: &[u8], stride: usize, what: &str) -> i64 {
     let mut v: u64 = 0;
     let (mx, my) = std::env::var("VOXL_DEBUG_MARKER")

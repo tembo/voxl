@@ -1,7 +1,7 @@
 //! Microphone: Opus packets (or raw PCM) from a browser -> a FIFO that PulseAudio reads
-//! as the VM's microphone (module-pipe-source), or on macOS an audio output device
-//! that loops back to an input (see `mac::mic`). One client holds the microphone at a
-//! time; a client that turns its microphone on takes it over.
+//! as the VM's microphone (module-pipe-source), or on macOS and Windows an audio
+//! output device that loops back to an input (see `mac::mic`, `win::mic`). One client
+//! holds the microphone at a time; a client that turns its microphone on takes it over.
 //!
 //! A writer thread feeds the FIFO a 20 ms frame on its own clock: the user's audio
 //! when there is some, silence otherwise, so apps recording the microphone never
@@ -26,7 +26,8 @@ pub enum MicMsg {
     Stop(u64),
 }
 
-#[link(name = "opus")]
+// On Windows, build.rs links the static Opus from vcpkg (a #[link] would ask for a DLL).
+#[cfg_attr(not(windows), link(name = "opus"))]
 extern "C" {
     fn opus_decoder_create(fs: i32, channels: c_int, error: *mut c_int) -> *mut c_void;
     fn opus_decode(
@@ -137,7 +138,7 @@ fn writer(path: std::ffi::CString, queue: Arc<Mutex<Queue>>) {
     }
 }
 
-/// `sink` is the FIFO's path on Linux and the output device's name on macOS.
+/// `sink` is the FIFO's path on Linux and the output device's ID on macOS and Windows.
 pub fn spawn(sink: String, hub: Arc<Hub>) -> mpsc::Sender<MicMsg> {
     let (tx, rx) = mpsc::channel::<MicMsg>();
     let queue = Arc::new(Mutex::new(Queue::default()));
@@ -147,6 +148,8 @@ pub fn spawn(sink: String, hub: Arc<Hub>) -> mpsc::Sender<MicMsg> {
         let run = move || writer(std::ffi::CString::new(sink).unwrap(), queue);
         #[cfg(target_os = "macos")]
         let run = move || crate::mac::mic::play(&sink, queue);
+        #[cfg(windows)]
+        let run = move || crate::win::mic::play(&sink, queue);
         std::thread::Builder::new()
             .name("mic-out".into())
             .spawn(run)
