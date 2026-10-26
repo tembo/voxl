@@ -60,6 +60,8 @@ pub struct Capturer {
     acc: Option<(u32, u32)>,
     mb_dirty: Vec<u8>,
     pub mb_cols: usize,
+    /// Areas (x0, y0, x1, y1) changed since the video thread last took them, for `/wait`.
+    pub changes: Vec<(u32, u32, u32, u32)>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
     last_check: Instant,
@@ -364,6 +366,7 @@ impl Capturer {
             acc: None,
             mb_dirty: vec![0; (width as usize).div_ceil(16) * (height as usize).div_ceil(16)],
             mb_cols: (width as usize).div_ceil(16),
+            changes: Vec::new(),
             stop,
             thread: Some(thread),
             last_check: Instant::now(),
@@ -411,6 +414,7 @@ impl Capturer {
                 Some((a, b)) => (a.min(y0), b.max(y1)),
                 None => (y0, y1),
             });
+            self.changes.push((x0, y0, x1, y1));
             self.damaged = true;
             self.damaged_at.get_or_insert_with(Instant::now);
         }

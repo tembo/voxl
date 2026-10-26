@@ -117,6 +117,27 @@ A recording is the H.264 voxl already sends to viewers, saved as MP4 without enc
 it again, so it costs no extra CPU. It doesn't include the cursor (viewers draw it), and
 a resize ends it.
 
+`/wait` returns when the screen settles or changes, so an agent doesn't have to sleep
+after every action and hope it was long enough:
+
+```sh
+curl localhost:6901/wait                                  # once nothing changed for 300 ms
+curl "localhost:6901/wait?idle=1000&timeout=30000"        # still for 1 s, give up after 30 s
+curl "localhost:6901/wait?change&region=0,0,800,600"      # the first change in that rectangle
+# {"changed":true,"timed_out":false,"seq":812,"waited_ms":340}
+```
+
+`idle` (ms, default 300) is how long the screen has to stay still, counted from the
+request at the earliest so an action just taken has time to show; `change` returns at
+the first change instead. `region=x,y,w,h` only watches that rectangle (to the 16-pixel
+block) and `timeout` (ms, default 10000) gives up. `changed` says whether anything
+changed while waiting. A change can land before the request does, so to wait for what an
+action caused, pass `since` the `seq` of an earlier `/wait` or the `X-Voxl-Seq` header of
+a screenshot: `/wait?change&since=812` returns at once if anything changed after it. A
+blinking text caret redraws about twice a second, so keep `idle` under 500 ms or leave
+the caret out of `region`. voxl already knows which parts of the screen change (XDamage,
+ScreenCaptureKit and DXGI report them), so waiting needs no screenshots or polling.
+
 ### macOS
 
 voxl also streams a Mac's own screen, with every feature of the Linux version

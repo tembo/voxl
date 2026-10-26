@@ -55,6 +55,8 @@ pub struct Snapshot {
     pub width: usize,
     pub height: usize,
     pub bgrx: Vec<u8>,
+    /// The latest change (`/wait`) the pixels include.
+    pub seq: u64,
 }
 
 impl Snapshot {
@@ -95,6 +97,7 @@ pub async fn screenshot(State(r): State<Arc<Recorder>>) -> Response {
     let Ok(Ok(frame)) = tokio::time::timeout(Duration::from_secs(5), rx).await else {
         return err(StatusCode::SERVICE_UNAVAILABLE, "no frame from capture");
     };
+    let seq = frame.seq;
     let png = tokio::task::spawn_blocking(move || {
         let (w, h) = (frame.width as u32, frame.height as u32);
         let mut out = Vec::new();
@@ -109,14 +112,20 @@ pub async fn screenshot(State(r): State<Arc<Recorder>>) -> Response {
     })
     .await;
     match png {
-        Ok(Ok(png)) => (
-            [
-                (header::CONTENT_TYPE, "image/png"),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            png,
-        )
-            .into_response(),
+        Ok(Ok(png)) => {
+            let mut res = (
+                [
+                    (header::CONTENT_TYPE, "image/png"),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+                png,
+            )
+                .into_response();
+            // For `/wait?change&since=`: changes after this screenshot.
+            res.headers_mut()
+                .insert("x-voxl-seq", header::HeaderValue::from(seq));
+            res
+        }
         Ok(Err(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }

@@ -99,6 +99,8 @@ pub struct Capturer {
     /// Macroblocks (16x16) touched since the last take, row-major.
     mb_dirty: Vec<u8>,
     pub mb_cols: usize,
+    /// Areas (x0, y0, x1, y1) changed since the video thread last took them, for `/wait`.
+    pub changes: Vec<(u32, u32, u32, u32)>,
 }
 
 impl Capturer {
@@ -175,6 +177,7 @@ impl Capturer {
             acc: None,
             mb_dirty: vec![0; (width as usize).div_ceil(16) * (height as usize).div_ceil(16)],
             mb_cols: (width as usize).div_ceil(16),
+            changes: Vec::new(),
         })
     }
 
@@ -205,13 +208,14 @@ impl Capturer {
                 let bot =
                     (e.area.y as i32 + e.area.height as i32).clamp(0, self.height as i32) as u32;
                 if bot > top {
-                    let x0 = (e.area.x.max(0) as usize) / 16;
-                    let x1 = ((e.area.x as i32 + e.area.width as i32).clamp(0, self.width as i32)
-                        as usize)
-                        .div_ceil(16);
+                    let left = e.area.x.max(0) as u32;
+                    let right =
+                        (e.area.x as i32 + e.area.width as i32).clamp(0, self.width as i32) as u32;
+                    let (x0, x1) = (left as usize / 16, (right as usize).div_ceil(16));
                     for row in (top as usize / 16)..(bot as usize).div_ceil(16) {
                         self.mb_dirty[row * self.mb_cols + x0..row * self.mb_cols + x1].fill(1);
                     }
+                    self.changes.push((left, top, right, bot));
                     self.acc = Some(match self.acc {
                         Some((a, b)) => (a.min(top), b.max(bot)),
                         None => (top, bot),

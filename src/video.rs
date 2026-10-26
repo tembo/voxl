@@ -112,6 +112,7 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
     let (w, h) = (cap.width, cap.height);
     hub.width.store(w, Ordering::Relaxed);
     hub.height.store(h, Ordering::Relaxed);
+    hub.activity.reset(w, h);
     log::info!(
         "capturing {}x{} @ {} fps, preset {} threads {}",
         w,
@@ -472,6 +473,11 @@ fn capture_loop(
             return Ok(());
         }
         cap.pump()?;
+        // Every change counts for /wait, whether or not anyone is watching.
+        if !cap.changes.is_empty() {
+            hub.activity.note(&cap.changes);
+            cap.changes.clear();
+        }
         hub.drain_wake();
         let snaps = std::mem::take(&mut *hub.snapshots.lock());
         if !snaps.is_empty() {
@@ -483,6 +489,7 @@ fn capture_loop(
                 width: w,
                 height: h,
                 bgrx: cap.snapshot(),
+                seq: hub.activity.seq(),
             });
             for tx in snaps {
                 let _ = tx.send(shot.clone());
