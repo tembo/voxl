@@ -262,12 +262,16 @@ impl Capturer {
     }
 
     /// The current frame as packed BGRX (`width * 4` bytes per row), for screenshots.
+    /// Ends with a round trip to the X server, so the damage for everything these pixels
+    /// show has arrived by the next pump (reading Xvfb's framebuffer directly makes no
+    /// request that would wait for it).
     pub fn snapshot(&self) -> Vec<u8> {
         let (row, h) = (self.width as usize * 4, self.height as usize);
         let mut out = Vec::with_capacity(row * h);
         for line in self.pixels().chunks_exact(self.stride).take(h) {
             out.extend_from_slice(&line[..row]);
         }
+        let _ = self.conn.get_input_focus().map(|c| c.reply());
         out
     }
 

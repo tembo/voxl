@@ -133,19 +133,21 @@ impl Activity {
 
     /// Sequence number of the latest change.
     pub fn seq(&self) -> u64 {
-        *self.seq.borrow()
+        self.map.lock().last.0
     }
 
-    /// The latest change in `region`, or anywhere.
-    fn latest(&self, region: Option<Rect>) -> Mark {
+    /// The latest change in `region` (or anywhere) and the latest sequence number,
+    /// read together: a `seq` handed out never covers a change the answer didn't see.
+    fn latest(&self, region: Option<Rect>) -> (Mark, u64) {
         let m = self.map.lock();
         let Some(r) = region else {
-            return m.last;
+            return (m.last, m.last.0);
         };
         let (c0, c1, r0, r1) = m.span(r.x, r.y, r.x.saturating_add(r.w), r.y.saturating_add(r.h));
-        (r0..r1)
+        let mark = (r0..r1)
             .flat_map(|row| &m.blocks[row * m.cols + c0..row * m.cols + c1])
-            .fold(m.reset, |a, &b| if b.0 > a.0 { b } else { a })
+            .fold(m.reset, |a, &b| if b.0 > a.0 { b } else { a });
+        (mark, m.last.0)
     }
 
     fn on_screen(&self, r: Rect) -> bool {
@@ -226,7 +228,7 @@ pub async fn wait(
     let timed_out = loop {
         // Mark the current change seen before looking, so a later one wakes us.
         rx.borrow_and_update();
-        let (seq, at) = a.latest(region);
+        let ((seq, at), _) = a.latest(region);
         let now = Instant::now();
         let done_at = if change {
             (seq > since).then_some(now)
@@ -245,12 +247,13 @@ pub async fn wait(
             _ = tokio::time::sleep_until(wake.into()) => {}
         }
     };
+    let ((latest, _), seq) = a.latest(region);
     json(
         StatusCode::OK,
         serde_json::json!({
-            "changed": a.latest(region).0 > since,
+            "changed": latest > since,
             "timed_out": timed_out,
-            "seq": a.seq(),
+            "seq": seq,
             "waited_ms": start.elapsed().as_millis() as u64,
         }),
     )
