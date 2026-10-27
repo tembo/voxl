@@ -330,16 +330,21 @@ impl Capturer {
     }
 
     /// The current frame as packed BGRX (`width * 4` bytes per row), for screenshots.
-    pub fn snapshot(&self) -> Vec<u8> {
+    pub fn snapshot(&mut self) -> Result<Vec<u8>, String> {
+        // Each frame arrives together with its changed areas, so taking them and then
+        // adopting the newest frame leaves `changes` holding the damage for exactly
+        // these pixels.
+        self.pump()?;
+        self.grab(self.full())?;
         let (w, h) = (self.width as usize, self.height as usize);
         let mut out = vec![0u8; w * h * 4];
         let Some(f) = &self.current else {
-            return out;
+            return Ok(out);
         };
         unsafe {
             let pb = f.pb;
             if CVPixelBufferGetWidth(pb) != w || CVPixelBufferGetHeight(pb) != h {
-                return out;
+                return Ok(out);
             }
             let (ys, uvs) = (
                 CVPixelBufferGetBytesPerRowOfPlane(pb, 0),
@@ -352,7 +357,7 @@ impl Capturer {
             );
             crate::convert::nv12_to_bgrx(y, ys, uv, uvs, w, h, &mut out);
         }
-        out
+        Ok(out)
     }
 
     /// Frames are NV12 here, so the BGRX debug marker probe doesn't apply.

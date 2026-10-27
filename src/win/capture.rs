@@ -400,6 +400,27 @@ impl Capturer {
             }
             std::mem::take(&mut s.rects)
         };
+        self.add_damage(rects);
+        if self.last_check.elapsed() >= Duration::from_secs(1) {
+            self.last_check = Instant::now();
+            // The display moved on the virtual desktop (another display arranged).
+            if let Some(r) = super::output().map(|o| o.rect()) {
+                let (w, h) = ((r.right - r.left) as u32, (r.bottom - r.top) as u32);
+                if (w, h) != (self.geometry.width, self.geometry.height) {
+                    log::info!("display changed; restarting capture");
+                    self.rebuild = true;
+                } else if (r.left, r.top) != (self.geometry.left, self.geometry.top) {
+                    self.geometry.left = r.left;
+                    self.geometry.top = r.top;
+                    *super::GEOMETRY.lock() = Some(self.geometry);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Record changed areas: rows and blocks for the encoder, `changes` for /wait.
+    fn add_damage(&mut self, rects: Vec<(u32, u32, u32, u32)>) {
         for (x0, y0, x1, y1) in rects {
             let (x1, y1) = (x1.min(self.width), y1.min(self.height));
             if x1 <= x0 || y1 <= y0 {
@@ -418,22 +439,6 @@ impl Capturer {
             self.damaged = true;
             self.damaged_at.get_or_insert_with(Instant::now);
         }
-        if self.last_check.elapsed() >= Duration::from_secs(1) {
-            self.last_check = Instant::now();
-            // The display moved on the virtual desktop (another display arranged).
-            if let Some(r) = super::output().map(|o| o.rect()) {
-                let (w, h) = ((r.right - r.left) as u32, (r.bottom - r.top) as u32);
-                if (w, h) != (self.geometry.width, self.geometry.height) {
-                    log::info!("display changed; restarting capture");
-                    self.rebuild = true;
-                } else if (r.left, r.top) != (self.geometry.left, self.geometry.top) {
-                    self.geometry.left = r.left;
-                    self.geometry.top = r.top;
-                    *super::GEOMETRY.lock() = Some(self.geometry);
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Take accumulated damage as a row band.
@@ -487,14 +492,24 @@ impl Capturer {
     }
 
     /// The current frame as packed BGRX (`width * 4` bytes per row), for screenshots.
-    pub fn snapshot(&self) -> Vec<u8> {
+    pub fn snapshot(&mut self) -> Result<Vec<u8>, String> {
+        // The capture thread updates the image and its changed areas together under this
+        // lock, so taking both under it leaves `changes` holding the damage for exactly
+        // these pixels.
+        let rects = {
+            let mut s = self.shared.lock();
+            let n = s.buf.len().min(self.frame.len());
+            self.frame[..n].copy_from_slice(&s.buf[..n]);
+            std::mem::take(&mut s.rects)
+        };
+        self.add_damage(rects);
         let (row, h) = (self.width as usize * 4, self.height as usize);
         let stride = self.geometry.width as usize * 4;
         let mut out = Vec::with_capacity(row * h);
         for line in self.frame.chunks_exact(stride).take(h) {
             out.extend_from_slice(&line[..row]);
         }
-        out
+        Ok(out)
     }
 
     /// The current frame as BGRX (BGRA, alpha unused) and its stride.

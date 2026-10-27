@@ -261,18 +261,34 @@ impl Capturer {
         crate::convert::convert_band(self.pixels(), self.stride, dst, y0, y1, threads);
     }
 
-    /// The current frame as packed BGRX (`width * 4` bytes per row), for screenshots.
-    /// Ends with a round trip to the X server, so the damage for everything these pixels
-    /// show has arrived by the next pump (reading Xvfb's framebuffer directly makes no
-    /// request that would wait for it).
-    pub fn snapshot(&self) -> Vec<u8> {
+    /// The current frame as packed BGRX (`width * 4` bytes per row), for screenshots,
+    /// with the damage for exactly these pixels taken into `changes`. Nothing draws while
+    /// the server is grabbed (a few ms for the copy), so a repaint can't land in the
+    /// pixels without its damage, or after them with it.
+    pub fn snapshot(&mut self) -> Result<Vec<u8>, String> {
+        self.conn.grab_server().map_err(|e| e.to_string())?;
+        let shot = self.snapshot_grabbed();
+        // Release the server even if the copy failed.
+        self.conn.ungrab_server().map_err(|e| e.to_string())?;
+        self.conn.flush().map_err(|e| e.to_string())?;
+        shot
+    }
+
+    fn snapshot_grabbed(&mut self) -> Result<Vec<u8>, String> {
+        // Damage for everything drawn before the grab arrives ahead of this reply.
+        self.conn
+            .get_input_focus()
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?;
+        self.pump()?;
+        self.grab(self.full())?;
         let (row, h) = (self.width as usize * 4, self.height as usize);
         let mut out = Vec::with_capacity(row * h);
         for line in self.pixels().chunks_exact(self.stride).take(h) {
             out.extend_from_slice(&line[..row]);
         }
-        let _ = self.conn.get_input_focus().map(|c| c.reply());
-        out
+        Ok(out)
     }
 
     /// The current frame as BGRX pixels and their stride (debug marker probe).

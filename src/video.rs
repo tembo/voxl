@@ -440,15 +440,12 @@ impl Refiner {
     }
 }
 
-/// Takes new damage from the capturer, and notes it for /wait whether or not anyone is
-/// watching.
-fn pump(cap: &mut Capturer, hub: &Hub) -> Result<(), String> {
-    cap.pump()?;
+/// Notes the damage the capturer has taken for /wait, whether or not anyone is watching.
+fn note_changes(cap: &mut Capturer, hub: &Hub) {
     if !cap.changes.is_empty() {
         hub.activity.note(&cap.changes);
         cap.changes.clear();
     }
-    Ok(())
 }
 
 fn capture_loop(
@@ -483,19 +480,18 @@ fn capture_loop(
         if hub.resize_req.lock().is_some() || cap.needs_rebuild() {
             return Ok(());
         }
-        pump(cap, &hub)?;
+        cap.pump()?;
+        note_changes(cap, &hub);
         hub.drain_wake();
         let snaps = std::mem::take(&mut *hub.snapshots.lock());
         if !snaps.is_empty() {
             // The whole current screen, whether or not anyone is watching. Damage
             // stays pending, so the stream still sends what changed. Only the pixels
             // are copied here (the framebuffer is live); the PNG is made off this thread.
-            cap.grab(cap.full())?;
-            let bgrx = cap.snapshot();
-            // These pixels may show something drawn since the pump above; take its damage
-            // now, so the screenshot's seq covers it and `/wait?change&since=` doesn't
-            // report it as new.
-            pump(cap, &hub)?;
+            // The capturer takes the damage for exactly these pixels with them, so the
+            // screenshot's seq covers what it shows and nothing drawn after it.
+            let bgrx = cap.snapshot()?;
+            note_changes(cap, &hub);
             let shot = Arc::new(crate::record::Snapshot {
                 width: w,
                 height: h,
