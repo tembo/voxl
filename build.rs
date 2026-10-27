@@ -45,12 +45,17 @@ fn unix_libs(target: &str) -> Vec<std::path::PathBuf> {
         .iter()
         .map(|l| pkg_config::probe_library(l).expect(l))
         .collect();
-    // Embed library dirs so the binary runs outside the build shell.
-    for lib in std::iter::once(&x264).chain(others.iter()) {
-        for p in &lib.link_paths {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", p.display());
-        }
+    // Embed library dirs so the binary runs outside the build shell. The link args only
+    // reach voxl's own binary, so programs that embed voxl get the dirs as DEP_VOXL_RPATH.
+    let dirs: Vec<_> = std::iter::once(&x264)
+        .chain(others.iter())
+        .flat_map(|lib| &lib.link_paths)
+        .collect();
+    for p in &dirs {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", p.display());
     }
+    let rpath = std::env::join_paths(&dirs).expect("library dirs");
+    println!("cargo:rpath={}", rpath.to_string_lossy());
     x264.include_paths
 }
 

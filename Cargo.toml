@@ -7,6 +7,8 @@ license = "MIT"
 description = "Low-latency desktop streaming for the browser: an X11 display or a Mac's screen as H.264 over a WebSocket"
 repository = "https://github.com/tembo/voxl"
 readme = "README.md"
+# Lets programs that embed voxl read DEP_VOXL_RPATH (see build.rs).
+links = "voxl"
 keywords = ["remote-desktop", "streaming", "x11", "h264", "websocket"]
 categories = ["command-line-utilities", "multimedia::video"]
 # What `cargo publish` uploads: the sources build.rs and the server need, nothing from bench/.
