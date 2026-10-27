@@ -99,6 +99,8 @@ pub struct Capturer {
     /// Macroblocks (16x16) touched since the last take, row-major.
     mb_dirty: Vec<u8>,
     pub mb_cols: usize,
+    /// Areas (x0, y0, x1, y1) changed since the video thread last took them, for `/wait`.
+    pub changes: Vec<(u32, u32, u32, u32)>,
 }
 
 impl Capturer {
@@ -175,6 +177,7 @@ impl Capturer {
             acc: None,
             mb_dirty: vec![0; (width as usize).div_ceil(16) * (height as usize).div_ceil(16)],
             mb_cols: (width as usize).div_ceil(16),
+            changes: Vec::new(),
         })
     }
 
@@ -205,13 +208,14 @@ impl Capturer {
                 let bot =
                     (e.area.y as i32 + e.area.height as i32).clamp(0, self.height as i32) as u32;
                 if bot > top {
-                    let x0 = (e.area.x.max(0) as usize) / 16;
-                    let x1 = ((e.area.x as i32 + e.area.width as i32).clamp(0, self.width as i32)
-                        as usize)
-                        .div_ceil(16);
+                    let left = e.area.x.max(0) as u32;
+                    let right =
+                        (e.area.x as i32 + e.area.width as i32).clamp(0, self.width as i32) as u32;
+                    let (x0, x1) = (left as usize / 16, (right as usize).div_ceil(16));
                     for row in (top as usize / 16)..(bot as usize).div_ceil(16) {
                         self.mb_dirty[row * self.mb_cols + x0..row * self.mb_cols + x1].fill(1);
                     }
+                    self.changes.push((left, top, right, bot));
                     self.acc = Some(match self.acc {
                         Some((a, b)) => (a.min(top), b.max(bot)),
                         None => (top, bot),
@@ -257,14 +261,34 @@ impl Capturer {
         crate::convert::convert_band(self.pixels(), self.stride, dst, y0, y1, threads);
     }
 
-    /// The current frame as packed BGRX (`width * 4` bytes per row), for screenshots.
-    pub fn snapshot(&self) -> Vec<u8> {
+    /// The current frame as packed BGRX (`width * 4` bytes per row), for screenshots,
+    /// with the damage for exactly these pixels taken into `changes`. Nothing draws while
+    /// the server is grabbed (a few ms for the copy), so a repaint can't land in the
+    /// pixels without its damage, or after them with it.
+    pub fn snapshot(&mut self) -> Result<Vec<u8>, String> {
+        self.conn.grab_server().map_err(|e| e.to_string())?;
+        let shot = self.snapshot_grabbed();
+        // Release the server even if the copy failed.
+        self.conn.ungrab_server().map_err(|e| e.to_string())?;
+        self.conn.flush().map_err(|e| e.to_string())?;
+        shot
+    }
+
+    fn snapshot_grabbed(&mut self) -> Result<Vec<u8>, String> {
+        // Damage for everything drawn before the grab arrives ahead of this reply.
+        self.conn
+            .get_input_focus()
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?;
+        self.pump()?;
+        self.grab(self.full())?;
         let (row, h) = (self.width as usize * 4, self.height as usize);
         let mut out = Vec::with_capacity(row * h);
         for line in self.pixels().chunks_exact(self.stride).take(h) {
             out.extend_from_slice(&line[..row]);
         }
-        out
+        Ok(out)
     }
 
     /// The current frame as BGRX pixels and their stride (debug marker probe).

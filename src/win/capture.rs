@@ -60,6 +60,8 @@ pub struct Capturer {
     acc: Option<(u32, u32)>,
     mb_dirty: Vec<u8>,
     pub mb_cols: usize,
+    /// Areas (x0, y0, x1, y1) changed since the video thread last took them, for `/wait`.
+    pub changes: Vec<(u32, u32, u32, u32)>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
     last_check: Instant,
@@ -364,6 +366,7 @@ impl Capturer {
             acc: None,
             mb_dirty: vec![0; (width as usize).div_ceil(16) * (height as usize).div_ceil(16)],
             mb_cols: (width as usize).div_ceil(16),
+            changes: Vec::new(),
             stop,
             thread: Some(thread),
             last_check: Instant::now(),
@@ -397,23 +400,7 @@ impl Capturer {
             }
             std::mem::take(&mut s.rects)
         };
-        for (x0, y0, x1, y1) in rects {
-            let (x1, y1) = (x1.min(self.width), y1.min(self.height));
-            if x1 <= x0 || y1 <= y0 {
-                continue;
-            }
-            DAMAGE_EVENTS.fetch_add(1, Ordering::Relaxed);
-            let (c0, c1) = (x0 as usize / 16, (x1 as usize).div_ceil(16));
-            for row in (y0 as usize / 16)..(y1 as usize).div_ceil(16) {
-                self.mb_dirty[row * self.mb_cols + c0..row * self.mb_cols + c1].fill(1);
-            }
-            self.acc = Some(match self.acc {
-                Some((a, b)) => (a.min(y0), b.max(y1)),
-                None => (y0, y1),
-            });
-            self.damaged = true;
-            self.damaged_at.get_or_insert_with(Instant::now);
-        }
+        self.add_damage(rects);
         if self.last_check.elapsed() >= Duration::from_secs(1) {
             self.last_check = Instant::now();
             // The display moved on the virtual desktop (another display arranged).
@@ -430,6 +417,28 @@ impl Capturer {
             }
         }
         Ok(())
+    }
+
+    /// Record changed areas: rows and blocks for the encoder, `changes` for /wait.
+    fn add_damage(&mut self, rects: Vec<(u32, u32, u32, u32)>) {
+        for (x0, y0, x1, y1) in rects {
+            let (x1, y1) = (x1.min(self.width), y1.min(self.height));
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            DAMAGE_EVENTS.fetch_add(1, Ordering::Relaxed);
+            let (c0, c1) = (x0 as usize / 16, (x1 as usize).div_ceil(16));
+            for row in (y0 as usize / 16)..(y1 as usize).div_ceil(16) {
+                self.mb_dirty[row * self.mb_cols + c0..row * self.mb_cols + c1].fill(1);
+            }
+            self.acc = Some(match self.acc {
+                Some((a, b)) => (a.min(y0), b.max(y1)),
+                None => (y0, y1),
+            });
+            self.changes.push((x0, y0, x1, y1));
+            self.damaged = true;
+            self.damaged_at.get_or_insert_with(Instant::now);
+        }
     }
 
     /// Take accumulated damage as a row band.
@@ -483,14 +492,24 @@ impl Capturer {
     }
 
     /// The current frame as packed BGRX (`width * 4` bytes per row), for screenshots.
-    pub fn snapshot(&self) -> Vec<u8> {
+    pub fn snapshot(&mut self) -> Result<Vec<u8>, String> {
+        // The capture thread updates the image and its changed areas together under this
+        // lock, so taking both under it leaves `changes` holding the damage for exactly
+        // these pixels.
+        let rects = {
+            let mut s = self.shared.lock();
+            let n = s.buf.len().min(self.frame.len());
+            self.frame[..n].copy_from_slice(&s.buf[..n]);
+            std::mem::take(&mut s.rects)
+        };
+        self.add_damage(rects);
         let (row, h) = (self.width as usize * 4, self.height as usize);
         let stride = self.geometry.width as usize * 4;
         let mut out = Vec::with_capacity(row * h);
         for line in self.frame.chunks_exact(stride).take(h) {
             out.extend_from_slice(&line[..row]);
         }
-        out
+        Ok(out)
     }
 
     /// The current frame as BGRX (BGRA, alpha unused) and its stride.

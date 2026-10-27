@@ -68,6 +68,9 @@ pub fn router(state: AppState) -> Router {
         .route("/record/start", axum::routing::post(record::start))
         .route("/record/stop", axum::routing::post(record::stop))
         .with_state(state.recorder.clone());
+    let wait_routes = Router::new()
+        .route("/wait", get(crate::wait::wait))
+        .with_state(state.hub.clone());
     Router::new()
         .route("/", asset!("index.html", "text/html; charset=utf-8"))
         .route(
@@ -86,6 +89,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
         .merge(file_routes)
         .merge(record_routes)
+        .merge(wait_routes)
 }
 
 async fn stats(State(s): State<AppState>) -> Response {

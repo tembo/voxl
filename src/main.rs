@@ -24,6 +24,7 @@ mod record;
 mod screen;
 mod server;
 mod video;
+mod wait;
 #[cfg(windows)]
 mod win;
 

@@ -112,6 +112,7 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
     let (w, h) = (cap.width, cap.height);
     hub.width.store(w, Ordering::Relaxed);
     hub.height.store(h, Ordering::Relaxed);
+    hub.activity.reset(w, h);
     log::info!(
         "capturing {}x{} @ {} fps, preset {} threads {}",
         w,
@@ -439,6 +440,14 @@ impl Refiner {
     }
 }
 
+/// Notes the damage the capturer has taken for /wait, whether or not anyone is watching.
+fn note_changes(cap: &mut Capturer, hub: &Hub) {
+    if !cap.changes.is_empty() {
+        hub.activity.note(&cap.changes);
+        cap.changes.clear();
+    }
+}
+
 fn capture_loop(
     cap: &mut Capturer,
     cfg: VideoConfig,
@@ -472,17 +481,22 @@ fn capture_loop(
             return Ok(());
         }
         cap.pump()?;
+        note_changes(cap, &hub);
         hub.drain_wake();
         let snaps = std::mem::take(&mut *hub.snapshots.lock());
         if !snaps.is_empty() {
             // The whole current screen, whether or not anyone is watching. Damage
             // stays pending, so the stream still sends what changed. Only the pixels
             // are copied here (the framebuffer is live); the PNG is made off this thread.
-            cap.grab(cap.full())?;
+            // The capturer takes the damage for exactly these pixels with them, so the
+            // screenshot's seq covers what it shows and nothing drawn after it.
+            let bgrx = cap.snapshot()?;
+            note_changes(cap, &hub);
             let shot = Arc::new(crate::record::Snapshot {
                 width: w,
                 height: h,
-                bgrx: cap.snapshot(),
+                bgrx,
+                seq: hub.activity.seq(),
             });
             for tx in snaps {
                 let _ = tx.send(shot.clone());
