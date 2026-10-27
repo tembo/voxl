@@ -20,6 +20,11 @@ include = [
 	"/LICENSE",
 ]
 
+# The server, as a library for programs that embed it (the Tembo CLI's `tembo voxl`).
+[lib]
+name = "voxl"
+path = "src/lib.rs"
+
 [[bin]]
 name = "voxl"
 path = "src/main.rs"
