@@ -3,6 +3,12 @@
 // serial (u32), then RGBA.
 import type { App } from './app';
 
+// On-screen cursor size bounds in CSS pixels, applied to the image's longer side.
+// 24 is the standard pointer size (Xcursor's default), so a desktop scaled down
+// into a small window (an embedded sidebar) keeps a normal-sized pointer.
+const MIN_CURSOR_PX = 24;
+const MAX_CURSOR_PX = 128;
+
 export function createCursor(app: App) {
 	let msg: ArrayBuffer | null = null;
 	const scaled = document.createElement('canvas');
@@ -28,9 +34,14 @@ export function createCursor(app: App) {
 				0,
 				0
 			);
-		// Cursor images are in desktop pixels; show them at the on-screen scale.
+		// Cursor images are in desktop pixels; show them at the on-screen scale, but
+		// never smaller than a normal pointer.
 		const dpr = window.devicePixelRatio || 1;
-		const s = Math.min(app.view.scale, 128 / Math.max(w, h));
+		const size = Math.max(w, h);
+		const s = Math.min(
+			Math.max(app.view.scale, MIN_CURSOR_PX / size),
+			MAX_CURSOR_PX / size
+		);
 		const cw = Math.max(1, Math.round(w * s)),
 			ch = Math.max(1, Math.round(h * s));
 		const dpw = Math.max(1, Math.round(cw * dpr)),
