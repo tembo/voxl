@@ -203,15 +203,24 @@ async fn collect(
         .map_err(|e| e.to_string())?
 }
 
+/// How long `GET /record?seconds=` records: `secs`, at most `max`. None unless positive.
+fn record_len(secs: f64, max: Duration) -> Option<Duration> {
+    if secs.is_nan() || secs <= 0.0 {
+        return None;
+    }
+    // Cap before converting: from_secs_f64 panics on infinite or huge values, and
+    // with panic = "abort" that would take the whole server down.
+    Some(Duration::from_secs_f64(secs.min(max.as_secs_f64())))
+}
+
 pub async fn record(
     State(r): State<Arc<Recorder>>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let secs: f64 = q.get("seconds").and_then(|s| s.parse().ok()).unwrap_or(5.0);
-    if secs.is_nan() || secs <= 0.0 {
+    let Some(len) = record_len(secs, r.max) else {
         return err(StatusCode::BAD_REQUEST, "seconds must be positive");
-    }
-    let len = Duration::from_secs_f64(secs).min(r.max);
+    };
     // The deadline ends it; the stop side is never used.
     let (_keep, stop) = oneshot::channel();
     let done = match begin(&r, stop, len) {
@@ -270,5 +279,21 @@ pub async fn stop(
         Ok(Ok(mp4)) => video(mp4),
         Ok(Err(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_len_is_positive_and_capped() {
+        let max = Duration::from_secs(300);
+        assert_eq!(record_len(2.5, max), Some(Duration::from_millis(2500)));
+        assert_eq!(record_len(1e100, max), Some(max));
+        assert_eq!(record_len(f64::INFINITY, max), Some(max));
+        assert_eq!(record_len(0.0, max), None);
+        assert_eq!(record_len(-1.0, max), None);
+        assert_eq!(record_len(f64::NAN, max), None);
     }
 }
