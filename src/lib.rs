@@ -162,6 +162,8 @@ async fn serve(a: HashMap<String, String>) {
         // threads cost ~3x the CPU on desktop content, so this saves 20-55% CPU, but
         // small updates encode a few ms slower on one thread.
         adaptive_threads: truthy(a.get("adaptive-threads"), false),
+        // A viewer that can't keep up gets its own stream rather than slowing everyone's.
+        slow_tier: truthy(a.get("slow-viewer-stream"), true),
         coalesce: std::time::Duration::from_micros(range_max(a.get("coalesce-us"), 0.0) as u64),
     };
     let clip = a

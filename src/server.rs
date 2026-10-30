@@ -104,7 +104,7 @@ async fn stats(State(s): State<AppState>) -> Response {
         .map(|c| {
             let (n, age) = c.backlog();
             serde_json::json!({"id": c.id, "video": c.video.load(Ordering::Relaxed), "inflight": n, "oldest_ms": age,
-                "min_rtt_ms": c.min_rtt_ms.load(Ordering::Relaxed), "queue_ms": c.delay.lock().queue_ms as u64, "delivered_kbps": (c.delivered.lock().rate_bps / 1000.0) as u64})
+                "min_rtt_ms": c.min_rtt_ms.load(Ordering::Relaxed), "queue_ms": c.delay.lock().queue_ms as u64, "delivered_kbps": (c.delivered.lock().rate_bps / 1000.0) as u64, "tier": c.tier.load(Ordering::Relaxed)})
         })
         .collect();
     let body = serde_json::json!({
@@ -118,7 +118,9 @@ async fn stats(State(s): State<AppState>) -> Response {
         "paintovers": st.paintovers.load(Ordering::Relaxed),
         "keyframes": st.keyframes.load(Ordering::Relaxed),
         "refines": st.refines.load(Ordering::Relaxed),
-        "target_kbps": s.hub.target_kbps.load(Ordering::Relaxed),
+        "target_kbps": s.hub.target_kbps[0].load(Ordering::Relaxed),
+        // The slow tier's (see video::Tiering); 0 while no viewer needs it.
+        "slow_target_kbps": s.hub.target_kbps[1].load(Ordering::Relaxed),
         "damage_events": crate::capture::DAMAGE_EVENTS.load(Ordering::Relaxed),
         "damage_wait_us_total": st.damage_wait_us.load(Ordering::Relaxed),
         "send_lat_us_total": st.send_lat_us.load(Ordering::Relaxed),
