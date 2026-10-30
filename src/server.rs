@@ -22,6 +22,8 @@ pub struct AppState {
     pub mic: Option<std::sync::mpsc::Sender<crate::mic::MicMsg>>,
     /// Clients may resize the desktop to their window (--enable-resize).
     pub resize: bool,
+    /// Viewers only watch: input, clipboard writes and the microphone are refused (--read-only).
+    pub read_only: bool,
     pub recorder: Arc<crate::record::Recorder>,
 }
 
@@ -182,7 +184,7 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
         match msg {
             Message::Text(t) => handle_text(&s, &client, t.as_str(), &mut rtts),
             // 0x11: clipboard image (PNG) pasted on the client.
-            Message::Binary(b) if b.first() == Some(&0x11) && b.len() > 1 => {
+            Message::Binary(b) if b.first() == Some(&0x11) && b.len() > 1 && !s.read_only => {
                 if let Some(tx) = s.hub.input.lock().as_ref() {
                     let _ = tx.send(InputEvent::Clipboard(crate::desktop::ClipContent::Image(
                         b[1..].to_vec(),
@@ -222,6 +224,11 @@ fn num<T: std::str::FromStr>(it: &mut std::str::Split<'_, char>) -> Option<T> {
 
 fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collections::VecDeque<u32>) {
     let (cmd, rest) = t.split_once(',').unwrap_or((t, ""));
+    // --read-only: drop every command that changes the desktop, right where the
+    // others are applied, so a client that ignores the hello flag cannot drive it.
+    if s.read_only && matches!(cmd, "m" | "b" | "s" | "sp" | "k" | "r" | "c" | "mi") {
+        return;
+    }
     let input = |ev: InputEvent| {
         if let Some(tx) = s.hub.input.lock().as_ref() {
             let _ = tx.send(ev);

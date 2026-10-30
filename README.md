@@ -98,6 +98,7 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 | `--stripes`                                                    | `1`                                | encode the screen as N independent horizontal streams (experimental)              |
 | `--scroll-px-per-notch`                                        | `180`                              | desktop pixels one wheel notch scrolls (calibrates smooth scrolling)              |
 | `--file-transfers`                                             | `upload,download`                  | `upload`, `download`, both, or `none`                                             |
+| `--read-only`                                                  | `false`                            | viewers watch without driving: input, clipboard writes, the microphone and uploads are refused |
 | `--files-root`                                                 | `$HOME`                            | folder the Files panel can see; nothing outside it is reachable                   |
 | `--upload-dir`                                                 | `Downloads`                        | folder (under the root) the panel opens and uploads into; created on first upload |
 | `--max-upload-mb`                                              | `0` (no limit)                     | largest accepted upload                                                           |

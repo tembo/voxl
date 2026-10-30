@@ -1,6 +1,6 @@
 // Main thread: layout, input capture, cursor, clipboard, files, microphone and audio.
 // Video decode/paint and the socket live in the worker (worker.ts).
-import { cmd } from '../protocol';
+import { Bin, cmd } from '../protocol';
 import type { FromWorker, ToWorker } from '../protocol';
 import type { App } from './app';
 import { el } from './app';
@@ -14,6 +14,17 @@ import { setupPointer } from './pointer';
 import { createResize } from './resize';
 import { setupToolbar } from './toolbar';
 import { createVideo } from './video';
+
+/**
+ * Commands that act on the desktop. A read-only viewer does not send them: the
+ * server drops them as well, so a page that ignores the hello flag cannot drive
+ * the desktop either, and this keeps the pointer and the caret out of the way.
+ */
+const INPUT_COMMANDS = new Set(['m', 'b', 'k', 's', 'sp', 'r', 'c', 'mi']);
+
+function blocksInput(app: App, command: string): boolean {
+	return app.readOnly && INPUT_COMMANDS.has(command.split(',')[0]);
+}
 
 function main() {
 	const canvas = el<HTMLCanvasElement>('screen');
@@ -38,8 +49,11 @@ function main() {
 	const app: App = {
 		worker,
 		post,
-		send: (d) => post({ t: 'send', d }),
+		send: (d) => {
+			if (!blocksInput(app, d)) post({ t: 'send', d });
+		},
 		sendBin: (type, bytes) => {
+			if (app.readOnly && type === Bin.ClipImageUp) return;
 			const msg = new Uint8Array(bytes.byteLength + 1);
 			msg[0] = type;
 			msg.set(bytes, 1);
@@ -50,6 +64,7 @@ function main() {
 		tools: el('tools'),
 		isMac: /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent),
 		remoteMac: false,
+		readOnly: false,
 		inIframe: window !== window.top,
 		desk: { w: 0, h: 0 },
 		view: { scale: 1 },
@@ -110,10 +125,12 @@ function main() {
 				app.desk.w = m.w;
 				app.desk.h = m.h;
 				app.remoteMac = m.os === 'macos';
+				app.readOnly = !!m.readOnly;
+				app.tools.classList.toggle('read-only', app.readOnly);
 				video.build(m.stripes && m.stripes.length ? m.stripes : [[0, m.h]]);
 				video.layout();
 				files.setup(m.files);
-				mic.setup(!!m.mic);
+				mic.setup(!!m.mic && !app.readOnly);
 				resize.setup(m.resize);
 				statusEl.style.display = 'none';
 				break;
