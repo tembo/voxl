@@ -1,7 +1,7 @@
 [package]
 # `voxl` on crates.io belongs to an unrelated crate; the binary is still `voxl`.
 name = "voxl-server"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Low-latency desktop streaming for the browser: an X11 display or a Mac's screen as H.264 over a WebSocket"
