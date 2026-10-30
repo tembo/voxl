@@ -335,6 +335,11 @@ async fn serve(a: HashMap<String, String>) {
             hub.clone(),
             std::time::Duration::from_secs_f64(range_max(a.get("max-record-seconds"), 300.0)),
         ),
+        // --title: the browser tab's title.
+        index: server::index_html(
+            a.get("title")
+                .map_or("Voxl Computer Stream", |t| t.as_str()),
+        ),
     };
     let app = server::router(state);
     let listener = tokio::net::TcpListener::bind((addr.as_str(), port))

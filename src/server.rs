@@ -8,6 +8,7 @@ use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use bytes::Bytes;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,6 +26,36 @@ pub struct AppState {
     /// Viewers only watch: input, clipboard writes and the microphone are refused (--read-only).
     pub read_only: bool,
     pub recorder: Arc<crate::record::Recorder>,
+    /// The web client's page, with its title filled in (`index_html`).
+    pub index: Bytes,
+}
+
+/// The web client's page, titled `title` (--title): the browser tab, and the name of
+/// the app if a viewer installs it.
+pub fn index_html(title: &str) -> Bytes {
+    let mut escaped = String::with_capacity(title.len());
+    for c in title.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            c => escaped.push(c),
+        }
+    }
+    Bytes::from(include_str!("../web/index.html").replace("{{title}}", &escaped))
+}
+
+async fn index(State(s): State<AppState>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        s.index,
+    )
+        .into_response()
 }
 
 macro_rules! asset {
@@ -74,11 +105,8 @@ pub fn router(state: AppState) -> Router {
         .route("/wait", get(crate::wait::wait))
         .with_state(state.hub.clone());
     Router::new()
-        .route("/", asset!("index.html", "text/html; charset=utf-8"))
-        .route(
-            "/index.html",
-            asset!("index.html", "text/html; charset=utf-8"),
-        )
+        .route("/", get(index))
+        .route("/index.html", get(index))
         .route("/client.js", bundled!("client.js"))
         .route("/worker.js", bundled!("worker.js"))
         .route("/audio.js", bundled!("audio.js"))
@@ -393,6 +421,7 @@ mod tests {
             resize: true,
             read_only,
             recorder: crate::record::Recorder::new(hub.clone(), Duration::from_secs(1)),
+            index: Bytes::new(),
         };
         let (tx, _rx) = mpsc::unbounded_channel();
         let client = hub.add_client(tx);

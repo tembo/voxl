@@ -5,8 +5,9 @@
 		<meta
 			name="viewport"
 			content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-		<meta name="application-name" content="Tembo Computer" />
-		<meta name="apple-mobile-web-app-title" content="Tembo Computer" />
+		<!-- The server fills in the title (index_html in src/server.rs). -->
+		<meta name="application-name" content="{{title}}" />
+		<meta name="apple-mobile-web-app-title" content="{{title}}" />
 		<link rel="icon" type="image/x-icon" href="favicon.ico" />
 		<link
 			rel="preload"
@@ -14,7 +15,7 @@
 			as="font"
 			type="font/woff2"
 			crossorigin />
-		<title>Tembo Computer</title>
+		<title>{{title}}</title>
 		<style>
 			/* Inter (latin subset of the variable font), as used by the Tembo app. */
 			@font-face {
