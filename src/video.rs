@@ -246,7 +246,8 @@ impl RateCtl {
     fn seeded(max: f64, min: f64, kbps: f64) -> Self {
         let mut rc = RateCtl::new(max, min);
         if kbps > 0.0 {
-            rc.target = (kbps * 0.85).clamp(min, max);
+            // Not clamp: a ceiling set below the default floor (--max-kbps=1000) is allowed.
+            rc.target = (kbps * 0.85).max(min).min(max);
             rc.ceiling = kbps;
             rc.ceiling_at = Instant::now();
             rc.slow_start = false;
@@ -1668,6 +1669,12 @@ mod tests {
         assert!((slow_rc.target - 2550.0).abs() < 1.0);
         // The main stream ramps up again rather than staying at the slow viewer's rate.
         assert!(tiers[MAIN as usize].as_ref().unwrap().rc.slow_start);
+    }
+
+    #[test]
+    fn seeds_within_a_ceiling_below_the_floor() {
+        let rc = RateCtl::seeded(1000.0, 2000.0, 3000.0);
+        assert_eq!(rc.target, 1000.0);
     }
 
     #[test]
