@@ -1732,7 +1732,7 @@ mod tests {
         evaluate(&mut tiering, &[slow.clone(), fast], &mut tiers, SEEN_MIN);
         assert_eq!(slow.tier.load(Ordering::Relaxed), SLOW);
         slow.started.store(true, Ordering::Relaxed);
-        evaluate(&mut tiering, &[slow.clone()], &mut tiers, 1);
+        evaluate(&mut tiering, std::slice::from_ref(&slow), &mut tiers, 1);
         assert_eq!(slow.tier.load(Ordering::Relaxed), MAIN);
         assert!(tiers[SLOW as usize].is_none());
         // At the bitrate its own link was found to carry.
