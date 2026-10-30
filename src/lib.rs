@@ -246,6 +246,10 @@ async fn serve(a: HashMap<String, String>) {
         audio::spawn(dev, br, hub.clone());
     }
 
+    // --read-only: the viewer watches the desktop, it does not drive it. Input,
+    // clipboard writes, the microphone and uploads are refused; the page hides the
+    // controls that would send them.
+    let read_only = truthy(a.get("read-only"), false);
     // --file-transfers=upload,download (as in selkies); "none" turns both off.
     let transfers = a
         .get("file-transfers")
@@ -260,7 +264,8 @@ async fn serve(a: HashMap<String, String>) {
     let root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.into());
     let files = std::sync::Arc::new(files::Files {
         root,
-        upload: transfers.split(',').any(|t| t.trim() == "upload"),
+        // Uploading writes to the desktop, so a read-only viewer does not get it.
+        upload: !read_only && transfers.split(',').any(|t| t.trim() == "upload"),
         download: transfers.split(',').any(|t| t.trim() == "download"),
         default_dir: a
             .get("upload-dir")
@@ -298,6 +303,9 @@ async fn serve(a: HashMap<String, String>) {
         extra.insert("os".into(), std::env::consts::OS.into());
         extra.insert("audio".into(), audio_on.into());
         extra.insert("mic".into(), mic.is_some().into());
+        if read_only {
+            extra.insert("readOnly".into(), true.into());
+        }
         extra.insert(
             "files".into(),
             serde_json::json!({"upload": files.upload, "download": files.download, "dir": files.default_dir}),
@@ -316,6 +324,7 @@ async fn serve(a: HashMap<String, String>) {
         files,
         mic,
         resize: resize_on,
+        read_only,
         // GET /screenshot, /record; --max-record-seconds caps a recording's length.
         recorder: record::Recorder::new(
             hub.clone(),

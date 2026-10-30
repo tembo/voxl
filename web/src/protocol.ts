@@ -41,6 +41,8 @@ export interface Hello {
 	mic?: boolean;
 	stripes?: Stripe[];
 	files?: FilesConfig;
+	/** The server only shows the desktop: the viewer cannot send input. */
+	readOnly?: boolean;
 	/** Dynamic resolution: desktop pixels per CSS pixel of the viewer's window. */
 	resize?: { scale: number };
 }

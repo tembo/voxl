@@ -203,6 +203,10 @@
 			#tools.mic #mic-btn {
 				display: inline-grid !important;
 			}
+			/* Read-only: nothing on the desktop accepts what the keyboard would send. */
+			#tools.read-only #kb-btn {
+				display: none !important;
+			}
 			/* While the microphone is live the toolbar stays up as a recording indicator. */
 			#tools.mic-on {
 				opacity: 1;
