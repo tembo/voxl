@@ -78,32 +78,38 @@ Start Xvfb with `-shmem` for zero-copy capture, and use the patched Xvfb
 (`nix-build -E 'with import <nixpkgs> {}; callPackage ./xvfb.nix {}'`) for smooth
 scrolling. voxl accepts selkies' command-line flags; other selkies flags are ignored.
 
-| Flag                                                           | Default                            |                                                                                   |
-| -------------------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------- |
-| `--addr`, `--port`                                             | `0.0.0.0`, `6901`                  | listen address                                                                    |
-| `--framerate`                                                  | `60`                               | max frames per second (`60-60` style ranges accepted)                             |
-| `--preset`                                                     | `ultrafast`                        | x264 preset                                                                       |
-| `--encoder-threads`                                            | `min(4, ncpu/4)`                   | x264 sliced threads                                                               |
-| `--crf`                                                        | `24`                               | base quality                                                                      |
-| `--max-kbps` / `--video-bitrate`                               | `30000`                            | adaptive bitrate ceiling                                                          |
-| `--min-kbps`                                                   | `2000`                             | adaptive bitrate floor                                                            |
-| `--paintover-crf`, `--paintover-burst`, `--paintover-delay-ms` | `16`, `3`, `150`                   | sharpening when the screen goes still                                             |
-| `--enable-clipboard`                                           | `true`                             | `true`, `in`, `out` or `false`                                                    |
-| `--audio-enabled`, `--audio-device-name`, `--audio-bitrate`    | `true`, `output.monitor`, `128000` | desktop audio                                                                     |
-| `--enable-resize`, `--resize-scale`                            | `false`, `1.5`                     | desktop follows the viewer's window; desktop pixels per CSS pixel                 |
-| `--microphone-enabled`, `--microphone-fifo`                    | `false`, `/tmp/voxl-mic.fifo`      | browser microphone into the FIFO a PulseAudio pipe source reads                   |
-| `--round-corners`                                              | `0` (off)                          | corner radius in pixels for top-level windows                                     |
-| `--round-windows`                                              | none                               | `title:radius,...` rounds windows with that title, docks included                 |
-| `--adaptive-threads`                                           | `false`                            | encode on one thread, fanning out only under sustained heavy motion               |
-| `--stripes`                                                    | `1`                                | encode the screen as N independent horizontal streams (experimental)              |
-| `--scroll-px-per-notch`                                        | `180`                              | desktop pixels one wheel notch scrolls (calibrates smooth scrolling)              |
-| `--file-transfers`                                             | `upload,download`                  | `upload`, `download`, both, or `none`                                             |
+| Flag                                                           | Default                            |                                                                                                |
+| -------------------------------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `--addr`, `--port`                                             | `0.0.0.0`, `6901`                  | listen address                                                                                 |
+| `--framerate`                                                  | `60`                               | max frames per second (`60-60` style ranges accepted)                                          |
+| `--preset`                                                     | `ultrafast`                        | x264 preset                                                                                    |
+| `--encoder-threads`                                            | `min(4, ncpu/4)`                   | x264 sliced threads                                                                            |
+| `--crf`                                                        | `24`                               | base quality                                                                                   |
+| `--max-kbps` / `--video-bitrate`                               | `30000`                            | adaptive bitrate ceiling                                                                       |
+| `--min-kbps`                                                   | `2000`                             | adaptive bitrate floor                                                                         |
+| `--slow-viewer-stream`                                         | `true`                             | a viewer that can't keep up gets its own stream instead of slowing everyone's                  |
+| `--paintover-crf`, `--paintover-burst`, `--paintover-delay-ms` | `16`, `3`, `150`                   | sharpening when the screen goes still                                                          |
+| `--enable-clipboard`                                           | `true`                             | `true`, `in`, `out` or `false`                                                                 |
+| `--audio-enabled`, `--audio-device-name`, `--audio-bitrate`    | `true`, `output.monitor`, `128000` | desktop audio                                                                                  |
+| `--enable-resize`, `--resize-scale`                            | `false`, `1.5`                     | desktop follows the viewer's window; desktop pixels per CSS pixel                              |
+| `--microphone-enabled`, `--microphone-fifo`                    | `false`, `/tmp/voxl-mic.fifo`      | browser microphone into the FIFO a PulseAudio pipe source reads                                |
+| `--round-corners`                                              | `0` (off)                          | corner radius in pixels for top-level windows                                                  |
+| `--round-windows`                                              | none                               | `title:radius,...` rounds windows with that title, docks included                              |
+| `--adaptive-threads`                                           | `false`                            | encode on one thread, fanning out only under sustained heavy motion                            |
+| `--stripes`                                                    | `1`                                | encode the screen as N independent horizontal streams (experimental)                           |
+| `--scroll-px-per-notch`                                        | `180`                              | desktop pixels one wheel notch scrolls (calibrates smooth scrolling)                           |
+| `--file-transfers`                                             | `upload,download`                  | `upload`, `download`, both, or `none`                                                          |
 | `--read-only`                                                  | `false`                            | viewers watch without driving: input, clipboard writes, the microphone and uploads are refused |
-| `--files-root`                                                 | `$HOME`                            | folder the Files panel can see; nothing outside it is reachable                   |
-| `--upload-dir`                                                 | `Downloads`                        | folder (under the root) the panel opens and uploads into; created on first upload |
-| `--max-upload-mb`                                              | `0` (no limit)                     | largest accepted upload                                                           |
-| `--max-record-seconds`                                         | `300`                              | longest recording (`/record`)                                                     |
-| `--convert-threads`, `--coalesce-us`                           | `4`, `0`                           | tuning                                                                            |
+| `--files-root`                                                 | `$HOME`                            | folder the Files panel can see; nothing outside it is reachable                                |
+| `--upload-dir`                                                 | `Downloads`                        | folder (under the root) the panel opens and uploads into; created on first upload              |
+| `--max-upload-mb`                                              | `0` (no limit)                     | largest accepted upload                                                                        |
+| `--max-record-seconds`                                         | `300`                              | longest recording (`/record`)                                                                  |
+| `--convert-threads`, `--coalesce-us`                           | `4`, `0`                           | tuning                                                                                         |
+
+Viewers share one encoded stream, which slows down to suit the slowest of them. When one
+keeps falling behind while another keeps up, voxl moves it to a second, lower-bitrate
+stream encoded from the same capture, and back once its link carries the main stream
+again. The second stream costs a second encode while it runs.
 
 Screenshots and recordings, for agents and scripts:
 
@@ -115,8 +121,8 @@ curl -o clip.mp4 -X POST "localhost:6901/record/stop?id=$id" # ...and stop when 
 ```
 
 A recording is the H.264 voxl already sends to viewers, saved as MP4 without encoding
-it again, so it costs no extra CPU. It doesn't include the cursor (viewers draw it), and
-a resize ends it.
+it again, so it costs no extra CPU, and a viewer on a slow link doesn't lower its quality.
+It doesn't include the cursor (viewers draw it), and a resize ends it.
 
 `/wait` returns when the screen settles or changes, so an agent doesn't have to sleep
 after every action and hope it was long enough:

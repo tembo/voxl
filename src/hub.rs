@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -33,6 +33,9 @@ pub struct Client {
     /// Has received a keyframe since (re)starting video.
     pub started: AtomicBool,
     pub delay: Mutex<DelayEst>,
+    /// Which stream this viewer gets: 0 is the main one, 1 is for viewers that can't
+    /// keep up with it (see `video::Tiering`).
+    pub tier: AtomicU8,
 }
 
 /// Send->ack delay tracking: `base` is the (slowly expiring) minimum, the excess over
@@ -92,6 +95,16 @@ impl Client {
             d.bytes = 0;
             d.window_start = Instant::now();
         }
+    }
+
+    /// Moves this viewer to another tier's stream, which starts it with a keyframe. Encoders
+    /// send under the same lock, so nothing from the old stream follows that keyframe.
+    pub fn move_to(&self, tier: u8) {
+        let mut q = self.inflight.lock();
+        self.tier.store(tier, Ordering::Relaxed);
+        q.clear();
+        self.started.store(false, Ordering::Relaxed);
+        self.needs_keyframe.store(true, Ordering::Relaxed);
     }
 
     /// Frames in flight and age of the oldest unacknowledged one.
@@ -242,8 +255,11 @@ pub struct Hub {
     pub height: AtomicU32,
     /// Encoded stripes as (y, height).
     pub stripes: Mutex<Vec<(u32, u32)>>,
-    /// Adaptive bitrate cap applied by the encoder (kbit/s).
-    pub target_kbps: AtomicU32,
+    /// Adaptive bitrate cap applied by each tier's encoder (kbit/s).
+    pub target_kbps: [AtomicU32; 2],
+    /// The last frame ID sent. Both tiers number their frames from it, so a viewer that
+    /// changes tiers never sees an ID twice.
+    pub frame_id: AtomicU32,
     /// Last cursor message, replayed to new clients.
     pub cursor: Mutex<Option<Bytes>>,
     /// Wakes the capture thread (acks, joins, keyframe requests).
@@ -270,7 +286,8 @@ impl Hub {
             stats: Stats::default(),
             width: AtomicU32::new(0),
             height: AtomicU32::new(0),
-            target_kbps: AtomicU32::new(0),
+            target_kbps: [AtomicU32::new(0), AtomicU32::new(0)],
+            frame_id: AtomicU32::new(0),
             stripes: Mutex::new(Vec::new()),
             cursor: Mutex::new(None),
             waker: Wake::new().expect("wake"),
@@ -312,6 +329,7 @@ impl Hub {
                 base_at: Instant::now(),
                 queue_ms: 0.0,
             }),
+            tier: AtomicU8::new(0),
         });
         self.clients.lock().push(c.clone());
         c

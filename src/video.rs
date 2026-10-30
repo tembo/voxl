@@ -4,8 +4,9 @@ use crate::capture::{Band, Capturer};
 use crate::convert::I420;
 use crate::encoder::{Encoder, EncoderConfig, Planes};
 use crate::hub::wait_any;
-use crate::hub::{Hub, Inflight, Out};
+use crate::hub::{Client, Hub, Inflight, Out};
 use bytes::Bytes;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -27,11 +28,18 @@ pub struct VideoConfig {
     pub coalesce: Duration,
     pub stripes: u32,
     pub adaptive_threads: bool,
+    /// Viewers that can't keep up get a stream of their own (see `Tiering`).
+    pub slow_tier: bool,
 }
 
+/// The main stream's tier and the one for viewers that can't keep up with it.
+const MAIN: u8 = 0;
+const SLOW: u8 = 1;
+
 struct Job {
-    buf: Box<I420>,
-    idx: usize,
+    /// The whole current screen. Every tier that encodes this capture holds the same
+    /// buffer and hands it back when done.
+    buf: Arc<I420>,
     force_idr: bool,
     paintover: bool,
     /// Last pass of a paint-over burst.
@@ -54,16 +62,8 @@ fn union(a: Option<Band>, b: Band) -> Band {
     }
 }
 
-/// One capture/encode setup for the current screen size.
-struct Pipeline {
-    cap: Capturer,
-    job_tx: mpsc::SyncSender<Job>,
-    ret_rx: mpsc::Receiver<(usize, Box<I420>)>,
-    encode: std::thread::JoinHandle<()>,
-}
-
 /// Runs the pipeline. With a `Screen` (dynamic resolution), a client's size request
-/// ends the capture loop: the encoder drains, the screen is resized and the pipeline
+/// ends the capture loop: the encoders drain, the screen is resized and the pipeline
 /// is rebuilt at the new size, and clients get the new geometry and a keyframe.
 pub fn spawn(
     cfg: VideoConfig,
@@ -73,41 +73,38 @@ pub fn spawn(
     if let Some(s) = &screen {
         *hub.resize_max.lock() = Some(s.max());
     }
-    let mut p = build(&cfg, &hub)?;
+    let mut cap = open(&cfg, &hub)?;
     std::thread::Builder::new()
         .name("capture".into())
-        .spawn(move || loop {
-            let Pipeline {
-                mut cap,
-                job_tx,
-                ret_rx,
-                encode,
-            } = p;
-            if let Err(e) = capture_loop(&mut cap, cfg.clone(), hub.clone(), job_tx, ret_rx) {
-                log::error!("capture loop ended: {e}");
-                std::process::exit(1);
-            }
-            drop(cap);
-            let _ = encode.join();
-            let req = hub.resize_req.lock().take();
-            if let (Some(s), Some((w, h))) = (screen.as_mut(), req) {
-                if let Err(e) = s.resize(w, h) {
-                    log::warn!("resize to {w}x{h} failed: {e}");
-                }
-            }
-            p = match build(&cfg, &hub) {
-                Ok(p) => p,
-                Err(e) => {
-                    log::error!("video restart failed: {e}");
+        .spawn(move || {
+            let mut tiering = Tiering::new(cfg.slow_tier);
+            loop {
+                if let Err(e) = capture_loop(&mut cap, &cfg, &hub, &mut tiering) {
+                    log::error!("capture loop ended: {e}");
                     std::process::exit(1);
                 }
-            };
+                drop(cap);
+                let req = hub.resize_req.lock().take();
+                if let (Some(s), Some((w, h))) = (screen.as_mut(), req) {
+                    if let Err(e) = s.resize(w, h) {
+                        log::warn!("resize to {w}x{h} failed: {e}");
+                    }
+                }
+                cap = match open(&cfg, &hub) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::error!("video restart failed: {e}");
+                        std::process::exit(1);
+                    }
+                };
+            }
         })
         .unwrap();
     Ok(())
 }
 
-fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
+/// Opens the capture for the current screen size.
+fn open(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Capturer, String> {
     let cap = Capturer::new(cfg.display.as_deref())?;
     let (w, h) = (cap.width, cap.height);
     hub.width.store(w, Ordering::Relaxed);
@@ -121,12 +118,16 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
         cfg.preset,
         cfg.threads
     );
+    *hub.stripes.lock() = stripe_layout(h, cfg.stripes);
+    // New geometry (and a keyframe) for clients already connected; no-op at startup.
+    hub.restart_clients();
+    Ok(cap)
+}
 
-    let (job_tx, job_rx) = mpsc::sync_channel::<Job>(1);
-    let (ret_tx, ret_rx) = mpsc::channel::<(usize, Box<I420>)>();
-    let layout = stripe_layout(h, cfg.stripes);
+/// The encoders for one tier: a stripe each.
+fn open_stripes(cfg: &VideoConfig, w: u32, layout: &[(u32, u32)]) -> Result<Vec<Stripe>, String> {
     let mut stripes = Vec::new();
-    for &(y, sh) in &layout {
+    for &(y, sh) in layout {
         let fixed = if cfg.adaptive_threads {
             1
         } else {
@@ -156,25 +157,12 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
             applied_crf: -1.0,
         });
     }
-    *hub.stripes.lock() = layout;
-    let hub2 = hub.clone();
-    let (crf, po_crf) = (cfg.crf, cfg.paintover_crf);
-    let encode = std::thread::Builder::new()
-        .name("encode".into())
-        .spawn(move || encode_loop(stripes, job_rx, ret_tx, hub2, crf, po_crf))
-        .unwrap();
-    // New geometry (and a keyframe) for clients already connected; no-op at startup.
-    hub.restart_clients();
-    Ok(Pipeline {
-        cap,
-        job_tx,
-        ret_rx,
-        encode,
-    })
+    Ok(stripes)
 }
 
-fn flow_ok(hub: &Hub, interval_ms: f64) -> bool {
-    for c in hub.video_clients() {
+/// Whether these viewers have room for another frame.
+fn flow_ok(clients: &[Arc<Client>], interval_ms: f64) -> bool {
+    for c in clients {
         let (n, age) = c.backlog();
         if n == 0 {
             continue;
@@ -204,6 +192,17 @@ fn flow_ok(hub: &Hub, interval_ms: f64) -> bool {
         }
     }
     true
+}
+
+/// Whether a viewer's acks show frames queueing up on the way to it.
+fn is_congested(c: &Client) -> bool {
+    let q = c.delay.lock().queue_ms;
+    let (_, age) = c.backlog();
+    let rtt = match c.min_rtt_ms.load(Ordering::Relaxed) {
+        0 => 40,
+        r => r,
+    } as f64;
+    q > 30.0 || age as f64 > rtt + 80.0
 }
 
 /// Delay-based bitrate adaptation: back off toward the measured delivery rate when
@@ -242,7 +241,27 @@ impl RateCtl {
         }
     }
 
-    fn update(&mut self, hub: &Hub, clients: &[Arc<crate::hub::Client>]) {
+    /// A controller for viewers whose link was measured carrying `kbps`: it starts just
+    /// under that instead of probing up from scratch.
+    fn seeded(max: f64, min: f64, kbps: f64) -> Self {
+        let mut rc = RateCtl::new(max, min);
+        if kbps > 0.0 {
+            rc.target = (kbps * 0.85).clamp(min, max);
+            rc.ceiling = kbps;
+            rc.ceiling_at = Instant::now();
+            rc.slow_start = false;
+        }
+        rc
+    }
+
+    /// Forgets the capacity it measured and ramps up again: the viewer that set it has
+    /// moved to the slow tier.
+    fn reprobe(&mut self) {
+        self.ceiling = f64::MAX;
+        self.slow_start = true;
+    }
+
+    fn update(&mut self, clients: &[Arc<Client>]) {
         if self.last_eval.elapsed() < Duration::from_millis(100) {
             return;
         }
@@ -256,12 +275,7 @@ impl RateCtl {
                 continue;
             }
             let q = c.delay.lock().queue_ms;
-            let (_, age) = c.backlog();
-            let rtt = match c.min_rtt_ms.load(Ordering::Relaxed) {
-                0 => 40,
-                r => r,
-            } as f64;
-            if q > 30.0 || age as f64 > rtt + 80.0 {
+            if is_congested(c) {
                 congested = true;
                 let r = c.delivered.lock().rate_bps / 1000.0;
                 if r > 0.0 {
@@ -334,7 +348,6 @@ impl RateCtl {
                 self.last_inc = now;
             }
         }
-        hub.target_kbps.store(self.target as u32, Ordering::Relaxed);
     }
 }
 
@@ -448,18 +461,398 @@ fn note_changes(cap: &mut Capturer, hub: &Hub) {
     }
 }
 
+/// One encoded stream and its state. Tier 0 is the main stream; tier 1 exists while
+/// some viewer can't keep up with it (see `Tiering`). Capture and conversion are
+/// shared: a tier whose viewers are still catching up skips captures and collects
+/// what they changed until it can send again.
+struct Tier {
+    job_tx: mpsc::SyncSender<Job>,
+    encode: std::thread::JoinHandle<()>,
+    rc: RateCtl,
+    refiner: Refiner,
+    paintover_left: u32,
+    last_motion: Instant,
+    /// Rows and macroblocks changed since this tier last encoded.
+    band: Option<Band>,
+    dirty: Vec<u8>,
+    /// Had viewers at the last capture.
+    active: bool,
+}
+
+/// What a tier sends from the current capture (`Tier::plan`).
+struct Plan {
+    want_key: bool,
+    paintover_due: bool,
+    band: Option<Band>,
+    dirty: Vec<u8>,
+    /// Blocks a paint-over sharpens, and the rows they span.
+    paint_map: Option<(Vec<u8>, Band)>,
+}
+
+impl Tier {
+    /// Starts a tier's encoder thread. The encoders open on that thread, so a tier that
+    /// starts mid-stream doesn't hold up the capture loop.
+    fn start(
+        id: u8,
+        cfg: &VideoConfig,
+        hub: &Arc<Hub>,
+        (w, h): (usize, usize),
+        rc: RateCtl,
+        ret: mpsc::Sender<Arc<I420>>,
+    ) -> Tier {
+        let (job_tx, job_rx) = mpsc::sync_channel::<Job>(1);
+        let layout = hub.stripes.lock().clone();
+        let (cfg2, hub2) = (cfg.clone(), hub.clone());
+        let encode = std::thread::Builder::new()
+            .name(if id == MAIN { "encode" } else { "encode-slow" }.into())
+            .spawn(move || {
+                let stripes = match open_stripes(&cfg2, w as u32, &layout) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::error!("encoder: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                encode_loop(id, stripes, job_rx, ret, hub2, cfg2.crf, cfg2.paintover_crf)
+            })
+            .unwrap();
+        let blocks = w.div_ceil(16) * h.div_ceil(16);
+        Tier {
+            job_tx,
+            encode,
+            rc,
+            refiner: Refiner::new(blocks, w.div_ceil(16)),
+            paintover_left: 0,
+            last_motion: Instant::now(),
+            band: None,
+            dirty: vec![0; blocks],
+            active: false,
+        }
+    }
+
+    /// Stops the encoder once it has sent what it has.
+    fn stop(self) {
+        drop(self.job_tx);
+        let _ = self.encode.join();
+    }
+
+    fn paintover_due(&self, cfg: &VideoConfig) -> bool {
+        self.paintover_left > 0
+            && self.last_motion.elapsed() >= Duration::from_millis(cfg.paintover_delay_ms)
+    }
+
+    /// Notes what a capture changed, for this tier's next frame.
+    fn note(&mut self, band: Option<Band>, dirty: &[u8]) {
+        if let Some(b) = band {
+            self.band = Some(union(self.band, b));
+        }
+        for (d, &m) in self.dirty.iter_mut().zip(dirty) {
+            *d |= m;
+        }
+    }
+
+    /// What this tier sends from the current capture, if anything: what changed since it
+    /// last encoded, a keyframe, or a paint-over.
+    fn plan(&mut self, cfg: &VideoConfig, want_key: bool) -> Option<Plan> {
+        let band = self.band.take();
+        let n = self.dirty.len();
+        let dirty = std::mem::replace(&mut self.dirty, vec![0; n]);
+        self.refiner.mark(&dirty);
+        let paintover_due = self.paintover_due(cfg);
+        let is_motion = band.is_some();
+        if !is_motion && !want_key && !paintover_due {
+            return None;
+        }
+        // Sharpen only what was sent at motion quality; nothing pending, nothing to send.
+        let paint_map = if paintover_due && !is_motion && !want_key {
+            match self.refiner.pending_map() {
+                Some(m) => Some(m),
+                None => {
+                    self.paintover_left = 0;
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+        Some(Plan {
+            want_key,
+            paintover_due,
+            band,
+            dirty,
+            paint_map,
+        })
+    }
+
+    /// The frame `plan` decided on, from `buf`: the capture just converted.
+    fn job(
+        &mut self,
+        plan: Plan,
+        cfg: &VideoConfig,
+        hub: &Hub,
+        buf: Arc<I420>,
+        captured_at: Instant,
+        marker_ms: i64,
+    ) -> Job {
+        let Plan {
+            want_key,
+            paintover_due,
+            mut band,
+            dirty,
+            paint_map,
+        } = plan;
+        let mut refine = None;
+        let paintover = if band.is_some() {
+            self.last_motion = Instant::now();
+            self.paintover_left = cfg.paintover_burst;
+            // Piggyback sharpening of blocks that have gone still on this frame.
+            refine = if want_key { None } else { self.refiner.due() };
+            refine.is_some()
+        } else if paintover_due {
+            self.paintover_left -= 1;
+            hub.stats.paintovers.fetch_add(1, Ordering::Relaxed);
+            true
+        } else {
+            false
+        };
+        if want_key {
+            // A keyframe is squeezed into the rate cap; sharpen all of it once still.
+            self.refiner.mark_all();
+        }
+        let frame_paintover = paintover && refine.is_none();
+        if frame_paintover && self.paintover_left == 0 {
+            self.refiner.clear_all();
+        }
+        // A refinement frame encodes what moved plus what is due; everything else stays skipped.
+        let mb_map = if want_key {
+            None
+        } else if frame_paintover {
+            paint_map.map(|(m, b)| {
+                band = Some(union(band, b));
+                Arc::new(m)
+            })
+        } else if let Some((rmap, rband)) = refine.take() {
+            band = Some(union(band, rband));
+            let mut m = dirty;
+            for (d, r) in m.iter_mut().zip(rmap) {
+                *d |= r;
+            }
+            hub.stats.refines.fetch_add(1, Ordering::Relaxed);
+            Some(Arc::new(m))
+        } else {
+            Some(Arc::new(dirty))
+        };
+        Job {
+            buf,
+            force_idr: want_key,
+            paintover,
+            paintover_final: frame_paintover && self.paintover_left == 0,
+            mb_dirty: mb_map,
+            band,
+            captured_at,
+            marker_ms,
+        }
+    }
+}
+
+/// Moves viewers between the main stream and the slow tier's.
+///
+/// A viewer whose acks keep showing congestion while another viewer of the main stream
+/// keeps up gets the slow tier's stream instead, at a bitrate its own link carries, so
+/// it no longer holds back everyone else's bitrate and frame rate (or a recording's).
+/// Congestion is remembered for a while: once the stream has slowed down to suit a
+/// viewer, it rarely congests again, and a faster viewer joining later shouldn't have to
+/// wait for it to. A viewer moves back once it has gone without congestion for a while
+/// and its link has carried about as much as the main stream's viewers get. The slow
+/// tier's encoder only runs while it has viewers.
+struct Tiering {
+    enabled: bool,
+    last_eval: Instant,
+    viewers: HashMap<u64, Standing>,
+}
+
+#[derive(Default)]
+struct Standing {
+    /// Decaying count of evaluations that found this viewer congested on the main stream.
+    strain: f64,
+    /// Evaluations it has been watched for.
+    seen: u32,
+    /// Last evaluation that found it congested.
+    congested_at: Option<Instant>,
+    /// Times it has moved to the slow tier.
+    moves: u32,
+}
+
+/// Evaluations are 100 ms apart, and `Standing::strain` halves in about 14 s.
+const STRAIN_DECAY: f64 = 0.995;
+/// Strain that moves a viewer to the slow tier, if another viewer of the main stream has
+/// less than `STRAIN_CLEAR` and has been watched for `SEEN_MIN` evaluations.
+const STRAIN_MOVE: f64 = 3.0;
+const STRAIN_CLEAR: f64 = 1.0;
+const SEEN_MIN: u32 = 10;
+/// How long a slow-tier viewer has to go without congestion before it rejoins the main
+/// stream, doubling (up to 16x) each time it has moved so a borderline link settles
+/// instead of flapping...
+const REJOIN_AFTER: Duration = Duration::from_secs(10);
+/// ...and how much of what the main stream's viewers get it has to have received.
+const REJOIN_RATIO: f64 = 0.8;
+
+impl Tiering {
+    fn new(enabled: bool) -> Self {
+        Tiering {
+            enabled,
+            last_eval: Instant::now() - Duration::from_secs(1),
+            viewers: HashMap::new(),
+        }
+    }
+
+    /// Moves viewers between tiers, and opens and closes the slow tier for them.
+    /// `start_slow` starts the slow tier's encoder with that rate controller.
+    fn update(
+        &mut self,
+        cfg: &VideoConfig,
+        clients: &[Arc<Client>],
+        tiers: &mut [Option<Tier>; 2],
+        start_slow: &dyn Fn(RateCtl) -> Tier,
+    ) {
+        let tier = |c: &Client| c.tier.load(Ordering::Relaxed);
+        let started = |c: &Client| c.started.load(Ordering::Relaxed);
+        let kbps = |c: &Client| c.delivered.lock().rate_bps / 1000.0;
+        let seeded = |kbps| RateCtl::seeded(cfg.max_kbps as f64, cfg.min_kbps as f64, kbps);
+        let main_has = clients.iter().any(|c| tier(c) == MAIN);
+        // A slow-tier viewer without a slow tier: back from a restart, or from having its
+        // video off while the tier closed.
+        if tiers[SLOW as usize].is_none() {
+            let slow: Vec<_> = clients.iter().filter(|c| tier(c) == SLOW).collect();
+            if !slow.is_empty() {
+                if self.enabled && main_has {
+                    let k = slow.iter().map(|c| kbps(c)).fold(f64::MAX, f64::min);
+                    tiers[SLOW as usize] = Some(start_slow(seeded(k)));
+                } else {
+                    for c in slow {
+                        c.move_to(MAIN);
+                    }
+                }
+            }
+        }
+        if self.last_eval.elapsed() < Duration::from_millis(100) {
+            return;
+        }
+        let now = Instant::now();
+        self.last_eval = now;
+        self.viewers
+            .retain(|id, _| clients.iter().any(|c| c.id == *id));
+        let mut congested = Vec::with_capacity(clients.len());
+        let mut strain = Vec::with_capacity(clients.len());
+        for c in clients {
+            let s = self.viewers.entry(c.id).or_default();
+            let busy = started(c) && is_congested(c);
+            if started(c) && tier(c) == MAIN {
+                s.strain = s.strain * STRAIN_DECAY + busy as u8 as f64;
+                s.seen = s.seen.saturating_add(1);
+            }
+            if busy {
+                s.congested_at = Some(now);
+            }
+            congested.push(busy);
+            strain.push((s.strain, s.seen));
+        }
+        // Main-stream viewers that have kept up so far.
+        let keeps_up: Vec<bool> = clients
+            .iter()
+            .enumerate()
+            .map(|(j, d)| {
+                tier(d) == MAIN
+                    && started(d)
+                    && !congested[j]
+                    && strain[j].0 < STRAIN_CLEAR
+                    && strain[j].1 >= SEEN_MIN
+            })
+            .collect();
+        let mut moved = Vec::new();
+        for (i, c) in clients.iter().enumerate() {
+            if !self.enabled || tier(c) != MAIN || !started(c) || strain[i].0 < STRAIN_MOVE {
+                continue;
+            }
+            if (0..clients.len()).any(|j| j != i && keeps_up[j]) {
+                let s = self.viewers.get_mut(&c.id).unwrap();
+                s.strain = 0.0;
+                s.moves += 1;
+                // The wait to rejoin starts now.
+                s.congested_at = Some(now);
+                moved.push(c);
+            }
+        }
+        if !moved.is_empty() {
+            for c in &moved {
+                log::info!(
+                    "client {} can't keep up ({:.0} kbps); moving it to the slow tier",
+                    c.id,
+                    kbps(c)
+                );
+                c.move_to(SLOW);
+            }
+            if let Some(main) = tiers[MAIN as usize].as_mut() {
+                main.rc.reprobe();
+            }
+            if tiers[SLOW as usize].is_none() {
+                let k = moved.iter().map(|c| kbps(c)).fold(f64::MAX, f64::min);
+                tiers[SLOW as usize] = Some(start_slow(seeded(k)));
+            }
+        }
+        if tiers[SLOW as usize].is_none() {
+            return;
+        }
+        let slow_clients: Vec<_> = clients.iter().filter(|c| tier(c) == SLOW).collect();
+        let main_has = clients.iter().any(|c| tier(c) == MAIN);
+        if slow_clients.is_empty() {
+            // Nobody left on it.
+            tiers[SLOW as usize] = None;
+        } else if !main_has {
+            // Its viewers are the only ones left: the main stream is theirs again, at their bitrate.
+            let slow = tiers[SLOW as usize].take().unwrap();
+            if let Some(main) = tiers[MAIN as usize].as_mut() {
+                main.rc = slow.rc;
+            }
+            for c in slow_clients {
+                log::info!("client {} is the main stream's only viewer now", c.id);
+                c.move_to(MAIN);
+            }
+        } else {
+            // What the main stream carries (as of the last frames acked). Below the
+            // bitrate floor every link keeps up, which says nothing.
+            let main_kbps = clients
+                .iter()
+                .filter(|c| tier(c) == MAIN && started(c))
+                .map(|c| kbps(c))
+                .fold(0.0, f64::max);
+            for c in slow_clients {
+                let s = self.viewers.entry(c.id).or_default();
+                let hold = REJOIN_AFTER * (1 << s.moves.saturating_sub(1).min(4));
+                let calm = s.congested_at.is_none_or(|t| now - t >= hold);
+                let paced = main_kbps >= cfg.min_kbps as f64 && kbps(c) >= main_kbps * REJOIN_RATIO;
+                if calm && paced && started(c) {
+                    log::info!(
+                        "client {} keeps up again; moving it to the main stream",
+                        c.id
+                    );
+                    s.strain = 0.0;
+                    c.move_to(MAIN);
+                }
+            }
+        }
+    }
+}
+
 fn capture_loop(
     cap: &mut Capturer,
-    cfg: VideoConfig,
-    hub: Arc<Hub>,
-    job_tx: mpsc::SyncSender<Job>,
-    ret_rx: mpsc::Receiver<(usize, Box<I420>)>,
+    cfg: &VideoConfig,
+    hub: &Arc<Hub>,
+    tiering: &mut Tiering,
 ) -> Result<(), String> {
     let (w, h) = (cap.width as usize, cap.height as usize);
-    let mut pool: Vec<Option<Box<I420>>> = vec![
-        Some(Box::new(I420::new(w, h))),
-        Some(Box::new(I420::new(w, h))),
-    ];
+    // Two buffers: one is converted while the encoders read the other.
+    let mut pool = [Arc::new(I420::new(w, h)), Arc::new(I420::new(w, h))];
     let mut pending: [Option<Band>; 2] = [Some(cap.full()), Some(cap.full())];
     let mut next_idx = 0usize;
     let interval = Duration::from_secs_f64(1.0 / cfg.fps as f64);
@@ -467,21 +860,33 @@ fn capture_loop(
     let min_interval = interval.mul_f64(0.85);
     let interval_ms = interval.as_secs_f64() * 1000.0;
     let mut last_capture = Instant::now() - interval;
-    let mut last_motion = Instant::now();
-    let mut paintover_left = 0u32;
-    let mut rc = RateCtl::new(cfg.max_kbps as f64, cfg.min_kbps as f64);
-    hub.target_kbps.store(rc.target as u32, Ordering::Relaxed);
+    let (ret_tx, ret_rx) = mpsc::channel::<Arc<I420>>();
+    let new_rc = || RateCtl::new(cfg.max_kbps as f64, cfg.min_kbps as f64);
+    let start_slow = |rc| Tier::start(SLOW, cfg, hub, (w, h), rc, ret_tx.clone());
+    let mut tiers = [
+        Some(Tier::start(
+            MAIN,
+            cfg,
+            hub,
+            (w, h),
+            new_rc(),
+            ret_tx.clone(),
+        )),
+        None,
+    ];
     let mut had_clients = false;
-    let mut full_next = true;
-    let mut refiner = Refiner::new(w.div_ceil(16) * h.div_ceil(16), w.div_ceil(16));
     let debug_marker = std::env::var("VOXL_DEBUG_MARKER").is_ok();
 
     loop {
         if hub.resize_req.lock().is_some() || cap.needs_rebuild() {
+            // Viewers get the new geometry once the encoders have sent their last frames.
+            for t in tiers.into_iter().flatten() {
+                t.stop();
+            }
             return Ok(());
         }
         cap.pump()?;
-        note_changes(cap, &hub);
+        note_changes(cap, hub);
         hub.drain_wake();
         let snaps = std::mem::take(&mut *hub.snapshots.lock());
         if !snaps.is_empty() {
@@ -491,7 +896,7 @@ fn capture_loop(
             // The capturer takes the damage for exactly these pixels with them, so the
             // screenshot's seq covers what it shows and nothing drawn after it.
             let bgrx = cap.snapshot()?;
-            note_changes(cap, &hub);
+            note_changes(cap, hub);
             let shot = Arc::new(crate::record::Snapshot {
                 width: w,
                 height: h,
@@ -502,41 +907,68 @@ fn capture_loop(
                 let _ = tx.send(shot.clone());
             }
         }
-        while let Ok((i, b)) = ret_rx.try_recv() {
-            pool[i] = Some(b);
-        }
+        // Encoders hand buffers back when done; a buffer is free once both have.
+        while ret_rx.try_recv().is_ok() {}
         let clients = hub.video_clients();
         if clients.is_empty() {
             if had_clients {
-                rc = RateCtl::new(cfg.max_kbps as f64, cfg.min_kbps as f64);
-                hub.target_kbps.store(rc.target as u32, Ordering::Relaxed);
+                tiers[SLOW as usize] = None;
+                hub.target_kbps[SLOW as usize].store(0, Ordering::Relaxed);
+                if let Some(t) = tiers[MAIN as usize].as_mut() {
+                    t.rc = new_rc();
+                    hub.target_kbps[MAIN as usize].store(t.rc.target as u32, Ordering::Relaxed);
+                }
             }
             had_clients = false;
             wait_any(&[cap.fd(), hub.waker.waitable()], 500);
             continue;
         }
-        rc.update(&hub, &clients);
-        let want_key = clients
-            .iter()
-            .any(|c| c.needs_keyframe.load(Ordering::Relaxed));
         if !had_clients {
             had_clients = true;
             // Our shm copy may be stale: re-grab everything once.
             cap.grab(cap.full())?;
             pending = [Some(cap.full()), Some(cap.full())];
             cap.damaged = true;
-            full_next = true;
         }
-        let paintover_due = paintover_left > 0
-            && last_motion.elapsed() >= Duration::from_millis(cfg.paintover_delay_ms);
-        if !cap.damaged && !want_key && !paintover_due {
-            let timeout = if paintover_left == 0 {
-                100
-            } else {
-                cfg.paintover_delay_ms
-                    .saturating_sub(last_motion.elapsed().as_millis() as u64) as i32
-                    + 1
+        tiering.update(cfg, &clients, &mut tiers, &start_slow);
+        let mut by_tier: [Vec<Arc<Client>>; 2] = Default::default();
+        for c in clients {
+            let i = (c.tier.load(Ordering::Relaxed) == SLOW) as usize;
+            by_tier[i].push(c);
+        }
+        let mut want_key = [false; 2];
+        let mut work = [false; 2];
+        for (i, slot) in tiers.iter_mut().enumerate() {
+            let Some(t) = slot else {
+                hub.target_kbps[i].store(0, Ordering::Relaxed);
+                continue;
             };
+            let cs = &by_tier[i];
+            if t.active && cs.is_empty() {
+                t.band = None;
+                t.dirty.fill(0);
+            }
+            t.active = !cs.is_empty();
+            if t.active {
+                t.rc.update(cs);
+                want_key[i] = cs.iter().any(|c| c.needs_keyframe.load(Ordering::Relaxed));
+                work[i] = cap.damaged || want_key[i] || t.band.is_some() || t.paintover_due(cfg);
+            }
+            hub.target_kbps[i].store(t.rc.target as u32, Ordering::Relaxed);
+        }
+        if !work.contains(&true) {
+            let timeout = tiers
+                .iter()
+                .flatten()
+                .filter(|t| t.active && t.paintover_left > 0)
+                .map(|t| {
+                    cfg.paintover_delay_ms
+                        .saturating_sub(t.last_motion.elapsed().as_millis() as u64)
+                        as i32
+                        + 1
+                })
+                .min()
+                .unwrap_or(100);
             wait_any(&[cap.fd(), hub.waker.waitable()], timeout);
             continue;
         }
@@ -559,18 +991,20 @@ fn capture_loop(
                 continue;
             }
         }
-        if !want_key && !flow_ok(&hub, interval_ms) {
+        // Each tier sends only when its own viewers have room for another frame.
+        let go: [bool; 2] =
+            std::array::from_fn(|i| work[i] && (want_key[i] || flow_ok(&by_tier[i], interval_ms)));
+        if !go.contains(&true) {
             hub.stats.flow_blocked.fetch_add(1, Ordering::Relaxed);
             wait_any(&[cap.fd(), hub.waker.waitable()], 4);
             continue;
         }
-        // Need a free buffer (the encoder may still hold the other).
-        if pool[next_idx].is_none() {
-            match ret_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok((i, b)) => pool[i] = Some(b),
-                Err(_) => continue,
+        // Need a free buffer (an encoder may still hold the other).
+        if Arc::get_mut(&mut pool[next_idx]).is_none() {
+            if ret_rx.recv_timeout(Duration::from_millis(50)).is_err() {
+                continue;
             }
-            if pool[next_idx].is_none() {
+            if Arc::get_mut(&mut pool[next_idx]).is_none() {
                 continue;
             }
         }
@@ -580,16 +1014,8 @@ fn capture_loop(
         hub.stats
             .damage_wait_us
             .fetch_add((t0 - origin).as_micros() as u64, Ordering::Relaxed);
+        let mb_dirty = cap.take_mb_map();
         let mut band = None;
-        let mut mb_dirty = (!full_next).then(|| cap.take_mb_map());
-        if full_next {
-            cap.take_mb_map();
-            full_next = false;
-        }
-        match &mb_dirty {
-            Some(m) => refiner.mark(m),
-            None => refiner.mark_all(),
-        }
         if cap.damaged {
             band = cap.take_damage()?;
             if let Some(b) = band {
@@ -609,25 +1035,21 @@ fn capture_loop(
             Some((px, stride)) if debug_marker => marker_probe(px, stride, "grab"),
             _ => -1,
         };
-        let is_motion = band.is_some();
-        if !is_motion && !want_key && !paintover_due {
+        // What changed goes to every tier: now, or once its viewers have caught up.
+        for t in tiers.iter_mut().flatten().filter(|t| t.active) {
+            t.note(band, &mb_dirty);
+        }
+        let mut plans: [Option<Plan>; 2] = [None, None];
+        for (i, slot) in tiers.iter_mut().enumerate() {
+            if let (true, Some(t)) = (go[i], slot) {
+                plans[i] = t.plan(cfg, want_key[i]);
+            }
+        }
+        if plans.iter().all(Option::is_none) {
             // Damage was empty after all.
             continue;
         }
-        // Sharpen only what was sent at motion quality; nothing pending, nothing to send.
-        let paint_map = if paintover_due && !is_motion && !want_key {
-            match refiner.pending_map() {
-                Some(m) => Some(m),
-                None => {
-                    paintover_left = 0;
-                    continue;
-                }
-            }
-        } else {
-            None
-        };
         let idx = next_idx;
-        let mut buf = pool[idx].take().unwrap();
         let todo = match (pending[idx], band) {
             (p, Some(b)) => Some(union(p, b)),
             (p, None) => p,
@@ -637,7 +1059,8 @@ fn capture_loop(
         }
         pending[idx] = None;
         if let Some(t) = todo {
-            cap.convert(&mut buf, t.y0 as usize, t.y1 as usize, cfg.convert_threads);
+            let buf = Arc::get_mut(&mut pool[idx]).expect("buffer in use");
+            cap.convert(buf, t.y0 as usize, t.y1 as usize, cfg.convert_threads);
         }
         let t2 = Instant::now();
         hub.stats
@@ -648,74 +1071,22 @@ fn capture_loop(
             .fetch_add((t2 - t1).as_micros() as u64, Ordering::Relaxed);
         hub.stats.captured.fetch_add(1, Ordering::Relaxed);
 
-        let mut refine = None;
-        let paintover = if is_motion {
-            last_motion = Instant::now();
-            paintover_left = cfg.paintover_burst;
-            // Piggyback sharpening of blocks that have gone still on this frame.
-            refine = if want_key { None } else { refiner.due() };
-            refine.is_some()
-        } else if paintover_due {
-            paintover_left -= 1;
-            hub.stats.paintovers.fetch_add(1, Ordering::Relaxed);
-            true
-        } else {
-            false
-        };
-        if want_key {
-            for c in &clients {
-                c.needs_keyframe.store(false, Ordering::Relaxed);
+        for (i, slot) in tiers.iter_mut().enumerate() {
+            let (Some(t), Some(plan)) = (slot, plans[i].take()) else {
+                continue;
+            };
+            if plan.want_key {
+                for c in &by_tier[i] {
+                    c.needs_keyframe.store(false, Ordering::Relaxed);
+                }
             }
-            // A keyframe is squeezed into the rate cap; sharpen all of it once still.
-            refiner.mark_all();
-        }
-        let frame_paintover = paintover && refine.is_none();
-        if frame_paintover && paintover_left == 0 {
-            refiner.clear_all();
-        }
-        // A refinement frame encodes what moved plus what is due; everything else stays skipped.
-        let mb_map = if want_key {
-            None
-        } else if frame_paintover {
-            paint_map.map(|(m, b)| {
-                band = Some(match band {
-                    Some(x) => union(Some(x), b),
-                    None => b,
-                });
-                Arc::new(m)
-            })
-        } else if let Some((rmap, rband)) = refine.take() {
-            band = Some(match band {
-                Some(b) => union(Some(b), rband),
-                None => rband,
-            });
-            let mut m = mb_dirty.take().unwrap_or_else(|| vec![1; rmap.len()]);
-            for (d, r) in m.iter_mut().zip(rmap) {
-                *d |= r;
+            let job = t.job(plan, cfg, hub, pool[idx].clone(), origin, marker_ms);
+            if t.job_tx.send(job).is_err() {
+                return Err("encoder gone".into());
             }
-            hub.stats.refines.fetch_add(1, Ordering::Relaxed);
-            Some(Arc::new(m))
-        } else {
-            mb_dirty.take().map(Arc::new)
-        };
+        }
         last_capture = t0;
         next_idx = 1 - idx;
-        if job_tx
-            .send(Job {
-                buf,
-                idx,
-                force_idr: want_key,
-                paintover,
-                paintover_final: frame_paintover && paintover_left == 0,
-                mb_dirty: mb_map,
-                band,
-                captured_at: origin,
-                marker_ms,
-            })
-            .is_err()
-        {
-            return Err("encoder gone".into());
-        }
     }
 }
 
@@ -969,15 +1340,15 @@ fn stripe_worker(
 }
 
 fn encode_loop(
+    tier: u8,
     stripes_in: Vec<Stripe>,
     rx: mpsc::Receiver<Job>,
-    ret: mpsc::Sender<(usize, Box<I420>)>,
+    ret: mpsc::Sender<Arc<I420>>,
     hub: Arc<Hub>,
     crf: f32,
     po_crf: f32,
 ) {
     let epoch = Instant::now();
-    let mut frame_id: u32 = 0;
     let n = stripes_in.len();
     let debug_stripes = std::env::var("VOXL_DEBUG_STRIPES").is_ok();
     // Geometry and paint-over bookkeeping stay here; encoders move to their workers.
@@ -990,8 +1361,13 @@ fn encode_loop(
         .map(|(i, s)| {
             let (tx, rx) = mpsc::channel();
             let done = done_tx.clone();
+            let name = if tier == MAIN {
+                format!("enc-{i}")
+            } else {
+                format!("enc-slow-{i}")
+            };
             let h = std::thread::Builder::new()
-                .name(format!("enc-{i}"))
+                .name(name)
                 .spawn(move || stripe_worker(i, s, rx, done, debug_stripes))
                 .unwrap();
             (tx, h)
@@ -1010,10 +1386,10 @@ fn encode_loop(
             })
             .collect();
         if !selected.iter().any(|&x| x) {
-            let _ = ret.send((job.idx, job.buf));
+            let _ = ret.send(job.buf);
             continue;
         }
-        let target = hub.target_kbps.load(Ordering::Relaxed);
+        let target = hub.target_kbps[tier as usize].load(Ordering::Relaxed);
         let want_crf = if job.paintover { po_crf } else { crf };
         // Each stripe may use up to twice its area share of the budget; the delay-based
         // controller reins the total in if several stripes move at once.
@@ -1047,7 +1423,7 @@ fn encode_loop(
                 results[i] = r;
             }
         }
-        let _ = ret.send((job.idx, job.buf));
+        let _ = ret.send(job.buf);
         for (y, h, touched) in stripes.iter_mut() {
             if job.paintover_final {
                 *touched = false;
@@ -1076,7 +1452,7 @@ fn encode_loop(
         if all_key {
             hub.stats.keyframes.fetch_add(1, Ordering::Relaxed);
         }
-        frame_id = frame_id.wrapping_add(1);
+        let frame_id = hub.frame_id.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
         // Server-side pipeline latency (capture -> sent) in 1/10 ms, for client stats.
         let mut pipe = (job.captured_at.elapsed().as_micros() / 100).min(u32::MAX as u128) as u32;
         if job.marker_ms >= 0 {
@@ -1105,27 +1481,30 @@ fn encode_loop(
             .collect();
         let now = Instant::now();
         for c in hub.video_clients() {
+            // Checked and sent under the viewer's lock, so once `Client::move_to` takes
+            // it to another tier, nothing more from this one reaches it.
+            let mut q = c.inflight.lock();
+            if c.tier.load(Ordering::Relaxed) != tier {
+                continue;
+            }
             if !c.started.load(Ordering::Relaxed) {
                 if !all_key {
                     continue;
                 }
                 c.started.store(true, Ordering::Relaxed);
-                c.inflight.lock().clear();
+                q.clear();
             }
-            {
-                let mut q = c.inflight.lock();
-                if q.len() > 600 {
-                    log::warn!("client {} hopelessly behind; dropping", c.id);
-                    drop(q);
-                    c.send(Out::Text("{\"t\":\"close\"}".into()));
-                    continue;
-                }
-                q.push_back(Inflight {
-                    id: frame_id,
-                    sent: now,
-                    bytes: total,
-                });
+            if q.len() > 600 {
+                log::warn!("client {} hopelessly behind; dropping", c.id);
+                drop(q);
+                c.send(Out::Text("{\"t\":\"close\"}".into()));
+                continue;
             }
+            q.push_back(Inflight {
+                id: frame_id,
+                sent: now,
+                bytes: total,
+            });
             for m in &msgs {
                 c.send(Out::Bin(m.clone()));
             }
@@ -1200,4 +1579,163 @@ fn marker_age(ms: i64) -> i64 {
         .as_millis() as i64)
         & 0xffffff;
     now - ms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> VideoConfig {
+        VideoConfig {
+            display: None,
+            fps: 60,
+            preset: "ultrafast".into(),
+            threads: 1,
+            convert_threads: 1,
+            crf: 24.0,
+            max_kbps: 30000,
+            paintover_crf: 16.0,
+            paintover_burst: 3,
+            paintover_delay_ms: 150,
+            min_kbps: 2000,
+            coalesce: Duration::ZERO,
+            stripes: 1,
+            adaptive_threads: false,
+            slow_tier: true,
+        }
+    }
+
+    /// A tier without an encoder: these tests only move viewers between tiers.
+    fn tier(rc: RateCtl) -> Tier {
+        let (job_tx, _) = mpsc::sync_channel(1);
+        Tier {
+            job_tx,
+            encode: std::thread::spawn(|| {}),
+            rc,
+            refiner: Refiner::new(1, 1),
+            paintover_left: 0,
+            last_motion: Instant::now(),
+            band: None,
+            dirty: vec![0],
+            active: false,
+        }
+    }
+
+    /// A viewer that has its keyframe, with this much queueing and throughput.
+    fn viewer(hub: &Hub, queue_ms: f64, kbps: f64) -> Arc<Client> {
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let c = hub.add_client(tx);
+        c.started.store(true, Ordering::Relaxed);
+        set(&c, queue_ms, kbps);
+        c
+    }
+
+    fn set(c: &Client, queue_ms: f64, kbps: f64) {
+        c.delay.lock().queue_ms = queue_ms;
+        c.delivered.lock().rate_bps = kbps * 1000.0;
+    }
+
+    /// Runs `n` evaluations (100 ms apart, as far as `Tiering` can tell).
+    fn evaluate(t: &mut Tiering, clients: &[Arc<Client>], tiers: &mut [Option<Tier>; 2], n: u32) {
+        let cfg = cfg();
+        for _ in 0..n {
+            t.last_eval = Instant::now() - Duration::from_secs(1);
+            t.update(&cfg, clients, tiers, &tier);
+        }
+    }
+
+    fn main_tiers() -> [Option<Tier>; 2] {
+        [Some(tier(RateCtl::new(30000.0, 2000.0))), None]
+    }
+
+    #[test]
+    fn moves_a_viewer_that_holds_the_others_back() {
+        let hub = Hub::new();
+        let slow = viewer(&hub, 120.0, 3000.0);
+        let fast = viewer(&hub, 0.0, 3000.0);
+        let clients = [slow.clone(), fast.clone()];
+        let mut tiering = Tiering::new(true);
+        let mut tiers = main_tiers();
+        // Not before the fast viewer has been watched for a while.
+        evaluate(&mut tiering, &clients, &mut tiers, SEEN_MIN - 1);
+        assert_eq!(slow.tier.load(Ordering::Relaxed), MAIN);
+        evaluate(&mut tiering, &clients, &mut tiers, 1);
+        assert_eq!(slow.tier.load(Ordering::Relaxed), SLOW);
+        assert_eq!(fast.tier.load(Ordering::Relaxed), MAIN);
+        // It starts again with a keyframe, at about what its link carried.
+        assert!(slow.needs_keyframe.load(Ordering::Relaxed));
+        let slow_rc = &tiers[SLOW as usize].as_ref().unwrap().rc;
+        assert!((slow_rc.target - 2550.0).abs() < 1.0);
+        // The main stream ramps up again rather than staying at the slow viewer's rate.
+        assert!(tiers[MAIN as usize].as_ref().unwrap().rc.slow_start);
+    }
+
+    #[test]
+    fn keeps_viewers_together_unless_another_keeps_up() {
+        let hub = Hub::new();
+        // Alone, a congested viewer has nobody to make room for.
+        let alone = [viewer(&hub, 120.0, 3000.0)];
+        let mut tiering = Tiering::new(true);
+        let mut tiers = main_tiers();
+        evaluate(&mut tiering, &alone, &mut tiers, 50);
+        assert_eq!(alone[0].tier.load(Ordering::Relaxed), MAIN);
+        assert!(tiers[SLOW as usize].is_none());
+        // Both congested: the link (or the content) is the limit for both.
+        let both = [viewer(&hub, 120.0, 3000.0), viewer(&hub, 80.0, 3000.0)];
+        evaluate(&mut tiering, &both, &mut tiers, 50);
+        assert!(both.iter().all(|c| c.tier.load(Ordering::Relaxed) == MAIN));
+        // Turned off, nobody moves.
+        let mixed = [viewer(&hub, 120.0, 3000.0), viewer(&hub, 0.0, 3000.0)];
+        let mut off = Tiering::new(false);
+        evaluate(&mut off, &mixed, &mut tiers, 50);
+        assert!(mixed.iter().all(|c| c.tier.load(Ordering::Relaxed) == MAIN));
+        assert!(tiers[SLOW as usize].is_none());
+    }
+
+    #[test]
+    fn rejoins_once_its_link_keeps_pace() {
+        let hub = Hub::new();
+        let slow = viewer(&hub, 120.0, 3000.0);
+        let fast = viewer(&hub, 0.0, 7000.0);
+        let clients = [slow.clone(), fast.clone()];
+        let mut tiering = Tiering::new(true);
+        let mut tiers = main_tiers();
+        evaluate(&mut tiering, &clients, &mut tiers, SEEN_MIN);
+        assert_eq!(slow.tier.load(Ordering::Relaxed), SLOW);
+        slow.started.store(true, Ordering::Relaxed);
+        // No congestion, but it gets far less than the main stream carries.
+        set(&slow, 0.0, 3000.0);
+        let calm_since = Instant::now() - REJOIN_AFTER - Duration::from_secs(1);
+        tiering.viewers.get_mut(&slow.id).unwrap().congested_at = Some(calm_since);
+        evaluate(&mut tiering, &clients, &mut tiers, 1);
+        assert_eq!(slow.tier.load(Ordering::Relaxed), SLOW);
+        // Keeping pace, but not for long enough yet.
+        set(&slow, 0.0, 6500.0);
+        tiering.viewers.get_mut(&slow.id).unwrap().congested_at = Some(Instant::now());
+        evaluate(&mut tiering, &clients, &mut tiers, 1);
+        assert_eq!(slow.tier.load(Ordering::Relaxed), SLOW);
+        tiering.viewers.get_mut(&slow.id).unwrap().congested_at = Some(calm_since);
+        evaluate(&mut tiering, &clients, &mut tiers, 1);
+        assert_eq!(slow.tier.load(Ordering::Relaxed), MAIN);
+        // With nobody left on it, the slow tier closes.
+        evaluate(&mut tiering, &clients, &mut tiers, 1);
+        assert!(tiers[SLOW as usize].is_none());
+    }
+
+    #[test]
+    fn slow_viewers_get_the_main_stream_when_the_others_leave() {
+        let hub = Hub::new();
+        let slow = viewer(&hub, 120.0, 3000.0);
+        let fast = viewer(&hub, 0.0, 7000.0);
+        let mut tiering = Tiering::new(true);
+        let mut tiers = main_tiers();
+        evaluate(&mut tiering, &[slow.clone(), fast], &mut tiers, SEEN_MIN);
+        assert_eq!(slow.tier.load(Ordering::Relaxed), SLOW);
+        slow.started.store(true, Ordering::Relaxed);
+        evaluate(&mut tiering, &[slow.clone()], &mut tiers, 1);
+        assert_eq!(slow.tier.load(Ordering::Relaxed), MAIN);
+        assert!(tiers[SLOW as usize].is_none());
+        // At the bitrate its own link was found to carry.
+        assert!((tiers[MAIN as usize].as_ref().unwrap().rc.target - 2550.0).abs() < 1.0);
+    }
 }
