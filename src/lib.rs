@@ -177,8 +177,17 @@ async fn serve(a: HashMap<String, String>) {
     let audio_on = truthy(a.get("audio-enabled"), true);
 
     let hub = hub::Hub::new();
-    // --enable-resize (as in selkies): clients resize the desktop to their window.
-    let screen = truthy(a.get("enable-resize"), false)
+    // --read-only: the viewer watches the desktop, it does not drive it. Only the
+    // commands watching needs are accepted (see server::READ_ONLY_COMMANDS), uploads
+    // are refused, and the page hides the controls that would send anything else.
+    let read_only = truthy(a.get("read-only"), false);
+    // --enable-resize (as in selkies): clients resize the desktop to their window. Not
+    // for read-only viewers: a new size changes the desktop for everyone.
+    let enable_resize = truthy(a.get("enable-resize"), false);
+    if enable_resize && read_only {
+        log::warn!("--enable-resize is ignored with --read-only: viewers can't resize the desktop");
+    }
+    let screen = (enable_resize && !read_only)
         .then(|| match screen::Screen::open(display.as_deref()) {
             Ok(s) => {
                 log::info!("dynamic resolution on, up to {}x{}", s.max().0, s.max().1);
@@ -248,10 +257,6 @@ async fn serve(a: HashMap<String, String>) {
         audio::spawn(dev, br, hub.clone());
     }
 
-    // --read-only: the viewer watches the desktop, it does not drive it. Input,
-    // clipboard writes, the microphone and uploads are refused; the page hides the
-    // controls that would send them.
-    let read_only = truthy(a.get("read-only"), false);
     // --file-transfers=upload,download (as in selkies); "none" turns both off.
     let transfers = a
         .get("file-transfers")

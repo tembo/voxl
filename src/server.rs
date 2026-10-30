@@ -185,8 +185,11 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     while let Some(Ok(msg)) = stream.next().await {
         match msg {
             Message::Text(t) => handle_text(&s, &client, t.as_str(), &mut rtts),
+            // Every binary message from a viewer acts on the desktop (clipboard images,
+            // microphone audio), so a read-only viewer's are all dropped.
+            Message::Binary(_) if s.read_only => {}
             // 0x11: clipboard image (PNG) pasted on the client.
-            Message::Binary(b) if b.first() == Some(&0x11) && b.len() > 1 && !s.read_only => {
+            Message::Binary(b) if b.first() == Some(&0x11) && b.len() > 1 => {
                 if let Some(tx) = s.hub.input.lock().as_ref() {
                     let _ = tx.send(InputEvent::Clipboard(crate::desktop::ClipContent::Image(
                         b[1..].to_vec(),
@@ -224,11 +227,17 @@ fn num<T: std::str::FromStr>(it: &mut std::str::Split<'_, char>) -> Option<T> {
     it.next()?.trim().parse().ok()
 }
 
+/// Commands a --read-only viewer may send: acks, video and audio on/off, keyframe
+/// requests and ping replies. Everything else acts on the desktop (input, clipboard,
+/// microphone, resizing) and is dropped. The web client keeps the same list.
+const READ_ONLY_COMMANDS: &[&str] = &["a", "v", "au", "kf", "po"];
+
 fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collections::VecDeque<u32>) {
     let (cmd, rest) = t.split_once(',').unwrap_or((t, ""));
-    // --read-only: drop every command that changes the desktop, right where the
-    // others are applied, so a client that ignores the hello flag cannot drive it.
-    if s.read_only && matches!(cmd, "m" | "b" | "s" | "sp" | "k" | "r" | "c" | "mi") {
+    // --read-only: accept only what watching needs, right where commands are applied,
+    // so a client that ignores the hello flag cannot drive the desktop, whatever
+    // commands are added later.
+    if s.read_only && !READ_ONLY_COMMANDS.contains(&cmd) {
         return;
     }
     let input = |ev: InputEvent| {
@@ -334,5 +343,88 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every command the web client sends (web/src/protocol.ts), with arguments.
+    const ALL: &[&str] = &[
+        "a,1",
+        "m,10,20",
+        "b,1,1",
+        "b,1,0",
+        "s,0,1",
+        "sp,0.0,12.0",
+        "k,65,1",
+        "k,65,0",
+        "r",
+        "c,text",
+        "v,1",
+        "au,1",
+        "mi,1",
+        "sz,640,480",
+        "kf",
+        "po,1",
+    ];
+
+    /// Sends every command to a server that has input, a microphone and resizing wired
+    /// up, and returns (input events, microphone messages, a resize was asked for).
+    fn drive(read_only: bool) -> (usize, usize, bool) {
+        let hub = Hub::new();
+        hub.width.store(1280, Ordering::Relaxed);
+        hub.height.store(800, Ordering::Relaxed);
+        *hub.resize_max.lock() = Some((2560, 1600));
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        *hub.input.lock() = Some(input_tx);
+        let (mic_tx, mic_rx) = std::sync::mpsc::channel();
+        let s = AppState {
+            hub: hub.clone(),
+            audio: true,
+            epoch: Instant::now(),
+            files: Arc::new(crate::files::Files {
+                root: std::env::temp_dir(),
+                upload: false,
+                download: false,
+                default_dir: String::new(),
+                max_upload_bytes: 0,
+            }),
+            mic: Some(mic_tx),
+            resize: true,
+            read_only,
+            recorder: crate::record::Recorder::new(hub.clone(), Duration::from_secs(1)),
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = hub.add_client(tx);
+        let mut rtts = Default::default();
+        for c in ALL {
+            handle_text(&s, &client, c, &mut rtts);
+        }
+        let resized = hub.resize_req.lock().is_some();
+        (
+            input_rx.try_iter().count(),
+            mic_rx.try_iter().count(),
+            resized,
+        )
+    }
+
+    #[test]
+    fn read_only_viewers_cannot_act_on_the_desktop() {
+        let (input, mic, resized) = drive(true);
+        assert_eq!(input, 0, "input events from a read-only viewer");
+        assert_eq!(mic, 0, "microphone messages from a read-only viewer");
+        assert!(!resized, "a read-only viewer resized the desktop");
+    }
+
+    #[test]
+    fn other_viewers_still_can() {
+        // The same commands do reach the desktop without --read-only, so the test above
+        // checks the guard rather than an unwired server.
+        let (input, mic, resized) = drive(false);
+        assert!(input >= 9, "{input} input events");
+        assert_eq!(mic, 1);
+        assert!(resized);
     }
 }
