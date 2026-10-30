@@ -1,6 +1,6 @@
 // Main thread: layout, input capture, cursor, clipboard, files, microphone and audio.
 // Video decode/paint and the socket live in the worker (worker.ts).
-import { Bin, cmd } from '../protocol';
+import { cmd } from '../protocol';
 import type { FromWorker, ToWorker } from '../protocol';
 import type { App } from './app';
 import { el } from './app';
@@ -16,14 +16,16 @@ import { setupToolbar } from './toolbar';
 import { createVideo } from './video';
 
 /**
- * Commands that act on the desktop. A read-only viewer does not send them: the
- * server drops them as well, so a page that ignores the hello flag cannot drive
- * the desktop either, and this keeps the pointer and the caret out of the way.
+ * Commands a read-only viewer sends: acks, video and audio on/off, keyframe requests
+ * and ping replies. Anything else would act on the desktop (input, clipboard,
+ * microphone, resizing). The server accepts only these from read-only viewers too
+ * (READ_ONLY_COMMANDS in server.rs), so a page that ignores the hello flag cannot
+ * drive the desktop either; this keeps it from sending what would be dropped.
  */
-const INPUT_COMMANDS = new Set(['m', 'b', 'k', 's', 'sp', 'r', 'c', 'mi']);
+const READ_ONLY_COMMANDS = new Set(['a', 'v', 'au', 'kf', 'po']);
 
 function blocksInput(app: App, command: string): boolean {
-	return app.readOnly && INPUT_COMMANDS.has(command.split(',')[0]);
+	return app.readOnly && !READ_ONLY_COMMANDS.has(command.split(',')[0]);
 }
 
 function main() {
@@ -53,7 +55,8 @@ function main() {
 			if (!blocksInput(app, d)) post({ t: 'send', d });
 		},
 		sendBin: (type, bytes) => {
-			if (app.readOnly && type === Bin.ClipImageUp) return;
+			// The server drops every binary message from read-only viewers.
+			if (app.readOnly) return;
 			const msg = new Uint8Array(bytes.byteLength + 1);
 			msg[0] = type;
 			msg.set(bytes, 1);
