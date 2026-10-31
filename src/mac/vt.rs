@@ -224,7 +224,10 @@ impl Encoder {
         // Keyframes only when voxl asks for one (a new viewer, a lost frame).
         let keyint = CFNumber::new_i32(i32::MAX);
         unsafe {
-            enc.set(kVTCompressionPropertyKey_RealTime, t);
+            enc.set(
+                kVTCompressionPropertyKey_RealTime,
+                CFBoolean::new(std::env::var("VOXL_VT_REALTIME").as_deref() != Ok("0")),
+            );
             enc.set(kVTCompressionPropertyKey_AllowFrameReordering, f);
             enc.set(
                 kVTCompressionPropertyKey_ProfileLevel,
@@ -534,40 +537,60 @@ mod tests {
                     max_kbps: kbps,
                     hardware,
                 };
-                let mut enc = Any::new(&cfg).unwrap();
-                assert_eq!(enc.is_hardware(), hardware);
-                let name = if hardware { "videotoolbox" } else { "x264" };
-                let mut y = vec![30u8; w * h];
-                let mut stream = Vec::new();
-                let (t0, c0) = (Instant::now(), host_cpu_ms());
-                for f in 0..frames {
-                    frame(f, &mut y);
-                    let planes = Planes {
-                        y: &y,
-                        u: &u,
-                        v: &v,
-                        stride_y: w,
-                        stride_uv: w / 2,
-                    };
-                    enc.encode(
-                        &planes,
-                        (f * 1000 / fps) as i64,
-                        f == 0,
-                        None,
-                        None,
-                        &mut stream,
-                    )
-                    .unwrap();
-                }
-                let (wall, cpu) = (t0.elapsed().as_secs_f64() * 1000.0, host_cpu_ms() - c0);
-                println!(
-                    "{name} at {kbps} kbps: {:.2} ms/frame wall, {:.2} ms/frame CPU (machine), {:.1} Mbps",
-                    wall / frames as f64,
-                    cpu / frames as f64,
-                    stream.len() as f64 * 8.0 * fps as f64 / frames as f64 / 1e6
-                );
-                if let Some(d) = &dump {
-                    std::fs::write(d.join(format!("{name}-{kbps}.h264")), &stream).unwrap();
+                for paced in [false, true] {
+                    let mut enc = Any::new(&cfg).unwrap();
+                    assert_eq!(enc.is_hardware(), hardware);
+                    let name = if hardware { "videotoolbox" } else { "x264" };
+                    let mut y = vec![30u8; w * h];
+                    let mut stream = Vec::new();
+                    let mut lat = Vec::new();
+                    let (t0, c0) = (Instant::now(), host_cpu_ms());
+                    for f in 0..frames {
+                        frame(f, &mut y);
+                        if paced {
+                            // As captures arrive: one every 1/60 s.
+                            let due = t0 + Duration::from_micros((f * 1_000_000 / fps) as u64);
+                            std::thread::sleep(due.saturating_duration_since(Instant::now()));
+                        }
+                        let planes = Planes {
+                            y: &y,
+                            u: &u,
+                            v: &v,
+                            stride_y: w,
+                            stride_uv: w / 2,
+                        };
+                        // As voxl's stripe worker does: a keyframe gets 4x the cap.
+                        if f == 0 {
+                            enc.set_rate_buf(24.0, kbps * 4, kbps * 4 / fps as u32 * 8);
+                        } else if f == 1 {
+                            enc.set_rate(24.0, kbps);
+                        }
+                        let t = Instant::now();
+                        enc.encode(
+                            &planes,
+                            (f * 1000 / fps) as i64,
+                            f == 0,
+                            None,
+                            None,
+                            &mut stream,
+                        )
+                        .unwrap();
+                        lat.push(t.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    let (wall, cpu) = (t0.elapsed().as_secs_f64() * 1000.0, host_cpu_ms() - c0);
+                    lat.sort_by(f64::total_cmp);
+                    println!(
+                        "{name} at {kbps} kbps{}: {:.2} ms/frame wall, {:.2} ms/frame CPU (machine), encode p50 {:.1} p99 {:.1} ms, {:.1} Mbps",
+                        if paced { ", paced" } else { "" },
+                        wall / frames as f64,
+                        cpu / frames as f64,
+                        lat[frames / 2],
+                        lat[frames * 99 / 100],
+                        stream.len() as f64 * 8.0 * fps as f64 / frames as f64 / 1e6
+                    );
+                    if let (Some(d), true) = (&dump, paced) {
+                        std::fs::write(d.join(format!("{name}-{kbps}.h264")), &stream).unwrap();
+                    }
                 }
             }
         }

@@ -88,6 +88,8 @@ jobs:
         run: |
           brew install ffmpeg
           VOXL_VT_DUMP=$RUNNER_TEMP/vt cargo test --release --locked vt::tests::encode_cost -- --ignored --nocapture
+          echo "== RealTime off"
+          VOXL_VT_REALTIME=0 cargo test --release --locked vt::tests::encode_cost -- --ignored --nocapture 2>&1 | grep videotoolbox
           cd $RUNNER_TEMP/vt
           for s in *.h264; do
             echo "== $s"
