@@ -8,8 +8,9 @@
 //! of every keyframe, as x264 writes it, so viewers and recordings take it unchanged.
 //!
 //! Quality follows x264's CRF where macOS allows it: the CRF becomes the lowest QP a
-//! frame may use (macOS 14+), so still content isn't sent sharper than x264 would, and
-//! paint-overs (a lower CRF) sharpen it. The bitrate cap becomes the average bitrate.
+//! frame may use (on versions with `MinAllowedFrameQP`), so the stream doesn't spend
+//! more than x264 would, and paint-overs (a lower CRF) sharpen it. The bitrate cap
+//! becomes the average bitrate.
 //! x264's macroblock hints have no VideoToolbox equivalent; the whole stripe is encoded.
 
 use super::ffi::*;
@@ -25,8 +26,8 @@ unsafe fn cf<'a, T>(p: *const c_void) -> &'a T {
     &*(p as *const T)
 }
 
-/// `kVTCompressionPropertyKey_MinAllowedFrameQP`, if this macOS has it (14 and later);
-/// looked up at run time so voxl still starts on older versions.
+/// `kVTCompressionPropertyKey_MinAllowedFrameQP`, if this macOS has it (newer versions
+/// do); looked up at run time so voxl still starts on older ones.
 fn min_qp_key() -> Option<CFStringRef> {
     let sym = unsafe {
         libc::dlsym(
@@ -513,7 +514,14 @@ mod tests {
                 y[(150 + r) * w + 300..][..pw].copy_from_slice(&page[src * pw..][..pw]);
             }
         };
-        let (u, v) = (vec![128u8; w * h / 4], vec![128u8; w * h / 4]);
+        // Colour gradients, so a mix-up of the chroma planes would show.
+        let (cw, ch) = (w / 2, h / 2);
+        let u: Vec<u8> = (0..cw * ch)
+            .map(|i| (64 + (i % cw) * 128 / cw) as u8)
+            .collect();
+        let v: Vec<u8> = (0..cw * ch)
+            .map(|i| (192 - (i / cw) * 128 / ch) as u8)
+            .collect();
         let dump = std::env::var("VOXL_VT_DUMP")
             .ok()
             .map(std::path::PathBuf::from);
