@@ -87,9 +87,13 @@ jobs:
       - name: VideoToolbox bench
         run: |
           brew install ffmpeg
-          VOXL_VT_DUMP=$RUNNER_TEMP/vt cargo test --release --locked vt::tests::encode_cost -- --ignored --nocapture
-          echo "== RealTime off"
-          VOXL_VT_REALTIME=0 cargo test --release --locked vt::tests::encode_cost -- --ignored --nocapture 2>&1 | grep videotoolbox
+          # Spotlight indexing big files skews the machine's CPU time.
+          sudo mdutil -a -i off || true
+          sleep 10
+          for run in 1 2; do
+            cargo test --release --locked vt::tests::encode_cost -- --ignored --nocapture 2>&1 | grep -E "kbps|MinAllowed"
+          done
+          VOXL_VT_DUMP=$RUNNER_TEMP/vt cargo test --release --locked vt::tests::encode_cost -- --ignored >/dev/null
           cd $RUNNER_TEMP/vt
           for s in *.h264; do
             echo "== $s"

@@ -224,10 +224,7 @@ impl Encoder {
         // Keyframes only when voxl asks for one (a new viewer, a lost frame).
         let keyint = CFNumber::new_i32(i32::MAX);
         unsafe {
-            enc.set(
-                kVTCompressionPropertyKey_RealTime,
-                CFBoolean::new(std::env::var("VOXL_VT_REALTIME").as_deref() != Ok("0")),
-            );
+            enc.set(kVTCompressionPropertyKey_RealTime, t);
             enc.set(kVTCompressionPropertyKey_AllowFrameReordering, f);
             enc.set(
                 kVTCompressionPropertyKey_ProfileLevel,
@@ -450,6 +447,14 @@ mod tests {
         assert!(avcc_to_annex_b(&[0, 0, 0, 9, 0x65], 4, &mut Vec::new()).is_none());
     }
 
+    /// CPU time this process has used (ms).
+    fn own_cpu_ms() -> f64 {
+        let mut r: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut r) };
+        (r.ru_utime.tv_sec + r.ru_stime.tv_sec) as f64 * 1e3
+            + (r.ru_utime.tv_usec + r.ru_stime.tv_usec) as f64 / 1e3
+    }
+
     /// CPU time the whole machine has used (ms): VideoToolbox encodes in another process.
     #[allow(deprecated)]
     fn host_cpu_ms() -> f64 {
@@ -544,7 +549,7 @@ mod tests {
                     let mut y = vec![30u8; w * h];
                     let mut stream = Vec::new();
                     let mut lat = Vec::new();
-                    let (t0, c0) = (Instant::now(), host_cpu_ms());
+                    let (t0, c0, o0) = (Instant::now(), host_cpu_ms(), own_cpu_ms());
                     for f in 0..frames {
                         frame(f, &mut y);
                         if paced {
@@ -577,12 +582,17 @@ mod tests {
                         .unwrap();
                         lat.push(t.elapsed().as_secs_f64() * 1000.0);
                     }
-                    let (wall, cpu) = (t0.elapsed().as_secs_f64() * 1000.0, host_cpu_ms() - c0);
+                    let (wall, cpu, own) = (
+                        t0.elapsed().as_secs_f64() * 1000.0,
+                        host_cpu_ms() - c0,
+                        own_cpu_ms() - o0,
+                    );
                     lat.sort_by(f64::total_cmp);
                     println!(
-                        "{name} at {kbps} kbps{}: {:.2} ms/frame wall, {:.2} ms/frame CPU (machine), encode p50 {:.1} p99 {:.1} ms, {:.1} Mbps",
+                        "{name} at {kbps} kbps{}: {:.2} ms/frame wall, CPU {:.2} ms/frame (this process) {:.2} (machine), encode p50 {:.1} p99 {:.1} ms, {:.1} Mbps",
                         if paced { ", paced" } else { "" },
                         wall / frames as f64,
+                        own / frames as f64,
                         cpu / frames as f64,
                         lat[frames / 2],
                         lat[frames * 99 / 100],
