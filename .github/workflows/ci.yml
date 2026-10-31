@@ -83,6 +83,18 @@ jobs:
       # Includes encoding through VideoToolbox (src/mac/vt.rs).
       - name: Test
         run: cargo test --release --locked -- --nocapture
+      # TEMPORARY: VideoToolbox vs x264 cost and quality; removed before review.
+      - name: VideoToolbox bench
+        run: |
+          brew install ffmpeg
+          VOXL_VT_DUMP=$RUNNER_TEMP/vt cargo test --release --locked vt::tests::encode_cost -- --ignored --nocapture
+          cd $RUNNER_TEMP/vt
+          for s in *.h264; do
+            echo "== $s"
+            ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=profile,color_range,color_space,color_primaries,color_transfer,nb_read_frames -of compact "$s"
+            ffmpeg -hide_banner -v error -i "$s" -f null - && echo "decode: no errors"
+            ffmpeg -hide_banner -f rawvideo -pix_fmt yuv420p -s 2560x1600 -framerate 60 -i source.yuv -framerate 60 -i "$s" -lavfi "[1:v][0:v]psnr" -f null - 2>&1 | grep -o "PSNR.*" || true
+          done
 
   windows:
     name: Windows (rustfmt, clippy, smoke test)

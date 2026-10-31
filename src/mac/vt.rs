@@ -447,6 +447,132 @@ mod tests {
         assert!(avcc_to_annex_b(&[0, 0, 0, 9, 0x65], 4, &mut Vec::new()).is_none());
     }
 
+    /// CPU time the whole machine has used (ms): VideoToolbox encodes in another process.
+    #[allow(deprecated)]
+    fn host_cpu_ms() -> f64 {
+        unsafe {
+            let mut info: libc::host_cpu_load_info = std::mem::zeroed();
+            let mut count = libc::HOST_CPU_LOAD_INFO_COUNT;
+            libc::host_statistics(
+                libc::mach_host_self(),
+                libc::HOST_CPU_LOAD_INFO,
+                &mut info as *mut _ as libc::host_info_t,
+                &mut count,
+            );
+            // user, system, idle, nice
+            let t = info.cpu_ticks.map(u64::from);
+            (t[0] + t[1] + t[3]) as f64 * 1000.0 / libc::sysconf(libc::_SC_CLK_TCK) as f64
+        }
+    }
+
+    /// VideoToolbox against x264 on a 2560x1600 desktop with a 1080p window scrolling text
+    /// (like bench/loadgen): CPU and wall time per frame, and bitrate, at two bitrate
+    /// caps. With VOXL_VT_DUMP=dir, the source (I420) and every stream go there, for
+    /// checking quality with ffmpeg's psnr filter.
+    ///
+    /// cargo test --release vt::tests::encode_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn encode_cost() {
+        use crate::encoder::Encoder as Any;
+        let (w, h, fps, frames) = (2560usize, 1600usize, 60, 120usize);
+        // A page of text-like rows twice the window's height, scrolled 8 px a frame.
+        let (pw, ph) = (1920usize, 1080usize);
+        let page: Vec<u8> = (0..pw * ph * 2)
+            .map(|i| {
+                let (x, y) = (i % pw, i / pw);
+                let (line, row) = (y / 24, y % 24);
+                if line % 17 == 0 {
+                    return 105;
+                }
+                let ink = row > 4
+                    && row < 18
+                    && x > 40
+                    && x < 40 + (line * 7919) % (pw - 200)
+                    && (x / 9 + line * 31) % 7 != 0
+                    && x % 9 < 7
+                    && (x * 13 + y * 7 + line) % 5 < 3;
+                if ink {
+                    32
+                } else {
+                    245
+                }
+            })
+            .collect();
+        let frame = |f: usize, y: &mut [u8]| {
+            for r in 0..ph {
+                let src = (r + f * 8) % (ph * 2);
+                y[(150 + r) * w + 300..][..pw].copy_from_slice(&page[src * pw..][..pw]);
+            }
+        };
+        let (u, v) = (vec![128u8; w * h / 4], vec![128u8; w * h / 4]);
+        let dump = std::env::var("VOXL_VT_DUMP")
+            .ok()
+            .map(std::path::PathBuf::from);
+        if let Some(d) = &dump {
+            let mut src = Vec::with_capacity(w * h * 3 / 2 * frames);
+            let mut y = vec![30u8; w * h];
+            for f in 0..frames {
+                frame(f, &mut y);
+                src.extend_from_slice(&y);
+                src.extend_from_slice(&u);
+                src.extend_from_slice(&v);
+            }
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("source.yuv"), src).unwrap();
+        }
+        println!("MinAllowedFrameQP: {}", min_qp_key().is_some());
+        for kbps in [16000u32, 60000] {
+            for hardware in [false, true] {
+                let cfg = EncoderConfig {
+                    width: w as u32,
+                    height: h as u32,
+                    fps: fps as u32,
+                    preset: "ultrafast".into(),
+                    threads: 4,
+                    crf: 24.0,
+                    max_kbps: kbps,
+                    hardware,
+                };
+                let mut enc = Any::new(&cfg).unwrap();
+                assert_eq!(enc.is_hardware(), hardware);
+                let name = if hardware { "videotoolbox" } else { "x264" };
+                let mut y = vec![30u8; w * h];
+                let mut stream = Vec::new();
+                let (t0, c0) = (Instant::now(), host_cpu_ms());
+                for f in 0..frames {
+                    frame(f, &mut y);
+                    let planes = Planes {
+                        y: &y,
+                        u: &u,
+                        v: &v,
+                        stride_y: w,
+                        stride_uv: w / 2,
+                    };
+                    enc.encode(
+                        &planes,
+                        (f * 1000 / fps) as i64,
+                        f == 0,
+                        None,
+                        None,
+                        &mut stream,
+                    )
+                    .unwrap();
+                }
+                let (wall, cpu) = (t0.elapsed().as_secs_f64() * 1000.0, host_cpu_ms() - c0);
+                println!(
+                    "{name} at {kbps} kbps: {:.2} ms/frame wall, {:.2} ms/frame CPU (machine), {:.1} Mbps",
+                    wall / frames as f64,
+                    cpu / frames as f64,
+                    stream.len() as f64 * 8.0 * fps as f64 / frames as f64 / 1e6
+                );
+                if let Some(d) = &dump {
+                    std::fs::write(d.join(format!("{name}-{kbps}.h264")), &stream).unwrap();
+                }
+            }
+        }
+    }
+
     /// Encodes a moving picture and checks what viewers get: Annex B, SPS and PPS ahead
     /// of every keyframe, and keyframes where they were asked for.
     #[test]
