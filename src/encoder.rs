@@ -1,4 +1,5 @@
-//! Thin safe wrapper around libx264 tuned for low-latency desktop streaming.
+//! The H.264 encoder: libx264 tuned for low-latency desktop streaming, or on a Mac with
+//! `--encoder=videotoolbox`, the media engine through VideoToolbox (`mac::vt`).
 
 #![allow(
     non_camel_case_types,
@@ -23,9 +24,79 @@ pub struct EncoderConfig {
     pub crf: f32,
     /// VBV cap in kbit/s (0 = uncapped).
     pub max_kbps: u32,
+    /// Encode on the GPU's media engine where there is one (macOS: VideoToolbox).
+    pub hardware: bool,
 }
 
-pub struct Encoder {
+pub enum Encoder {
+    /// Boxed: x264's parameters are over a kilobyte.
+    X264(Box<X264>),
+    #[cfg(target_os = "macos")]
+    VideoToolbox(crate::mac::vt::Encoder),
+}
+
+impl Encoder {
+    /// A hardware encoder if `cfg.hardware` asks for one and this machine has one,
+    /// otherwise x264.
+    pub fn new(cfg: &EncoderConfig) -> Result<Self, String> {
+        #[cfg(target_os = "macos")]
+        if cfg.hardware {
+            match crate::mac::vt::Encoder::new(cfg) {
+                Ok(e) => return Ok(Encoder::VideoToolbox(e)),
+                Err(e) => {
+                    static WARNED: std::sync::Once = std::sync::Once::new();
+                    WARNED.call_once(|| {
+                        log::warn!("VideoToolbox unavailable ({e}); encoding with x264")
+                    });
+                }
+            }
+        }
+        X264::new(cfg).map(|e| Encoder::X264(Box::new(e)))
+    }
+
+    /// Encodes on dedicated hardware, where x264's threading doesn't apply.
+    pub fn is_hardware(&self) -> bool {
+        !matches!(self, Encoder::X264(_))
+    }
+
+    /// Reconfigure rate control on the fly (buffer of ~1.25 frames at `max_kbps`).
+    pub fn set_rate(&mut self, crf: f32, max_kbps: u32) {
+        match self {
+            Encoder::X264(e) => e.set_rate(crf, max_kbps),
+            #[cfg(target_os = "macos")]
+            Encoder::VideoToolbox(e) => e.set_rate(crf, max_kbps),
+        }
+    }
+
+    /// Reconfigure rate control with an explicit VBV buffer (kbit).
+    pub fn set_rate_buf(&mut self, crf: f32, max_kbps: u32, buf_kbit: u32) {
+        match self {
+            Encoder::X264(e) => e.set_rate_buf(crf, max_kbps, buf_kbit),
+            #[cfg(target_os = "macos")]
+            Encoder::VideoToolbox(e) => e.set_rate_buf(crf, max_kbps, buf_kbit),
+        }
+    }
+
+    /// Encode one picture (see `X264::encode`; a hardware encoder ignores `qp` and
+    /// `mb_info`). Appends Annex-B output to `out` and returns whether it is a keyframe.
+    pub fn encode(
+        &mut self,
+        p: &Planes,
+        ts_ms: i64,
+        force_idr: bool,
+        qp: Option<i32>,
+        mb_info: Option<&mut [u8]>,
+        out: &mut Vec<u8>,
+    ) -> Result<bool, String> {
+        match self {
+            Encoder::X264(e) => e.encode(p, ts_ms, force_idr, qp, mb_info, out),
+            #[cfg(target_os = "macos")]
+            Encoder::VideoToolbox(e) => e.encode(p, ts_ms, force_idr, out),
+        }
+    }
+}
+
+pub struct X264 {
     h: *mut ffi::x264_t,
     param: ffi::x264_param_t,
     pic: ffi::x264_picture_t,
@@ -34,7 +105,7 @@ pub struct Encoder {
     pub height: u32,
 }
 
-unsafe impl Send for Encoder {}
+unsafe impl Send for X264 {}
 
 pub struct Planes<'a> {
     pub y: &'a [u8],
@@ -44,7 +115,7 @@ pub struct Planes<'a> {
     pub stride_uv: usize,
 }
 
-impl Encoder {
+impl X264 {
     pub fn new(cfg: &EncoderConfig) -> Result<Self, String> {
         unsafe {
             let mut param: ffi::x264_param_t = std::mem::zeroed();
@@ -109,7 +180,7 @@ impl Encoder {
             ffi::x264_picture_init(&mut pic);
             pic.img.i_csp = ffi::X264_CSP_I420 as i32;
             pic.img.i_plane = 3;
-            Ok(Encoder {
+            Ok(X264 {
                 h,
                 param,
                 pic,
@@ -199,7 +270,7 @@ impl Encoder {
     }
 }
 
-impl Drop for Encoder {
+impl Drop for X264 {
     fn drop(&mut self) {
         unsafe { ffi::x264_encoder_close(self.h) }
     }
@@ -238,6 +309,7 @@ mod bench {
                 threads,
                 crf: 24.0,
                 max_kbps: 30000,
+                hardware: false,
             })
             .unwrap();
             let mut y = vec![0u8; w * h];

@@ -27,6 +27,8 @@ pub struct VideoConfig {
     pub coalesce: Duration,
     pub stripes: u32,
     pub adaptive_threads: bool,
+    /// Encode on the media engine where there is one (--encoder=videotoolbox on a Mac).
+    pub hardware: bool,
 }
 
 struct Job {
@@ -140,8 +142,11 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
             threads: fixed,
             crf: cfg.crf,
             max_kbps: cfg.max_kbps,
+            hardware: cfg.hardware,
         };
-        let max_threads = if cfg.adaptive_threads {
+        let enc = Encoder::new(&ecfg)?;
+        // A hardware encoder has no threads to fan out to.
+        let max_threads = if cfg.adaptive_threads && !enc.is_hardware() {
             (cfg.threads / layout.len() as u32).max(1)
         } else {
             1
@@ -149,7 +154,7 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
         stripes.push(Stripe {
             y: y as usize,
             h: sh as usize,
-            enc: Encoder::new(&ecfg)?,
+            enc,
             cfg: ecfg,
             max_threads,
             applied_kbps: 0,
