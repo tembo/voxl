@@ -83,33 +83,6 @@ jobs:
       # Includes encoding through VideoToolbox (src/mac/vt.rs).
       - name: Test
         run: cargo test --release --locked -- --nocapture
-      # TEMPORARY: VideoToolbox vs x264 quality check; removed before review.
-      - name: VideoToolbox quality
-        run: |
-          brew install ffmpeg
-          VOXL_VT_DUMP=$RUNNER_TEMP/vt cargo test --release --locked vt::tests::encode_cost -- --ignored --nocapture 2>&1 | grep -E "kbps|MinAllowed"
-          cd $RUNNER_TEMP/vt
-          for s in videotoolbox-16000.h264 x264-16000.h264; do
-            echo "== $s"
-            ffmpeg -hide_banner -v error -i "$s" -f null - && echo "decode: no errors"
-            ffmpeg -hide_banner -f rawvideo -pix_fmt yuv420p -s 2560x1600 -framerate 60 -i source.yuv -framerate 60 -i "$s" -lavfi "[1:v][0:v]psnr" -f null - 2>&1 | grep -o "PSNR.*" || true
-          done
-          for s in x264-16000 videotoolbox-16000; do
-            ffmpeg -hide_banner -v error -f rawvideo -pix_fmt yuv420p -s 2560x1600 -framerate 60 -i source.yuv -framerate 60 -i $s.h264 -lavfi "[1:v][0:v]psnr=stats_file=$s.psnr" -f null -
-          done
-          echo "x264 PSNR by frame:"; awk '{print $1, $6}' x264-16000.psnr | tr '\n' ' '; echo
-          echo "videotoolbox PSNR by frame:"; awk '{print $1, $6}' videotoolbox-16000.psnr | tr '\n' ' '; echo
-          # The frame x264 does worst on (after the first), and a typical one (frame 60):
-          # source, x264, VideoToolbox, a crop of the scrolling window at 2x.
-          worst=$(awk 'NR>1 {split($6,a,":"); print a[2], $1}' x264-16000.psnr | sort -n | head -1 | awk '{split($2,b,":"); print b[2]-1}')
-          echo "x264's worst frame: $worst"
-          for n in $worst 60; do
-            ffmpeg -hide_banner -v error -f rawvideo -pix_fmt yuv420p -s 2560x1600 -framerate 60 -i source.yuv -framerate 60 -i x264-16000.h264 -framerate 60 -i videotoolbox-16000.h264 -filter_complex "[0:v]select=eq(n\\,$n),crop=600:160:400:420,scale=1200:320:flags=neighbor[a];[1:v]select=eq(n\\,$n),crop=600:160:400:420,scale=1200:320:flags=neighbor[b];[2:v]select=eq(n\\,$n),crop=600:160:400:420,scale=1200:320:flags=neighbor[c];[a][b][c]vstack=inputs=3" -frames:v 1 $RUNNER_TEMP/compare-$n.png
-          done
-      - uses: actions/upload-artifact@v4
-        with:
-          name: vt-compare
-          path: ${{ runner.temp }}/compare-*.png
 
   windows:
     name: Windows (rustfmt, clippy, smoke test)
