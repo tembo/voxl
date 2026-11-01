@@ -4,6 +4,7 @@
 //! The `voxl` binary calls [`run`] with its command line; other programs (the Tembo CLI's
 //! `tembo voxl`) embed the server the same way.
 
+mod access;
 #[cfg(target_os = "linux")]
 mod audio;
 #[cfg(target_os = "linux")]
@@ -341,7 +342,14 @@ async fn serve(a: HashMap<String, String>) {
                 .map_or("Voxl Computer Stream", |t| t.as_str()),
         ),
     };
-    let app = server::router(state);
+    // --allowed-hosts and --allowed-origins: the host names and other sites voxl answers
+    // besides IP addresses, localhost and its own page (see access.rs).
+    let access = std::sync::Arc::new(access::Access::new(
+        a.get("allowed-hosts").map(|s| s.as_str()),
+        a.get("allowed-origins").map(|s| s.as_str()),
+    ));
+    let app =
+        server::router(state).layer(axum::middleware::from_fn_with_state(access, access::check));
     let listener = tokio::net::TcpListener::bind((addr.as_str(), port))
         .await
         .expect("bind");

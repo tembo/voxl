@@ -100,11 +100,21 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 | `--scroll-px-per-notch`                                        | `180`                              | desktop pixels one wheel notch scrolls (calibrates smooth scrolling)                                              |
 | `--file-transfers`                                             | `upload,download`                  | `upload`, `download`, both, or `none`                                                                             |
 | `--read-only`                                                  | `false`                            | viewers only watch: input, clipboard writes, the microphone, uploads and resizing (`--enable-resize`) are refused |
+| `--allowed-hosts`                                              | none                               | host names to answer for besides IP addresses and `localhost` (`.example.com` covers subdomains, `*` any)         |
+| `--allowed-origins`                                            | none                               | other sites whose pages may connect, such as a page that embeds voxl's client (`*` any site)                      |
 | `--files-root`                                                 | `$HOME`                            | folder the Files panel can see; nothing outside it is reachable                                                   |
 | `--upload-dir`                                                 | `Downloads`                        | folder (under the root) the panel opens and uploads into; created on first upload                                 |
 | `--max-upload-mb`                                              | `0` (no limit)                     | largest accepted upload                                                                                           |
 | `--max-record-seconds`                                         | `300`                              | longest recording (`/record`)                                                                                     |
 | `--convert-threads`, `--coalesce-us`                           | `4`, `0`                           | tuning                                                                                                            |
+
+voxl only answers requests for an IP address or `localhost`, and only from its own page.
+That keeps out other web pages, which browsers let connect to any address, including
+pages whose domain is pointed at voxl's address (DNS rebinding). To reach voxl under a
+host name, such as through a proxy or as `my-pc.local`, name it with `--allowed-hosts`.
+To let a page on another site connect, name that site with `--allowed-origins`.
+Programs that aren't browsers (curl, scripts, agents) send no `Origin` and connect as
+usual. A refused request gets a 403 that names the flag to add.
 
 Screenshots and recordings, for agents and scripts:
 
