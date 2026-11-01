@@ -84,6 +84,11 @@ impl Encoder {
             param.rc.i_rc_method = ffi::X264_RC_CRF as i32;
             param.rc.f_rf_constant = cfg.crf;
             param.rc.i_lookahead = 0;
+            // ultrafast's diamond search only follows motion of a few pixels, so a dragged
+            // window or a fast scroll would be coded as new pixels every frame. UMH finds
+            // those shifts (a third of the bits for a window drag) for about the same CPU.
+            param.analyse.i_me_method = ffi::X264_ME_UMH as i32;
+            param.analyse.i_me_range = 64;
             // Per-macroblock "unchanged" hints from X damage let x264 skip analysis.
             param.analyse.b_mb_info = (std::env::var("VOXL_NO_MBINFO").is_err()) as i32;
             param.i_sync_lookahead = 0;
