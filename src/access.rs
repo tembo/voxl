@@ -32,7 +32,7 @@ impl Access {
         Access {
             // A port given with a host name doesn't matter: the name is what's rebound.
             hosts: list(hosts).iter().map(|h| split_host(h).0).collect(),
-            origins: list(origins),
+            origins: list(origins).iter().map(|o| origin_key(o)).collect(),
         }
     }
 
@@ -60,7 +60,8 @@ impl Access {
         }
         let origin = origin?.trim();
         let lower = origin.to_ascii_lowercase();
-        if self.origins.iter().any(|o| o == "*" || *o == lower) {
+        let key = origin_key(&lower);
+        if self.origins.iter().any(|o| o == "*" || *o == key) {
             return None;
         }
         // voxl's own page: the origin the browser loaded it from is the host it asks for.
@@ -107,6 +108,17 @@ fn split_origin(v: &str) -> Option<(String, Option<u16>, u16)> {
     };
     let (name, port) = split_host(rest);
     Some((name, port, default))
+}
+
+/// An origin with its port written out, so `https://a.example` and `https://a.example:443`
+/// compare equal; anything else as it is.
+fn origin_key(v: &str) -> String {
+    match (v.split_once("://"), split_origin(v)) {
+        (Some((scheme, _)), Some((name, port, default))) => {
+            format!("{scheme}://{name}:{}", port.unwrap_or(default))
+        }
+        _ => v.to_string(),
+    }
 }
 
 fn value(req: &Request, name: HeaderName) -> Option<&str> {
@@ -208,6 +220,29 @@ mod tests {
             &a,
             "abc.preview.example.com",
             Some("https://xyz.preview.example.com")
+        ));
+
+        // An allowed origin matches with or without its scheme's default port.
+        let ports = Access::new(None, Some("https://app.example.com:443,http://pc.example"));
+        assert!(served(
+            &ports,
+            "127.0.0.1:6901",
+            Some("https://app.example.com")
+        ));
+        assert!(served(
+            &ports,
+            "127.0.0.1:6901",
+            Some("http://pc.example:80")
+        ));
+        assert!(!served(
+            &ports,
+            "127.0.0.1:6901",
+            Some("https://app.example.com:8443")
+        ));
+        assert!(!served(
+            &ports,
+            "127.0.0.1:6901",
+            Some("http://app.example.com")
         ));
 
         let any = Access::new(Some("*"), Some("*"));
