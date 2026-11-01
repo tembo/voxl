@@ -19,6 +19,7 @@ mod files;
 mod hub;
 #[cfg(target_os = "linux")]
 mod input;
+mod login;
 #[cfg(target_os = "macos")]
 mod mac;
 mod mic;
@@ -348,12 +349,40 @@ async fn serve(a: HashMap<String, String>) {
         a.get("allowed-hosts").map(|s| s.as_str()),
         a.get("allowed-origins").map(|s| s.as_str()),
     ));
-    let app =
-        server::router(state).layer(axum::middleware::from_fn_with_state(access, access::check));
+    // The login (see login.rs): a password, given or made up at startup, unless
+    // --enable-basic-auth=false.
+    let login =
+        login::Login::from_args(&a).map(|(l, generated)| (std::sync::Arc::new(l), generated));
+    let mut app = server::router(state);
+    if let Some((l, _)) = &login {
+        app = app.layer(axum::middleware::from_fn_with_state(
+            l.clone(),
+            login::check,
+        ));
+    }
+    // Added last, so it runs first: a request for the wrong host or from another site's
+    // page is turned away before the login is asked for.
+    let app = app.layer(axum::middleware::from_fn_with_state(access, access::check));
     let listener = tokio::net::TcpListener::bind((addr.as_str(), port))
         .await
         .expect("bind");
     log::info!("listening on http://{addr}:{port}");
+    // Where to point a browser on this machine.
+    let page = match addr.as_str() {
+        "0.0.0.0" | "::" => format!("http://localhost:{port}/"),
+        a if a.contains(':') => format!("http://[{a}]:{port}/"),
+        a => format!("http://{a}:{port}/"),
+    };
+    match &login {
+        Some((l, true)) => log::info!(
+            "open {page}?token={} to sign in (the password is {0}; choose one with --basic-auth-password or VOXL_PASSWORD)",
+            l.password()
+        ),
+        Some((_, false)) => log::info!(
+            "login on: sign in at {page} with the password, or open {page}?token=<password>"
+        ),
+        None => log::info!("login off (--enable-basic-auth=false): anyone who reaches {page} can use this desktop"),
+    }
     use axum::serve::ListenerExt;
     let listener = listener.tap_io(|tcp| {
         let _ = tcp.set_nodelay(true);

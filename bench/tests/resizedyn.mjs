@@ -23,7 +23,7 @@ const xsize = () => execFileSync(process.env.XRANDR || 'xrandr', [], { env: { ..
 
 const xvfb = spawn(process.env.XVFB || 'Xvfb', [DISPLAY, '-screen', '0', '2560x1600x24', '-dpi', '144', '-shmem', '-ac', '-nolisten', 'tcp'], { stdio: 'ignore' });
 await sleep(1000);
-const voxl = spawn(bin, [`--port=${port}`, '--audio-enabled=false', '--enable-resize=true'], { env: { ...process.env, DISPLAY }, stdio: ['ignore', fs.openSync(log, 'w'), fs.openSync(log, 'a')] });
+const voxl = spawn(bin, [`--port=${port}`, '--audio-enabled=false', '--enable-basic-auth=false', '--enable-resize=true'], { env: { ...process.env, DISPLAY }, stdio: ['ignore', fs.openSync(log, 'w'), fs.openSync(log, 'a')] });
 let b;
 try {
 	for (let i = 0; i < 50; i++) { try { if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) break; } catch {} await sleep(100); }

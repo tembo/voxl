@@ -55,8 +55,10 @@ const ICON_CHEVRON = svg(
 	'<path d="M10 16L13.2929 12.7071C13.6834 12.3166 13.6834 11.6834 13.2929 11.2929L10 8"/>'
 );
 
+// The password from a sign-in link (/?token=...), passed on as the socket gets it.
+const token = new URLSearchParams(location.search).get('token');
 const api = (op: string, q: Record<string, string>) =>
-	`files/${op}?${new URLSearchParams(q)}`;
+	`files/${op}?${new URLSearchParams(token ? { ...q, token } : q)}`;
 const label = (p: string) => (p ? p.split('/').pop()! : 'Home');
 const join = (a: string, b: string) => (a ? a + '/' : '') + b;
 const size = (n: number) =>

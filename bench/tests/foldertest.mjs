@@ -33,7 +33,7 @@ fs.symlinkSync('/etc', path.join(proj, 'etc-link'));
 let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? 'PASS' : 'FAIL'} ${what}`); if (!ok) failed++; };
 
-const voxl = spawn(bin, [`--port=${port}`, '--audio-enabled=false', `--files-root=${root}`],
+const voxl = spawn(bin, [`--port=${port}`, '--audio-enabled=false', '--enable-basic-auth=false', `--files-root=${root}`],
 	{ env: { ...process.env, DISPLAY: process.env.BENCH_DISPLAY || ':2' }, stdio: 'ignore' });
 let b;
 try {

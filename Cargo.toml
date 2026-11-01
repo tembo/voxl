@@ -54,6 +54,8 @@ futures-util = { version = "0.3", default-features = false, features = [
 	"sink",
 ] }
 png = "0.18"
+base64 = "0.22"
+getrandom = "0.3"
 zip = { version = "7", default-features = false, features = [
 	"deflate-flate2-zlib-rs",
 ] }

@@ -1497,12 +1497,14 @@ name = "voxl-server"
 version = "0.3.1"
 dependencies = [
  "axum",
+ "base64",
  "bindgen",
  "block2",
  "bytes",
  "dispatch2",
  "env_logger",
  "futures-util",
+ "getrandom",
  "libc",
  "log",
  "nix",
