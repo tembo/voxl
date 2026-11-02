@@ -156,9 +156,19 @@ mod tests {
         )
     }
 
+    /// A login with a password made up at runtime, as voxl makes one, and the password.
+    fn with_random_password(user: Option<&str>) -> (Login, String) {
+        let password = random_password();
+        (
+            Login::new(user.map(str::to_string), password.clone()),
+            password,
+        )
+    }
+
     #[test]
     fn requests_without_the_password_are_refused() {
-        let login = Login::new(None, "s3cret".into());
+        let (login, pw) = with_random_password(None);
+        let wrong = &pw[1..];
         for uri in [
             "/",
             "/index.html",
@@ -169,9 +179,12 @@ mod tests {
             "/stats",
         ] {
             assert!(!admitted(&login, uri, None), "{uri}");
-            assert!(!admitted(&login, uri, Some("Bearer wrong")), "{uri}");
             assert!(
-                !admitted(&login, &format!("{uri}?token=s3cre"), None),
+                !admitted(&login, uri, Some(&format!("Bearer {wrong}"))),
+                "{uri}"
+            );
+            assert!(
+                !admitted(&login, &format!("{uri}?token={wrong}"), None),
                 "{uri}"
             );
         }
@@ -188,28 +201,42 @@ mod tests {
 
     #[test]
     fn each_way_of_sending_the_password_is_accepted() {
-        let login = Login::new(None, "p@ss word&=".into());
-        assert!(admitted(&login, "/screenshot", Some("Bearer p@ss word&=")));
-        assert!(admitted(&login, "/screenshot", Some("bearer p@ss word&=")));
+        let (login, pw) = with_random_password(None);
+        assert!(admitted(
+            &login,
+            "/screenshot",
+            Some(&format!("Bearer {pw}"))
+        ));
+        assert!(admitted(
+            &login,
+            "/screenshot",
+            Some(&format!("bearer {pw}"))
+        ));
         // Basic, with any user name (curl -u :password sends an empty one).
-        assert!(admitted(&login, "/", Some(&basic(":p@ss word&="))));
-        assert!(admitted(&login, "/", Some(&basic("me:p@ss word&="))));
-        assert!(!admitted(&login, "/", Some(&basic("me:p@ss"))));
+        assert!(admitted(&login, "/", Some(&basic(&format!(":{pw}")))));
+        assert!(admitted(&login, "/", Some(&basic(&format!("me:{pw}")))));
+        assert!(!admitted(
+            &login,
+            "/",
+            Some(&basic(&format!("me:{}", &pw[1..])))
+        ));
         assert!(!admitted(&login, "/", Some("Basic not-base64!")));
-        // The link's query, percent-encoded, beside the page's other parameters.
-        assert!(admitted(&login, "/?stats&token=p%40ss+word%26%3D", None));
-        assert!(admitted(&login, "/ws?token=p%40ss%20word%26%3D", None));
-        assert!(!admitted(&login, "/ws?token=p%40ss", None));
+        // The link's query, decoded (here every byte is percent-encoded), beside the
+        // page's other parameters.
+        let encoded: String = pw.bytes().map(|b| format!("%{b:02X}")).collect();
+        assert!(admitted(&login, &format!("/?stats&token={encoded}"), None));
+        assert!(admitted(&login, &format!("/ws?token={pw}"), None));
+        assert!(!admitted(&login, &format!("/ws?token={}", &pw[1..]), None));
     }
 
     #[test]
     fn basic_auth_user_has_to_match_when_set() {
-        let login = Login::new(Some("ubuntu".into()), "pw".into());
-        assert!(admitted(&login, "/", Some(&basic("ubuntu:pw"))));
-        assert!(!admitted(&login, "/", Some(&basic("root:pw"))));
+        let (login, pw) = with_random_password(Some("ubuntu"));
+        assert!(admitted(&login, "/", Some(&basic(&format!("ubuntu:{pw}")))));
+        assert!(!admitted(&login, "/", Some(&basic(&format!("root:{pw}")))));
         // The user name only applies to Basic credentials.
-        assert!(admitted(&login, "/", Some("Bearer pw")));
-        assert!(admitted(&login, "/?token=pw", None));
+        assert!(admitted(&login, "/", Some(&format!("Bearer {pw}"))));
+        assert!(admitted(&login, &format!("/?token={pw}"), None));
     }
 
     #[test]
@@ -220,9 +247,10 @@ mod tests {
                 .collect()
         };
         assert!(Login::from_args(&args(&[("enable-basic-auth", "false")])).is_none());
+        let given = random_password();
         let (login, generated) =
-            Login::from_args(&args(&[("basic-auth-password", "given")])).unwrap();
-        assert_eq!((login.password(), generated), ("given", false));
+            Login::from_args(&args(&[("basic-auth-password", &given)])).unwrap();
+        assert_eq!((login.password(), generated), (given.as_str(), false));
         // Without a password from the environment, an empty one counts as none and each
         // start makes up a different one.
         if std::env::var_os("VOXL_PASSWORD").is_none()
