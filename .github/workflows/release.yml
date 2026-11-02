@@ -1,7 +1,9 @@
 name: Release
 
-# Publishes to crates.io when a version tag (v0.2.0, ...) is pushed. Bump `version` in
-# Cargo.toml on main first; the tag has to match it.
+# Publishes to crates.io when a version tag (v0.2.0, ...) is pushed, then creates the
+# GitHub release: GitHub's generated notes (the pull requests merged since the previous
+# tag), with the published crate attached.
+# Bump `version` in Cargo.toml on main first; the tag has to match it.
 on:
   push:
     tags: ['v*']
@@ -31,3 +33,36 @@ jobs:
         run: nix-shell --arg withRust true --run 'cargo publish --locked'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # The exact package that went to crates.io, for the GitHub release.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crate
+          path: target/package/voxl-server-*.crate
+          if-no-files-found: error
+
+  github-release:
+    name: GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # History and tags, to find the previous release's tag.
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: crate
+          path: dist
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(--verify-tag --title "voxl ${GITHUB_REF_NAME#v}" --generate-notes)
+          # The notes list what was merged since the previous version tag.
+          prev=$(git describe --tags --abbrev=0 --match 'v*' "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          if [ -n "$prev" ]; then
+            args+=(--notes-start-tag "$prev")
+          fi
+          gh release create "$GITHUB_REF_NAME" "${args[@]}" dist/*.crate
