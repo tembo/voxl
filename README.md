@@ -80,6 +80,7 @@ DISPLAY=:1 ./target/release/voxl --port=6901
 Start Xvfb with `-shmem` for zero-copy capture, and use the patched Xvfb
 (`nix-build -E 'with import <nixpkgs> {}; callPackage ./xvfb.nix {}'`) for smooth
 scrolling. voxl accepts selkies' command-line flags; other selkies flags are ignored.
+`voxl --help` lists every flag with its default, and `voxl --version` prints the version.
 
 | Flag                                                           | Default                            |                                                                                                                   |
 | -------------------------------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------- |

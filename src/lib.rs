@@ -16,6 +16,7 @@ mod corners;
 mod desktop;
 mod encoder;
 mod files;
+mod help;
 mod hub;
 #[cfg(target_os = "linux")]
 mod input;
@@ -79,6 +80,11 @@ fn truthy(v: Option<&String>, default: bool) -> bool {
 /// Runs the server with these command-line flags (without the program name) until it's
 /// told to stop. Takes over the calling thread, which on macOS has to be the main thread.
 pub fn run(args: impl IntoIterator<Item = String>) {
+    let args: Vec<String> = args.into_iter().collect();
+    // --help and --version print and return instead of starting the server.
+    if help::print_if_asked(&args) {
+        return;
+    }
     let a = parse_args(args);
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
