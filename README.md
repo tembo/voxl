@@ -124,10 +124,8 @@ one up when it starts and prints a link that signs you in. There are three ways 
   `--basic-auth-user` names one) and the password. Password managers offer to save it.
 - **For programs**: `Authorization: Bearer <password>`, or `curl -u :<password>`.
 
-The page's scripts and `/healthz` load without it. The flags (and
-`SELKIES_BASIC_AUTH_PASSWORD`) are selkies' names for its login, so a selkies setup
-keeps its password. If voxl sits behind a proxy that signs people in itself,
-`--enable-basic-auth=false` turns voxl's login off.
+The page's scripts and `/healthz` load without it. If voxl sits behind a proxy that signs
+people in itself, `--enable-basic-auth=false` turns voxl's login off.
 
 ### Hosts and origins
 
