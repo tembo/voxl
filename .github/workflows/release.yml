@@ -1,8 +1,8 @@
 name: Release
 
 # Publishes to crates.io when a version tag (v0.2.0, ...) is pushed, then creates the
-# GitHub release: the merged pull requests since the previous tag, after the highlights in
-# .github/release-notes/<tag>.md if that file exists, with the published crate attached.
+# GitHub release: GitHub's generated notes (the pull requests merged since the previous
+# tag), with the published crate attached.
 # Bump `version` in Cargo.toml on main first; the tag has to match it.
 on:
   push:
@@ -64,10 +64,5 @@ jobs:
           prev=$(git describe --tags --abbrev=0 --match 'v*' "$GITHUB_REF_NAME^" 2>/dev/null || true)
           if [ -n "$prev" ]; then
             args+=(--notes-start-tag "$prev")
-          fi
-          # Optional highlights (an upgrade note, say), placed before the generated list.
-          intro=".github/release-notes/$GITHUB_REF_NAME.md"
-          if [ -f "$intro" ]; then
-            args+=(--notes "$(cat "$intro")")
           fi
           gh release create "$GITHUB_REF_NAME" "${args[@]}" dist/*.crate
