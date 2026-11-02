@@ -131,6 +131,8 @@ jobs:
           pip install websockets
           Start-Process notepad -WindowStyle Maximized
           Start-Sleep 2
+          # voxl and smoke.py both read it: the test signs in as a viewer would.
+          $env:VOXL_PASSWORD = 'smoke-test'
           $voxl = Start-Process target\release\voxl.exe -ArgumentList '--port=6901' -PassThru -NoNewWindow -RedirectStandardError voxl.log
           Start-Sleep 5
           $env:SMOKE_SHOT = 'smoke.png'

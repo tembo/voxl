@@ -1,6 +1,7 @@
 // File transfer end to end: starts its own voxl on BENCH_DISPLAY with a temporary
-// --files-root, then drives the Files panel in headless Chromium (upload button,
-// drag and drop, folders, download, auto-refresh) and checks the HTTP API's guards.
+// --files-root and a password, opens the page through its sign-in link, drives the Files
+// panel in headless Chromium (upload button, drag and drop, folders, download,
+// auto-refresh) and checks the HTTP API's guards.
 // Usage: node filestest.mjs   (VOXL_BIN, BENCH_DISPLAY, CHROMIUM, PLAYWRIGHT_NODE_MODULES)
 import { createRequire } from 'module';
 import { spawn } from 'child_process';
@@ -14,6 +15,9 @@ const HERE = new URL('.', import.meta.url).pathname;
 const bin = process.env.VOXL_BIN || path.join(HERE, '../../target/release/voxl');
 const port = process.env.VOXL_PORT || '6905';
 const base = `http://127.0.0.1:${port}`;
+// Characters a link has to encode, so the page's file requests must pass it on intact.
+const password = 'files test&pw=1';
+const auth = { Authorization: `Bearer ${password}` };
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'voxl-files-'));
 const fixtures = fs.mkdtempSync(path.join(os.tmpdir(), 'voxl-fixtures-'));
 fs.mkdirSync(path.join(root, 'docs'));
@@ -26,27 +30,29 @@ fs.writeFileSync(path.join(fixtures, 'photo.jpg'), Buffer.alloc(3 << 20, 7));
 let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? 'PASS' : 'FAIL'} ${what}`); if (!ok) failed++; };
 
-const voxl = spawn(bin, [`--port=${port}`, '--audio-enabled=false', `--files-root=${root}`],
+const voxl = spawn(bin, [`--port=${port}`, '--audio-enabled=false', `--files-root=${root}`, `--basic-auth-password=${password}`],
   { env: { ...process.env, DISPLAY: process.env.BENCH_DISPLAY || ':2' }, stdio: 'ignore' });
 let b;
 try {
   for (let i = 0; i < 50; i++) { try { if ((await fetch(`${base}/healthz`)).ok) break; } catch {} await new Promise((r) => setTimeout(r, 100)); }
 
   // HTTP guards
-  const st = async (u, o) => (await fetch(base + u, o)).status;
+  const st = async (u, o = {}) => (await fetch(base + u, { ...o, headers: { ...auth, ...o.headers } })).status;
+  check((await fetch(`${base}/files/list`)).status === 401, 'the files API needs the password');
+  check((await fetch(`${base}/files/list?${new URLSearchParams({ token: password })}`)).status === 200, 'the password works as ?token=');
   check(await st('/files/list?path=..') === 400, 'list rejects ..');
   check(await st('/files/list?path=etc-link') === 403, 'list refuses symlinks leading outside the root');
   check(await st('/files/download?path=etc-link/passwd') === 403, 'download refuses symlinks leading outside the root');
   check(await st('/files/upload?name=x.txt', { method: 'PUT', body: 'x' }) === 403, 'upload requires the X-Voxl-Upload header');
   check(await st('/files/upload?name=..%2Fx', { method: 'PUT', body: 'x', headers: { 'X-Voxl-Upload': '1' } }) === 400, 'upload rejects path-like names');
-  const listed = await (await fetch(`${base}/files/list`)).json();
+  const listed = await (await fetch(`${base}/files/list`, { headers: auth })).json();
   check(!listed.entries.some((e) => e.name === 'etc-link'), 'outside symlinks are hidden from listings');
 
   b = await chromium.launch({ executablePath: process.env.CHROMIUM || 'chromium', args: ['--no-sandbox'] });
   const ctx = await b.newContext({ viewport: { width: 1400, height: 900 }, acceptDownloads: true });
   const p = await ctx.newPage();
   const names = () => p.$$eval('#files-list .f-row .f-name', (e) => e.map((x) => x.textContent));
-  await p.goto(base + '/');
+  await p.goto(`${base}/?${new URLSearchParams({ token: password })}`);
   await p.evaluate(() => { window.crumbs = () => [...document.querySelectorAll('#files-crumbs a')].map((a) => a.textContent).join('/'); });
   await p.waitForFunction(() => document.getElementById('tools').classList.contains('files'), null, { timeout: 10000 });
   await p.mouse.move(1380, 20); await p.waitForTimeout(300);

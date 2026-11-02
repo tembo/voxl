@@ -67,11 +67,12 @@ libraries on your system (the crate is `voxl-server`, the binary is `voxl`):
 cargo install voxl-server
 ```
 
-Run it against an X display, then open `http://host:6901/` (`?stats` adds an FPS
+Run it against an X display, then open the link it prints (`?stats` adds an FPS
 overlay):
 
 ```sh
 DISPLAY=:1 ./target/release/voxl --port=6901
+# prints: open http://localhost:6901/?token=4f1c… to sign in
 ```
 
 Start Xvfb with `-shmem` for zero-copy capture, and use the patched Xvfb
@@ -82,6 +83,9 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 | -------------------------------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `--addr`, `--port`                                             | `0.0.0.0`, `6901`                  | listen address                                                                                                    |
 | `--title`                                                      | `Voxl Computer Stream`             | the page's title: the browser tab, and the app's name if a viewer installs it                                     |
+| `--enable-basic-auth`                                          | `true`                             | ask for a password (see [Login](#login)); `false` serves without one                                              |
+| `--basic-auth-password`                                        | `VOXL_PASSWORD`, else made up      | the password                                                                                                      |
+| `--basic-auth-user`                                            | any                                | the user name a browser's sign-in has to give                                                                     |
 | `--framerate`                                                  | `60`                               | max frames per second (`60-60` style ranges accepted)                                                             |
 | `--preset`                                                     | `ultrafast`                        | x264 preset                                                                                                       |
 | `--encoder-threads`                                            | `min(4, ncpu/4)`                   | x264 sliced threads                                                                                               |
@@ -108,6 +112,23 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 | `--max-record-seconds`                                         | `300`                              | longest recording (`/record`)                                                                                     |
 | `--convert-threads`, `--coalesce-us`                           | `4`, `0`                           | tuning                                                                                                            |
 
+### Login
+
+voxl asks for a password before it shows the desktop or takes input, files or API
+calls. Give it one with `--basic-auth-password` or `VOXL_PASSWORD`; otherwise it makes
+one up when it starts and prints a link that signs you in. There are three ways in:
+
+- **The link**: `http://host:6901/?token=<password>`. The page passes the password on to
+  its own connections, so the link also works as an iframe's `src`.
+- **The browser's sign-in prompt**, which voxl's page brings up: any user name (unless
+  `--basic-auth-user` names one) and the password. Password managers offer to save it.
+- **For programs**: `Authorization: Bearer <password>`, or `curl -u :<password>`.
+
+The page's scripts and `/healthz` load without it. If voxl sits behind a proxy that signs
+people in itself, `--enable-basic-auth=false` turns voxl's login off.
+
+### Hosts and origins
+
 voxl only answers requests for an IP address or `localhost`, and only from its own page.
 That keeps out other web pages, which browsers let connect to any address, including
 pages whose domain is pointed at voxl's address (DNS rebinding). To reach voxl under a
@@ -116,13 +137,16 @@ To let a page on another site connect, name that site with `--allowed-origins`.
 Programs that aren't browsers (curl, scripts, agents) send no `Origin` and connect as
 usual. A refused request gets a 403 that names the flag to add.
 
-Screenshots and recordings, for agents and scripts:
+### For agents and scripts
+
+Screenshots and recordings (start voxl with `VOXL_PASSWORD` set, and send it along):
 
 ```sh
-curl -o shot.png localhost:6901/screenshot                  # the screen as a PNG
-curl -o clip.mp4 "localhost:6901/record?seconds=10"         # an MP4 of the next 10 s
-id=$(curl -s -X POST localhost:6901/record/start | jq .id)  # or start...
-curl -o clip.mp4 -X POST "localhost:6901/record/stop?id=$id" # ...and stop when done
+vcurl() { curl -u ":$VOXL_PASSWORD" "$@"; }
+vcurl -o shot.png localhost:6901/screenshot                  # the screen as a PNG
+vcurl -o clip.mp4 "localhost:6901/record?seconds=10"         # an MP4 of the next 10 s
+id=$(vcurl -s -X POST localhost:6901/record/start | jq .id)  # or start...
+vcurl -o clip.mp4 -X POST "localhost:6901/record/stop?id=$id" # ...and stop when done
 ```
 
 A recording is the H.264 voxl already sends to viewers, saved as MP4 without encoding
@@ -133,9 +157,9 @@ a resize ends it.
 after every action and hope it was long enough:
 
 ```sh
-curl localhost:6901/wait                                  # once nothing changed for 300 ms
-curl "localhost:6901/wait?idle=1000&timeout=30000"        # still for 1 s, give up after 30 s
-curl "localhost:6901/wait?change&region=0,0,800,600"      # the first change in that rectangle
+vcurl localhost:6901/wait                                  # once nothing changed for 300 ms
+vcurl "localhost:6901/wait?idle=1000&timeout=30000"        # still for 1 s, give up after 30 s
+vcurl "localhost:6901/wait?change&region=0,0,800,600"      # the first change in that rectangle
 # {"changed":true,"timed_out":false,"seq":812,"waited_ms":340}
 ```
 
@@ -161,11 +185,11 @@ cargo build --release
 ./target/release/voxl --port=6901
 ```
 
-Open `http://localhost:6901/`. On a Mac voxl listens on `127.0.0.1` unless `--addr`
-says otherwise, since the stream is your whole screen and there is no login. macOS asks
-voxl (or the terminal that starts it) for Screen Recording and Accessibility
-permissions. For the microphone, install a loopback device (`brew install
-blackhole-2ch`) and pick it as the input in the apps that should hear you.
+Open the link it prints. On a Mac voxl listens on `127.0.0.1` unless `--addr` says
+otherwise, since the stream is your whole screen. macOS asks voxl (or the terminal that
+starts it) for Screen Recording and Accessibility permissions. For the microphone,
+install a loopback device (`brew install blackhole-2ch`) and pick it as the input in the
+apps that should hear you.
 
 | macOS flag             | Default                     |                                                                                        |
 | ---------------------- | --------------------------- | -------------------------------------------------------------------------------------- |
@@ -193,12 +217,12 @@ cargo build --release
 .\target\release\voxl.exe --port=6901
 ```
 
-Open `http://localhost:6901/`. As on a Mac, voxl listens on `127.0.0.1` unless `--addr`
-says otherwise. It streams the desktop of the session it runs in, so start it in the
-user's session (not as a service); Windows hides the lock screen and UAC prompts from
-it unless it runs as SYSTEM. For the microphone, install a virtual audio cable
-([VB-CABLE](https://vb-audio.com/Cable/)): voxl plays into "CABLE Input" and apps
-record from "CABLE Output".
+Open the link it prints. As on a Mac, voxl listens on `127.0.0.1` unless `--addr` says
+otherwise. It streams the desktop of the session it runs in, so start it in the user's
+session (not as a service); Windows hides the lock screen and UAC prompts from it unless
+it runs as SYSTEM. For the microphone, install a virtual audio cable
+([VB-CABLE](https://vb-audio.com/Cable/)): voxl plays into "CABLE Input" and apps record
+from "CABLE Output".
 
 | Windows flag          | Default                   |                                                                    |
 | --------------------- | ------------------------- | ------------------------------------------------------------------ |

@@ -1,12 +1,14 @@
 """End-to-end smoke test of a running voxl: screenshot, hello, video, cursor, input and
 clipboard. Typing must change the screen, so run it with a text editor focused (CI
-opens Notepad). Exits non-zero on failure. SMOKE_SHOT=<path> saves the last screenshot.
+opens Notepad). Exits non-zero on failure. SMOKE_SHOT=<path> saves the last screenshot;
+VOXL_PASSWORD is the password voxl was started with.
 Usage: smoke.py <host:port> [expected os]"""
-import asyncio, json, os, sys, time, urllib.request
+import asyncio, json, os, sys, time, urllib.parse, urllib.request
 import websockets
 
 hostport = sys.argv[1]
 want_os = sys.argv[2] if len(sys.argv) > 2 else None
+password = os.environ.get('VOXL_PASSWORD', '')
 fails = []
 
 
@@ -17,7 +19,10 @@ def check(ok, what):
 
 
 def screenshot():
-    with urllib.request.urlopen(f'http://{hostport}/screenshot', timeout=10) as r:
+    req = urllib.request.Request(f'http://{hostport}/screenshot')
+    if password:
+        req.add_header('Authorization', f'Bearer {password}')
+    with urllib.request.urlopen(req, timeout=10) as r:
         return r.read()
 
 
@@ -47,7 +52,8 @@ async def frames(ws, secs, stats):
 async def main():
     png = screenshot()
     check(png[:8] == b'\x89PNG\r\n\x1a\n' and len(png) > 1000, f'GET /screenshot: {len(png)} byte PNG')
-    async with websockets.connect(f'ws://{hostport}/ws', max_size=None, compression=None) as ws:
+    query = f'?token={urllib.parse.quote(password)}' if password else ''
+    async with websockets.connect(f'ws://{hostport}/ws{query}', max_size=None, compression=None) as ws:
         hello = None
         t0 = time.time()
         while hello is None and time.time() - t0 < 10:

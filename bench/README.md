@@ -58,7 +58,8 @@ sleep 1; BENCH_DISPLAY=:5 env/openbox.sh &
 ## Feature tests
 
 `tests/` drives the web client with Playwright against a running voxl
-(`VOXL_PORT`, default 6903) on a test display (`BENCH_DISPLAY`, default `:3`).
+(`VOXL_PORT`, default 6903, started with `--enable-basic-auth=false`) on a test display
+(`BENCH_DISPLAY`, default `:3`). The tests that start their own voxl say so below.
 For smooth scrolling, start that display with the patched server:
 `XVFB=$(nix-build -E 'with import <nixpkgs> {}; callPackage ../xvfb.nix {}')/bin/Xvfb BENCH_DISPLAY=:3 env/xvfb.sh`.
 
@@ -79,10 +80,10 @@ For smooth scrolling, start that display with the patched server:
 
 ## macOS
 
-`macos/` tests voxl on a Mac against a running instance (`PORT`, default 6960), as
-raw WebSocket clients plus Playwright (`playwright-core` and Google Chrome) where a
-page is the target. They act on the real desktop (pointer, keyboard, clipboard), so
-run them when nobody is using the Mac.
+`macos/` tests voxl on a Mac against a running instance (`PORT`, default 6960, started
+with `--enable-basic-auth=false`), as raw WebSocket clients plus Playwright
+(`playwright-core` and Google Chrome) where a page is the target. They act on the real
+desktop (pointer, keyboard, clipboard), so run them when nobody is using the Mac.
 
 - `features.js`: hello, keyframe, cursor image, clipboard text both ways, system audio,
   typing and mouse in a scratch TextEdit document and, with `--enable-resize`, a

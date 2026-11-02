@@ -60,7 +60,7 @@ const pulse = spawn(`${pa}/bin/pulseaudio`, ['-n', '--daemonize=no', '--exit-idl
 let voxl, b;
 try {
   for (let i = 0; i < 50 && !fs.existsSync(sock); i++) await sleep(100);
-  voxl = spawn(bin, [`--port=${port}`, '--audio-enabled=false', '--microphone-enabled=true', `--microphone-fifo=${path.join(dir, 'mic.fifo')}`], { env, stdio: ['ignore', fs.openSync(process.env.VOXL_LOG || '/dev/null', 'w'), fs.openSync(process.env.VOXL_LOG || '/dev/null', 'w')] });
+  voxl = spawn(bin, [`--port=${port}`, '--audio-enabled=false', '--enable-basic-auth=false', '--microphone-enabled=true', `--microphone-fifo=${path.join(dir, 'mic.fifo')}`], { env, stdio: ['ignore', fs.openSync(process.env.VOXL_LOG || '/dev/null', 'w'), fs.openSync(process.env.VOXL_LOG || '/dev/null', 'w')] });
   for (let i = 0; i < 50; i++) { try { if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) break; } catch {} await sleep(100); }
 
   b = await chromium.launch({ executablePath: process.env.CHROMIUM || 'chromium', args: ['--no-sandbox', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${wav}`, '--autoplay-policy=no-user-gesture-required'] });
