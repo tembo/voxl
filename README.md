@@ -1,5 +1,7 @@
 # voxl
 
+[![crates.io](https://img.shields.io/crates/v/voxl-server.svg)](https://crates.io/crates/voxl-server)
+
 Low-latency desktop streaming for the browser, written in Rust. voxl streams an X11
 display, a Mac's screen or a Windows desktop as H.264 over a WebSocket to a small web client that decodes with WebCodecs,
 with input, clipboard, audio, microphone, file and folder transfer and dynamic resolution.
