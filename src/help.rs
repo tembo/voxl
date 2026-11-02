@@ -10,6 +10,8 @@ WebSocket, and prints a link that signs you in. Flags take --name=value or
 Server:
   --addr, --port                listen address (default ADDR_DEFAULT, 6901)
   --title                       the page's title (default: Voxl Computer Stream)
+  --favicon                     the page's icon: an .ico, .png, .gif, .webp or .svg
+                                file (default: voxl's own)
   --allowed-hosts               host names to answer for besides IP addresses and
                                 localhost (.example.com covers subdomains, * any)
   --allowed-origins             other sites whose pages may connect (* any)
