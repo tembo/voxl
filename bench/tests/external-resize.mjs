@@ -12,24 +12,43 @@ const url = new URL(VOXL_URL);
 url.searchParams.set('token', VOXL_TOKEN);
 const ws = new WebSocket(url);
 let latest = '';
-let binaryMessages = 0;
+let frameSize = '';
+const frames = new Map();
 ws.binaryType = 'arraybuffer';
 ws.onmessage = ({ data }) => {
-  if (typeof data !== 'string') {
-    binaryMessages++;
+  if (typeof data === 'string') {
+    const msg = JSON.parse(data);
+    if (msg.t === 'hello') {
+      latest = `${msg.w}x${msg.h}`;
+      frames.clear();
+      ws.send('v,1');
+    }
     return;
   }
-  const msg = JSON.parse(data);
-  if (msg.t === 'hello') {
-    latest = `${msg.w}x${msg.h}`;
-    ws.send('v,1');
+
+  const packet = new Uint8Array(data);
+  if (packet.length < 16 || packet[0] !== 0x01) return;
+  const view = new DataView(data);
+  const id = view.getUint32(2);
+  const part = packet[10];
+  const partCount = packet[12];
+  let received = frames.get(id);
+  if (!received) {
+    received = new Set();
+    frames.set(id, received);
+  }
+  received.add(part);
+  if (received.size === partCount) {
+    frames.delete(id);
+    frameSize = latest;
+    ws.send(`a,${id}`);
   }
 };
 const waitFor = async (condition) => {
   const deadline = Date.now() + 5000;
   while (!condition()) {
     if (ws.readyState === WebSocket.CLOSED || Date.now() > deadline) {
-      throw new Error(`viewer disconnected or timed out; last size ${latest}`);
+      throw new Error(`viewer disconnected or timed out; last size ${latest}, last frame size ${frameSize}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -41,11 +60,12 @@ try {
     const expected = mode.match(/^(\d+x\d+)/)?.[1];
     if (!expected) throw new Error(`invalid mode name: ${mode}`);
     const output = process.env.RESIZE_OUTPUT || 'screen';
+    frameSize = '';
     execFileSync('xrandr', ['--output', output, '--mode', mode]);
     await waitFor(() => latest === expected);
+    await waitFor(() => frameSize === expected);
   }
-  if (binaryMessages === 0) throw new Error('no binary stream messages received');
-  console.log(`50 external resizes completed; viewer connected, ${binaryMessages} binary messages`);
+  console.log('50 external resizes completed; received and acknowledged a video frame at each size');
 } finally {
   ws.close();
 }

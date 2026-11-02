@@ -9,6 +9,7 @@
 
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::{self, ConnectionExt as _};
+use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
 /// Smallest desktop a client may ask for.
@@ -95,6 +96,13 @@ impl Screen {
 
     pub fn resize(&mut self, w: u32, h: u32) -> Result<(), String> {
         let (w, h) = self.fit(w, h);
+        let geometry = self
+            .conn
+            .get_geometry(self.root)
+            .map_err(err)?
+            .reply()
+            .map_err(err)?;
+        self.current = (u32::from(geometry.width), u32::from(geometry.height));
         if (w, h) == self.current {
             return Ok(());
         }
