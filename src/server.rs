@@ -9,6 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use bytes::Bytes;
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,6 +29,9 @@ pub struct AppState {
     pub recorder: Arc<crate::record::Recorder>,
     /// The web client's page, with its title filled in (`index_html`).
     pub index: Bytes,
+    /// The page's icon and its content type (--favicon).
+    pub favicon: Bytes,
+    pub favicon_type: &'static str,
 }
 
 /// The web client's page, titled `title` (--title): the browser tab, and the name of
@@ -45,6 +49,46 @@ pub fn index_html(title: &str) -> Bytes {
         }
     }
     Bytes::from(include_str!("../web/index.html").replace("{{title}}", &escaped))
+}
+
+/// The page's icon (--favicon): that file's bytes and content type, or voxl's own icon.
+pub fn favicon(path: Option<&str>) -> Result<(Bytes, &'static str), String> {
+    let Some(path) = path else {
+        return Ok((
+            Bytes::from_static(include_bytes!("../web/favicon.ico")),
+            "image/x-icon",
+        ));
+    };
+    let ctype = match Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("ico") => "image/x-icon",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        _ => {
+            return Err(format!(
+                "--favicon {path}: expected an .ico, .png, .gif, .webp or .svg file"
+            ))
+        }
+    };
+    let bytes = std::fs::read(path).map_err(|e| format!("--favicon {path}: {e}"))?;
+    Ok((Bytes::from(bytes), ctype))
+}
+
+async fn favicon_route(State(s): State<AppState>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, s.favicon_type),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        s.favicon,
+    )
+        .into_response()
 }
 
 async fn index(State(s): State<AppState>) -> Response {
@@ -111,7 +155,7 @@ pub fn router(state: AppState) -> Router {
         .route("/worker.js", bundled!("worker.js"))
         .route("/audio.js", bundled!("audio.js"))
         .route("/mic.js", bundled!("mic.js"))
-        .route("/favicon.ico", asset!("favicon.ico", "image/x-icon"))
+        .route("/favicon.ico", get(favicon_route))
         .route("/inter.woff2", asset!("inter.woff2", "font/woff2"))
         .route("/healthz", get(|| async { "ok" }))
         .route("/stats", get(stats))
@@ -422,6 +466,8 @@ mod tests {
             read_only,
             recorder: crate::record::Recorder::new(hub.clone(), Duration::from_secs(1)),
             index: Bytes::new(),
+            favicon: Bytes::new(),
+            favicon_type: "image/x-icon",
         };
         let (tx, _rx) = mpsc::unbounded_channel();
         let client = hub.add_client(tx);
@@ -453,5 +499,23 @@ mod tests {
         assert!(input >= 9, "{input} input events");
         assert_eq!(mic, 1);
         assert!(resized);
+    }
+
+    #[test]
+    fn favicon_uses_file_extension_for_content_type() {
+        let (bytes, content_type) = favicon(None).unwrap();
+        assert_eq!(content_type, "image/x-icon");
+        assert!(!bytes.is_empty());
+
+        let dir = std::env::temp_dir().join(format!("voxl-favicon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("icon.PNG");
+        std::fs::write(&png, b"\\x89PNG").unwrap();
+        let (bytes, content_type) = favicon(Some(png.to_str().unwrap())).unwrap();
+        assert_eq!(content_type, "image/png");
+        assert_eq!(&bytes[..], b"\\x89PNG");
+        assert!(favicon(Some(dir.join("icon.txt").to_str().unwrap())).is_err());
+        assert!(favicon(Some(dir.join("missing.ico").to_str().unwrap())).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
