@@ -147,6 +147,7 @@ fn begin(
     let (tx, rx) = mpsc::unbounded_channel();
     let client = r.hub.add_client(tx);
     client.video.store(true, Ordering::Relaxed);
+    client.recording_audio.store(true, Ordering::Relaxed);
     r.hub.wake();
     let hub = r.hub.clone();
     Ok(tokio::spawn(async move {
@@ -167,6 +168,8 @@ async fn collect(
     let deadline = tokio::time::sleep(max);
     tokio::pin!(deadline);
     let mut frames: Vec<mp4::Frame> = Vec::new();
+    let mut audio: Vec<bytes::Bytes> = Vec::new();
+    let mut audio_start_ms = None;
     let mut size = (0, 0);
     loop {
         tokio::select! {
@@ -191,6 +194,12 @@ async fn collect(
                         data: b.slice(16..),
                     });
                 }
+                Some(Out::RecordingAudio(data, captured)) => {
+                    if audio_start_ms.is_none() {
+                        audio_start_ms = Some(captured.saturating_duration_since(start).as_millis() as u64);
+                    }
+                    audio.push(data);
+                }
                 // A new size restarts the stream; an MP4 track keeps one size, so stop.
                 Some(Out::Text(t)) if !frames.is_empty() && t.contains("\"hello\"") => break,
                 _ => {}
@@ -198,9 +207,20 @@ async fn collect(
         }
     }
     let end = start.elapsed().as_millis() as u64;
-    tokio::task::spawn_blocking(move || mp4::write(&frames, size.0, size.1, end))
-        .await
-        .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || {
+        mp4::write_with_audio(
+            &frames,
+            size.0,
+            size.1,
+            end,
+            &audio,
+            audio_start_ms
+                .unwrap_or(0)
+                .saturating_sub(frames.first().map_or(0, |f| f.ms)),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// How long `GET /record?seconds=` records: `secs`, at most `max`. None unless positive.

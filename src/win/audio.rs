@@ -45,6 +45,7 @@ const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
 
 struct Encoder {
     enc: *mut c_void,
+    recorder: crate::record_audio::Encoder,
     /// Interleaved stereo samples waiting for a whole frame.
     pending: Vec<i16>,
     out: Vec<u8>,
@@ -59,6 +60,7 @@ impl Encoder {
         );
         while self.pending.len() >= FRAME * 2 {
             let pcm: Vec<i16> = self.pending.drain(..FRAME * 2).collect();
+            self.recorder.push(hub, &pcm);
             if pcm.iter().all(|&s| s == 0) {
                 continue;
             }
@@ -244,14 +246,14 @@ pub fn spawn(device_name: String, bitrate: i32, hub: Arc<Hub>) {
             unsafe { opus_encoder_ctl(enc, 4002, bitrate as c_int) };
             let mut encoder = Encoder {
                 enc,
+                recorder: crate::record_audio::Encoder::new(bitrate),
                 pending: Vec::with_capacity(FRAME * 4),
                 out: vec![0u8; 4000],
             };
             let want = || {
-                hub.clients
-                    .lock()
-                    .iter()
-                    .any(|c| c.audio.load(Ordering::Relaxed))
+                hub.clients.lock().iter().any(|c| {
+                    c.audio.load(Ordering::Relaxed) || c.recording_audio.load(Ordering::Relaxed)
+                })
             };
             let named =
                 (device_name != "output.monitor" && !device_name.is_empty()).then_some(device_name);
