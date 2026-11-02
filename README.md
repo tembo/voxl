@@ -3,10 +3,24 @@
 [![crates.io](https://img.shields.io/crates/v/voxl-server.svg)](https://crates.io/crates/voxl-server)
 
 Low-latency desktop streaming for the browser, written in Rust. voxl streams an X11
-display, a Mac's screen or a Windows desktop as H.264 over a WebSocket to a small web client that decodes with WebCodecs,
-with input, clipboard, audio, microphone, file and folder transfer and dynamic resolution.
+display, a Mac's screen or a Windows desktop as H.264 over a WebSocket to a small web
+client that decodes with WebCodecs, with input, clipboard, audio, microphone, file and
+folder transfer and dynamic resolution.
+
+## Quick start
+
+```sh
+cargo install voxl-server   # needs x264, libyuv, Opus, PulseAudio and esbuild (see Usage)
+DISPLAY=:1 voxl             # streams display :1 and prints a link that signs you in
+```
+
+Open the link it prints. On a Mac or a Windows PC, `voxl` streams that machine's own
+screen instead; see [macOS](#macos) and [Windows](#windows).
 
 ## Benchmarks
+
+In every test below voxl averages 60 FPS with a median latency of 12–99 ms; noVNC
+averages under 8 FPS.
 
 A 16 vCPU AMD EPYC 9334 VM (no GPU), 2560x1600 Xvfb desktop, same workloads, each
 stream decoded by a native client that reads a pixel marker drawn into the content.
@@ -145,11 +159,14 @@ usual. A refused request gets a 403 that names the flag to add.
 Screenshots and recordings (start voxl with `VOXL_PASSWORD` set, and send it along):
 
 ```sh
-vcurl() { curl -u ":$VOXL_PASSWORD" "$@"; }
-vcurl -o shot.png localhost:6901/screenshot                  # the screen as a PNG
-vcurl -o clip.mp4 "localhost:6901/record?seconds=10"         # an MP4 of the next 10 s
-id=$(vcurl -s -X POST localhost:6901/record/start | jq .id)  # or start...
-vcurl -o clip.mp4 -X POST "localhost:6901/record/stop?id=$id" # ...and stop when done
+# the screen as a PNG
+curl -u ":$VOXL_PASSWORD" -o shot.png localhost:6901/screenshot
+# an MP4 of the next 10 s
+curl -u ":$VOXL_PASSWORD" -o clip.mp4 "localhost:6901/record?seconds=10"
+# or start...
+id=$(curl -u ":$VOXL_PASSWORD" -s -X POST localhost:6901/record/start | jq .id)
+# ...and stop when done
+curl -u ":$VOXL_PASSWORD" -o clip.mp4 -X POST "localhost:6901/record/stop?id=$id"
 ```
 
 A recording is the H.264 voxl already sends to viewers, saved as MP4 without encoding
@@ -160,9 +177,12 @@ a resize ends it.
 after every action and hope it was long enough:
 
 ```sh
-vcurl localhost:6901/wait                                  # once nothing changed for 300 ms
-vcurl "localhost:6901/wait?idle=1000&timeout=30000"        # still for 1 s, give up after 30 s
-vcurl "localhost:6901/wait?change&region=0,0,800,600"      # the first change in that rectangle
+# once nothing changed for 300 ms
+curl -u ":$VOXL_PASSWORD" localhost:6901/wait
+# still for 1 s, giving up after 30 s
+curl -u ":$VOXL_PASSWORD" "localhost:6901/wait?idle=1000&timeout=30000"
+# the first change in that rectangle
+curl -u ":$VOXL_PASSWORD" "localhost:6901/wait?change&region=0,0,800,600"
 # {"changed":true,"timed_out":false,"seq":812,"waited_ms":340}
 ```
 
@@ -237,3 +257,26 @@ from "CABLE Output".
 The other flags work as on Linux; `--microphone-fifo` and the rounded-corner flags don't
 apply. Dynamic resolution picks the largest display mode that fits the viewer's window,
 and Windows restores the original mode when voxl exits.
+
+## FAQ
+
+**Why a WebSocket and not WebRTC?** One WebSocket goes wherever a web page does: through
+reverse proxies, tunnels and sandbox preview URLs, with no TURN servers or UDP ports to
+open. The browser decodes each frame the moment it arrives with WebCodecs, without
+WebRTC's jitter buffer, and voxl runs its own rate control, which keeps latency low on a
+clean link. The trade-off is TCP: on a link that drops packets (bad Wi-Fi, a weak mobile
+signal) a lost packet holds up the frames behind it, where WebRTC can skip ahead.
+
+**Why doesn't the stream load at `http://<ip>:6901`?** Browsers only allow WebCodecs on
+HTTPS pages and on localhost. To watch from another machine, put voxl behind a TLS proxy
+(Caddy, Cloudflare Tunnel, `tailscale serve`) and name its host with `--allowed-hosts`,
+or forward the port over SSH and open `localhost`.
+
+**Wayland?** Not yet. On Linux voxl streams X11 displays, Xvfb included.
+
+**Does it use the GPU?** Not yet. voxl encodes H.264 on the CPU with x264: 1.3–1.7 cores
+for a busy 2560x1600 desktop, X server included (see the CPU table above). Hardware
+encoding on macOS is in progress.
+
+**What's the license?** voxl's code is MIT. It links x264, which is GPL-2.0, so a voxl
+binary, and anything that bundles one, is distributed under the GPL.
