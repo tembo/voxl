@@ -36,6 +36,13 @@ function main() {
 	window.fps = 0;
 	window.voxlStats = {};
 
+	// Browsers only offer WebCodecs on HTTPS pages and localhost, so a page opened over
+	// plain HTTP from another machine can't decode the stream whatever the browser.
+	if (!window.isSecureContext) {
+		statusEl.textContent =
+			'voxl needs HTTPS or localhost: browsers only decode video on secure pages. Serve it over HTTPS, or forward the port and open localhost.';
+		return;
+	}
 	if (!('VideoDecoder' in window) || !canvas.transferControlToOffscreen) {
 		statusEl.textContent =
 			'This browser lacks WebCodecs/OffscreenCanvas support.';
