@@ -168,8 +168,7 @@ async fn collect(
     let deadline = tokio::time::sleep(max);
     tokio::pin!(deadline);
     let mut frames: Vec<mp4::Frame> = Vec::new();
-    let mut audio: Vec<bytes::Bytes> = Vec::new();
-    let mut audio_start_ms = None;
+    let mut audio: Vec<mp4::AudioPacket> = Vec::new();
     let mut size = (0, 0);
     loop {
         tokio::select! {
@@ -195,10 +194,12 @@ async fn collect(
                     });
                 }
                 Some(Out::RecordingAudio(data, captured)) => {
-                    if audio_start_ms.is_none() {
-                        audio_start_ms = Some(captured.saturating_duration_since(start).as_millis() as u64);
-                    }
-                    audio.push(data);
+                    let ms = if captured >= start {
+                        captured.duration_since(start).as_millis().min(i64::MAX as u128) as i64
+                    } else {
+                        -(start.duration_since(captured).as_millis().min(i64::MAX as u128) as i64)
+                    };
+                    audio.push(mp4::AudioPacket { ms, data });
                 }
                 // A new size restarts the stream; an MP4 track keeps one size, so stop.
                 Some(Out::Text(t)) if !frames.is_empty() && t.contains("\"hello\"") => break,
@@ -214,9 +215,7 @@ async fn collect(
             size.1,
             end,
             &audio,
-            audio_start_ms
-                .unwrap_or(0)
-                .saturating_sub(frames.first().map_or(0, |f| f.ms)),
+            frames.first().map_or(0, |f| f.ms),
         )
     })
     .await

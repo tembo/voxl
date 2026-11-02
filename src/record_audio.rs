@@ -6,7 +6,7 @@ use std::ffi::{c_int, c_void};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-#[link(name = "opus")]
+#[cfg_attr(not(windows), link(name = "opus"))]
 extern "C" {
     fn opus_encoder_create(
         rate: i32,
