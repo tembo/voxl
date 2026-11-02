@@ -1,3 +1,5 @@
+
+
 # voxl
 
 [![crates.io](https://img.shields.io/crates/v/voxl-server.svg)](https://crates.io/crates/voxl-server)
@@ -18,6 +20,9 @@ Open the link it prints. On a Mac or a Windows PC, `voxl` streams that machine's
 screen instead; see [macOS](#macos) and [Windows](#windows).
 
 ## Benchmarks
+
+
+https://github.com/user-attachments/assets/acdf3f31-64fc-4acf-b5c5-ff173d7100a8
 
 In every test below voxl averages 60 FPS with a median latency of 12–99 ms; noVNC
 averages under 8 FPS.
