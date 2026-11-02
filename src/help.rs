@@ -106,7 +106,7 @@ Desktop (this PC's screen):
 
 const FILES: &str = "
 Files and recordings:
-  --file-transfers              upload, download, both or none
+  --file-transfers              upload, download, upload,download or none
                                 (default upload,download)
   --files-root                  folder the Files panel can see (default $HOME)
   --upload-dir                  folder under the root that uploads go to
