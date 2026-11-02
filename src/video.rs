@@ -84,8 +84,16 @@ pub fn spawn(
                 encode,
             } = p;
             if let Err(e) = capture_loop(&mut cap, cfg.clone(), hub.clone(), job_tx, ret_rx) {
-                log::error!("capture loop ended: {e}");
-                std::process::exit(1);
+                #[cfg(target_os = "linux")]
+                let resized = cap.geometry_changed();
+                #[cfg(not(target_os = "linux"))]
+                let resized = false;
+                if resized {
+                    log::info!("capture geometry changed: {e}");
+                } else {
+                    log::error!("capture loop ended: {e}");
+                    std::process::exit(1);
+                }
             }
             drop(cap);
             let _ = encode.join();
@@ -481,6 +489,9 @@ fn capture_loop(
             return Ok(());
         }
         cap.pump()?;
+        if cap.needs_rebuild() {
+            return Ok(());
+        }
         note_changes(cap, &hub);
         hub.drain_wake();
         let snaps = std::mem::take(&mut *hub.snapshots.lock());

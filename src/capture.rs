@@ -5,7 +5,9 @@ use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::damage::{self, ConnectionExt as _};
 use x11rb::protocol::shm::{self, ConnectionExt as _};
 use x11rb::protocol::xfixes::ConnectionExt as _;
-use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
+use x11rb::protocol::xproto::{
+    ChangeWindowAttributesAux, ConnectionExt as _, EventMask, ImageFormat,
+};
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
@@ -82,6 +84,7 @@ pub struct Capturer {
     root: u32,
     pub width: u32,
     pub height: u32,
+    resize_pending: bool,
     pub stride: usize,
     seg: u32,
     buf: ShmBuf,
@@ -109,8 +112,21 @@ impl Capturer {
             RustConnection::connect(display).map_err(|e| format!("X connect: {e}"))?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
-        let width = screen.width_in_pixels as u32;
-        let height = screen.height_in_pixels as u32;
+        // Subscribe before querying geometry so a resize during initialization is not lost.
+        conn.change_window_attributes(
+            root,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::STRUCTURE_NOTIFY),
+        )
+        .map_err(|e| e.to_string())?
+        .check()
+        .map_err(|e| e.to_string())?;
+        let geometry = conn
+            .get_geometry(root)
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?;
+        let width = u32::from(geometry.width);
+        let height = u32::from(geometry.height);
         if screen.root_depth != 24 && screen.root_depth != 32 {
             return Err(format!("unsupported root depth {}", screen.root_depth));
         }
@@ -166,6 +182,7 @@ impl Capturer {
             root,
             width,
             height,
+            resize_pending: false,
             stride,
             seg,
             buf,
@@ -188,6 +205,13 @@ impl Capturer {
     /// Drain queued X events; returns true if damage was reported.
     pub fn pump(&mut self) -> Result<(), String> {
         while let Some(ev) = self.conn.poll_for_event().map_err(|e| e.to_string())? {
+            if let Event::ConfigureNotify(e) = &ev {
+                if e.window == self.root
+                    && (u32::from(e.width), u32::from(e.height)) != (self.width, self.height)
+                {
+                    self.resize_pending = true;
+                }
+            }
             if let Event::DamageNotify(e) = ev {
                 DAMAGE_EVENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if std::env::var("VOXL_DEBUG_DAMAGE").is_ok() {
@@ -204,13 +228,16 @@ impl Capturer {
                         e.area.height
                     );
                 }
-                let top = e.area.y.max(0) as u32;
+                let top = (e.area.y as i32).clamp(0, self.height as i32) as u32;
                 let bot =
                     (e.area.y as i32 + e.area.height as i32).clamp(0, self.height as i32) as u32;
                 if bot > top {
-                    let left = e.area.x.max(0) as u32;
+                    let left = (e.area.x as i32).clamp(0, self.width as i32) as u32;
                     let right =
                         (e.area.x as i32 + e.area.width as i32).clamp(0, self.width as i32) as u32;
+                    if right <= left {
+                        continue;
+                    }
                     let (x0, x1) = (left as usize / 16, (right as usize).div_ceil(16));
                     for row in (top as usize / 16)..(bot as usize).div_ceil(16) {
                         self.mb_dirty[row * self.mb_cols + x0..row * self.mb_cols + x1].fill(1);
@@ -296,10 +323,18 @@ impl Capturer {
         Some((self.pixels(), self.stride))
     }
 
-    /// The display changed under us and capture must be set up again. X screens only
-    /// change size through dynamic resolution, which restarts capture itself.
+    /// Whether a root configure event changed the capture dimensions.
     pub fn needs_rebuild(&self) -> bool {
-        false
+        self.resize_pending
+    }
+
+    /// A resize can race a GetImage request before its configure event is processed.
+    pub fn geometry_changed(&self) -> bool {
+        self.conn
+            .get_geometry(self.root)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .is_some_and(|g| (u32::from(g.width), u32::from(g.height)) != (self.width, self.height))
     }
 
     /// Current frame pixels (BGRX, `stride` bytes per row).
