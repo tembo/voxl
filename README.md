@@ -280,6 +280,18 @@ WebSocket, so it works through proxies, tunnels and sandbox preview URLs and can
 embedded in another page. It also has the APIs agents use (`/screenshot`, `/record`,
 `/wait`).
 
+**How is it different from RustDesk?** RustDesk is an open-source alternative to
+TeamViewer and AnyDesk, for reaching your own computers or helping someone with theirs:
+you install its app on both ends, desktop or phone, and the two find each other through
+an ID server, then connect directly or through a relay. For that it's the better fit,
+and it also shares Wayland desktops (experimentally) and Android phones, which voxl
+doesn't. voxl is for desktops on servers, VMs and sandboxes: it's one process that
+serves its own page, so there's nothing to install on the viewing side and no ID or
+relay server to run. The stream goes wherever a URL does, can be embedded in another
+page and comes with the APIs agents use. RustDesk has a web client too, but it still
+goes through the ID and relay servers, and the self-hosted one comes with RustDesk
+Server Pro.
+
 **Why doesn't the stream load at `http://<ip>:6901`?** Browsers only allow WebCodecs on
 HTTPS pages and on localhost. To watch from another machine, put voxl behind a TLS proxy
 (Caddy, Cloudflare Tunnel, `tailscale serve`) and name its host with `--allowed-hosts`,
