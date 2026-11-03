@@ -98,9 +98,10 @@ impl Encoder {
                 // ~2 frames of buffer keeps single-frame spikes bounded.
                 param.rc.i_vbv_buffer_size = (cfg.max_kbps / cfg.fps.max(1) * 5 / 4) as i32;
             }
-            // BT.601 limited range, matching libyuv ARGBToI420.
+            // sRGB content (BT.709 primaries, sRGB transfer) in BT.601 limited range,
+            // matching libyuv ARGBToI420 and the macOS NV12 capture.
             param.vui.i_colorprim = 1;
-            param.vui.i_transfer = 1;
+            param.vui.i_transfer = 13; // IEC 61966-2-1: every capture path delivers sRGB
             param.vui.i_colmatrix = 6;
             param.vui.b_fullrange = 0;
             let profile = c"high";
