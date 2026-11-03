@@ -274,9 +274,10 @@ signal) a lost packet holds up the frames behind it, where WebRTC can skip ahead
 machine with a GPU: Sunshine encodes on the GPU (NVENC, VAAPI and the like) and streams
 over UDP to the Moonlight app once it's paired, and for that they're the better fit. voxl
 is for desktops on servers, VMs and sandboxes, often without a GPU and reachable only
-through a URL. It encodes on the CPU, needs only a browser to watch, and sends everything
-over one WebSocket, so it works through proxies, tunnels and sandbox preview URLs and can
-be embedded in another page. It also has the APIs agents use (`/screenshot`, `/record`,
+through a URL. It encodes on the CPU for now, and may use the GPU where there is one (see
+below), but either way it needs only a browser to watch and sends everything over one
+WebSocket, so it works through proxies, tunnels and sandbox preview URLs and can be
+embedded in another page. It also has the APIs agents use (`/screenshot`, `/record`,
 `/wait`).
 
 **Why doesn't the stream load at `http://<ip>:6901`?** Browsers only allow WebCodecs on
