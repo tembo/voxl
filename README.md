@@ -297,6 +297,11 @@ HTTPS pages and on localhost. To watch from another machine, put voxl behind a T
 (Caddy, Cloudflare Tunnel, `tailscale serve`) and name its host with `--allowed-hosts`,
 or forward the port over SSH and open `localhost`.
 
+**Is it safe to expose?** voxl asks for a password by default and only answers its own
+page (see [Login](#login) and [Hosts and origins](#hosts-and-origins)), but it serves
+plain HTTP, so put it behind TLS away from localhost. [SECURITY.md](SECURITY.md) covers
+what voxl protects and how to report a vulnerability.
+
 **Which browsers and devices work?** Any browser with WebCodecs, on an HTTPS page or
 localhost, on a computer, phone or tablet:
 
