@@ -4,7 +4,7 @@ name = "voxl-server"
 version = "0.3.2"
 edition = "2021"
 license = "MIT"
-description = "Low-latency desktop streaming for the browser: an X11 display or a Mac's screen as H.264 over a WebSocket"
+description = "Low-latency desktop streaming for the browser: an X11 display, a Mac's screen or a Windows desktop as H.264 over a WebSocket"
 repository = "https://github.com/tembo/voxl"
 readme = "README.md"
 # Lets programs that embed voxl read DEP_VOXL_RPATH (see build.rs).

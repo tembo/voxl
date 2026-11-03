@@ -297,7 +297,29 @@ HTTPS pages and on localhost. To watch from another machine, put voxl behind a T
 (Caddy, Cloudflare Tunnel, `tailscale serve`) and name its host with `--allowed-hosts`,
 or forward the port over SSH and open `localhost`.
 
-**Wayland?** Not yet. On Linux voxl streams X11 displays, Xvfb included.
+**Which browsers and devices work?** Any browser with WebCodecs, on an HTTPS page or
+localhost, on a computer, phone or tablet:
+
+| Browser                                                           | Works | Notes                                         |
+| ----------------------------------------------------------------- | ----- | --------------------------------------------- |
+| Chrome, Edge and other Chromium browsers 94+, desktop and Android | Yes   | Fullscreen captures shortcuts like Cmd/Ctrl+W |
+| Firefox 130+, desktop                                             | Yes   |                                               |
+| Safari 16.4+, macOS, iPhone and iPad                              | Yes   | Desktop audio needs Safari 26                 |
+| Firefox for Android                                               | No    | No WebCodecs                                  |
+
+On an iPhone or iPad every browser runs on Safari's engine, so the Safari row applies. On
+a touchscreen a tap clicks, a long press right-clicks, dragging drags and two fingers
+scroll; the keyboard button brings up the on-screen keyboard. The browser also has to
+decode H.264, which a few Linux builds of Chromium and Firefox leave out.
+
+**Wayland?** Not yet. On Linux voxl streams X11 displays, Xvfb included. Most desktops
+voxl streams are virtual ones on servers and in sandboxes, and those run on Xvfb (E2B's
+and Daytona's do too). X11 gives voxl one interface that works on any X server and window
+manager without a permission prompt: XDamage reports which parts of the screen changed,
+which keeps a still screen at no CPU and is what `/wait` watches, MIT-SHM hands over
+frames without copying them, and XTEST takes the input. A Wayland session (GNOME, KDE,
+Hyprland) can't be captured that way, and pointing voxl at its Xwayland display doesn't
+show the desktop. Wayland support, for streaming those desktops, is being worked on.
 
 **Does it use the GPU?** Not yet. voxl encodes H.264 on the CPU with x264: 1.3–1.7 cores
 for a busy 2560x1600 desktop, X server included (see the CPU table above). Hardware
