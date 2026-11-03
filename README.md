@@ -272,8 +272,9 @@ signal) a lost packet holds up the frames behind it, where WebRTC can skip ahead
 
 **How is it different from Moonlight and Sunshine?** They're for playing games on your
 own GPU machine through the Moonlight app, and for that they're the better fit. voxl is
-for desktops on servers, VMs and sandboxes, often without a GPU: it streams to a plain
-browser tab over one WebSocket and has APIs for agents.
+for software factories: the headless VMs and sandboxes that CI and computer-use agents
+run in, usually on Xvfb with no GPU. It streams them to a plain browser tab over one
+WebSocket and has APIs for agents.
 
 **How is it different from RustDesk?** RustDesk is an open-source alternative to
 TeamViewer and AnyDesk, for reaching your own computers or helping someone with theirs:
