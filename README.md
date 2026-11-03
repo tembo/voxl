@@ -270,6 +270,15 @@ WebRTC's jitter buffer, and voxl runs its own rate control, which keeps latency 
 clean link. The trade-off is TCP: on a link that drops packets (bad Wi-Fi, a weak mobile
 signal) a lost packet holds up the frames behind it, where WebRTC can skip ahead.
 
+**How is it different from Moonlight and Sunshine?** They're made for playing games on a
+machine with a GPU: Sunshine encodes on the GPU (NVENC, VAAPI and the like) and streams
+over UDP to the Moonlight app once it's paired, and for that they're the better fit. voxl
+is for desktops on servers, VMs and sandboxes, often without a GPU and reachable only
+through a URL. It encodes on the CPU, needs only a browser to watch, and sends everything
+over one WebSocket, so it works through proxies, tunnels and sandbox preview URLs and can
+be embedded in another page. It also has the APIs agents use (`/screenshot`, `/record`,
+`/wait`).
+
 **Why doesn't the stream load at `http://<ip>:6901`?** Browsers only allow WebCodecs on
 HTTPS pages and on localhost. To watch from another machine, put voxl behind a TLS proxy
 (Caddy, Cloudflare Tunnel, `tailscale serve`) and name its host with `--allowed-hosts`,
