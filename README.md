@@ -222,6 +222,7 @@ apps that should hear you.
 | `--display`            | main display                | display to stream: an index (0 is the main display) or a display ID; logged at startup |
 | `--capture-scale`      | native, within the budget   | streamed pixels per point                                                              |
 | `--max-capture-pixels` | `4096000` (2560x1600)       | pixel budget for the automatic scale: x264's cost grows with area                      |
+| `--encoder`            | `x264`                      | `videotoolbox` encodes on the media engine (experimental), else x264                   |
 | `--microphone-device`  | first loopback device found | output device (name or prefix) to play the browser microphone into                     |
 | `--resize-scale`       | the capture scale           | so a viewer's window maps to the same number of points on the Mac                      |
 

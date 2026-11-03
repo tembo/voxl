@@ -72,6 +72,25 @@ fn range_max(v: Option<&String>, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+/// --encoder: `x264` (the default) or `videotoolbox`, the Mac's media engine.
+fn hardware_encoder(v: Option<&String>) -> bool {
+    match v.map(|s| s.as_str()) {
+        None | Some("x264") => false,
+        Some("videotoolbox") if cfg!(target_os = "macos") => {
+            log::info!("encoding with VideoToolbox");
+            true
+        }
+        Some("videotoolbox") => {
+            log::warn!("--encoder=videotoolbox is macOS only; encoding with x264");
+            false
+        }
+        Some(other) => {
+            log::warn!("unknown --encoder={other}; encoding with x264");
+            false
+        }
+    }
+}
+
 fn truthy(v: Option<&String>, default: bool) -> bool {
     v.map(|s| matches!(s.as_str(), "true" | "1" | "yes" | "on"))
         .unwrap_or(default)
@@ -170,6 +189,7 @@ async fn serve(a: HashMap<String, String>) {
         // threads cost ~3x the CPU on desktop content, so this saves 20-55% CPU, but
         // small updates encode a few ms slower on one thread.
         adaptive_threads: truthy(a.get("adaptive-threads"), false),
+        hardware: hardware_encoder(a.get("encoder")),
         coalesce: std::time::Duration::from_micros(range_max(a.get("coalesce-us"), 0.0) as u64),
     };
     let clip = a

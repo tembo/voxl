@@ -1,5 +1,5 @@
-//! C APIs of CoreGraphics, CoreVideo, CoreMedia, CoreFoundation, Carbon and CoreAudio
-//! that the macOS backend calls directly (Objective-C APIs go through objc2).
+//! C APIs of CoreGraphics, CoreVideo, CoreMedia, CoreFoundation, Carbon, CoreAudio and
+//! VideoToolbox that the macOS backend calls directly (Objective-C APIs go through objc2).
 
 #![allow(non_upper_case_globals, non_snake_case, dead_code)]
 
@@ -18,7 +18,10 @@ pub type CGImageRef = *const c_void;
 pub type CGContextRef = *mut c_void;
 pub type CGColorSpaceRef = *mut c_void;
 pub type CVPixelBufferRef = *mut c_void;
+pub type CVPixelBufferPoolRef = *mut c_void;
 pub type CMSampleBufferRef = *const c_void;
+pub type CMBlockBufferRef = *const c_void;
+pub type VTCompressionSessionRef = *mut c_void;
 pub type OSStatus = i32;
 
 #[repr(C)]
@@ -52,6 +55,7 @@ extern "C" {
     pub fn CFDataGetLength(d: CFDataRef) -> isize;
     pub fn CFStringGetCString(s: CFStringRef, buf: *mut c_char, size: isize, enc: u32) -> bool;
     pub fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> bool;
+    pub fn CFBooleanGetValue(b: CFTypeRef) -> bool;
 }
 pub const kCFNumberSInt64Type: isize = 4;
 pub const kCFNumberDoubleType: isize = 13;
@@ -210,6 +214,18 @@ extern "C" {
     pub fn CVPixelBufferGetWidth(pb: CVPixelBufferRef) -> usize;
     pub fn CVPixelBufferGetHeight(pb: CVPixelBufferRef) -> usize;
     pub fn CVPixelBufferGetPixelFormatType(pb: CVPixelBufferRef) -> u32;
+    pub fn CVPixelBufferPoolCreatePixelBuffer(
+        allocator: CFTypeRef,
+        pool: CVPixelBufferPoolRef,
+        out: *mut CVPixelBufferRef,
+    ) -> i32;
+    pub static kCVPixelBufferPixelFormatTypeKey: CFStringRef;
+    pub static kCVPixelBufferWidthKey: CFStringRef;
+    pub static kCVPixelBufferHeightKey: CFStringRef;
+    pub static kCVPixelBufferIOSurfacePropertiesKey: CFStringRef;
+    pub static kCVImageBufferColorPrimaries_ITU_R_709_2: CFStringRef;
+    pub static kCVImageBufferTransferFunction_ITU_R_709_2: CFStringRef;
+    pub static kCVImageBufferYCbCrMatrix_ITU_R_601_4: CFStringRef;
 }
 pub const kCVPixelBufferLock_ReadOnly: u64 = 1;
 /// '420v': NV12, video range.
@@ -272,6 +288,103 @@ extern "C" {
     ) -> OSStatus;
 }
 pub const kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment: u32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CMTime {
+    pub value: i64,
+    pub timescale: i32,
+    pub flags: u32,
+    pub epoch: i64,
+}
+pub const kCMTimeFlags_Valid: u32 = 1;
+
+#[link(name = "CoreMedia", kind = "framework")]
+extern "C" {
+    pub fn CMSampleBufferGetDataBuffer(sb: CMSampleBufferRef) -> CMBlockBufferRef;
+    pub fn CMBlockBufferGetDataLength(bb: CMBlockBufferRef) -> usize;
+    pub fn CMBlockBufferCopyDataBytes(
+        bb: CMBlockBufferRef,
+        offset: usize,
+        len: usize,
+        dest: *mut c_void,
+    ) -> OSStatus;
+    pub fn CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+        desc: CFTypeRef,
+        index: usize,
+        set_out: *mut *const u8,
+        size_out: *mut usize,
+        count_out: *mut usize,
+        nal_header_length_out: *mut i32,
+    ) -> OSStatus;
+    pub static kCMSampleAttachmentKey_NotSync: CFStringRef;
+}
+/// 'avc1'
+pub const kCMVideoCodecType_H264: u32 = 0x6176_6331;
+
+pub type VTCompressionOutputCallback = extern "C" fn(
+    refcon: *mut c_void,
+    frame_refcon: *mut c_void,
+    status: OSStatus,
+    info_flags: u32,
+    sample: CMSampleBufferRef,
+);
+
+#[link(name = "VideoToolbox", kind = "framework")]
+extern "C" {
+    pub fn VTCompressionSessionCreate(
+        allocator: CFTypeRef,
+        width: i32,
+        height: i32,
+        codec: u32,
+        encoder_specification: CFDictionaryRef,
+        source_image_buffer_attributes: CFDictionaryRef,
+        compressed_data_allocator: CFTypeRef,
+        output_callback: VTCompressionOutputCallback,
+        refcon: *mut c_void,
+        session_out: *mut VTCompressionSessionRef,
+    ) -> OSStatus;
+    pub fn VTSessionSetProperty(
+        session: VTCompressionSessionRef,
+        key: CFStringRef,
+        value: CFTypeRef,
+    ) -> OSStatus;
+    pub fn VTCompressionSessionPrepareToEncodeFrames(session: VTCompressionSessionRef) -> OSStatus;
+    pub fn VTCompressionSessionGetPixelBufferPool(
+        session: VTCompressionSessionRef,
+    ) -> CVPixelBufferPoolRef;
+    pub fn VTCompressionSessionEncodeFrame(
+        session: VTCompressionSessionRef,
+        image: CVPixelBufferRef,
+        pts: CMTime,
+        duration: CMTime,
+        frame_properties: CFDictionaryRef,
+        frame_refcon: *mut c_void,
+        info_flags_out: *mut u32,
+    ) -> OSStatus;
+    pub fn VTCompressionSessionCompleteFrames(
+        session: VTCompressionSessionRef,
+        until: CMTime,
+    ) -> OSStatus;
+    pub fn VTCompressionSessionInvalidate(session: VTCompressionSessionRef);
+    pub static kVTVideoEncoderSpecification_EnableLowLatencyRateControl: CFStringRef;
+    pub static kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: CFStringRef;
+    pub static kVTCompressionPropertyKey_RealTime: CFStringRef;
+    pub static kVTCompressionPropertyKey_ProfileLevel: CFStringRef;
+    pub static kVTCompressionPropertyKey_H264EntropyMode: CFStringRef;
+    pub static kVTCompressionPropertyKey_AllowFrameReordering: CFStringRef;
+    pub static kVTCompressionPropertyKey_MaxKeyFrameInterval: CFStringRef;
+    pub static kVTCompressionPropertyKey_ExpectedFrameRate: CFStringRef;
+    pub static kVTCompressionPropertyKey_AverageBitRate: CFStringRef;
+    pub static kVTCompressionPropertyKey_ColorPrimaries: CFStringRef;
+    pub static kVTCompressionPropertyKey_TransferFunction: CFStringRef;
+    pub static kVTCompressionPropertyKey_YCbCrMatrix: CFStringRef;
+    pub static kVTProfileLevel_H264_High_AutoLevel: CFStringRef;
+    pub static kVTH264EntropyMode_CABAC: CFStringRef;
+    pub static kVTEncodeFrameOptionKey_ForceKeyFrame: CFStringRef;
+}
+/// The encoder dropped the frame (the output callback gets no sample buffer).
+pub const kVTEncodeInfo_FrameDropped: u32 = 2;
 
 #[link(name = "Carbon", kind = "framework")]
 extern "C" {
