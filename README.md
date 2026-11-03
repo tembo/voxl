@@ -270,15 +270,11 @@ WebRTC's jitter buffer, and voxl runs its own rate control, which keeps latency 
 clean link. The trade-off is TCP: on a link that drops packets (bad Wi-Fi, a weak mobile
 signal) a lost packet holds up the frames behind it, where WebRTC can skip ahead.
 
-**How is it different from Moonlight and Sunshine?** They're made for playing games on a
-machine with a GPU: Sunshine encodes on the GPU (NVENC, VAAPI and the like) and streams
-over UDP to the Moonlight app once it's paired, and for that they're the better fit. voxl
-is for desktops on servers, VMs and sandboxes, often without a GPU and reachable only
-through a URL. It encodes on the CPU for now, and may use the GPU where there is one (see
-below), but either way it needs only a browser to watch and sends everything over one
-WebSocket, so it works through proxies, tunnels and sandbox preview URLs and can be
-embedded in another page. It also has the APIs agents use (`/screenshot`, `/record`,
-`/wait`).
+**How is it different from Moonlight and Sunshine?** They're for playing games on your
+own GPU machine through the Moonlight app, and for that they're the better fit. voxl was
+built for things like software factories that use headless VMs and sandboxes (CI,
+computer-use agents), usually on Xvfb with no GPU. It streams them to a plain browser tab
+over one WebSocket and has APIs for agents.
 
 **How is it different from RustDesk?** RustDesk is an open-source alternative to
 TeamViewer and AnyDesk, for reaching your own computers or helping someone with theirs:
@@ -297,7 +293,25 @@ HTTPS pages and on localhost. To watch from another machine, put voxl behind a T
 (Caddy, Cloudflare Tunnel, `tailscale serve`) and name its host with `--allowed-hosts`,
 or forward the port over SSH and open `localhost`.
 
-**Wayland?** Not yet. On Linux voxl streams X11 displays, Xvfb included.
+**Is it safe to expose?** voxl asks for a password by default but serves plain HTTP, so
+put it behind TLS away from localhost. See [SECURITY.md](SECURITY.md).
+
+**Which browsers and devices work?** Any browser with WebCodecs, on an HTTPS page or
+localhost:
+
+| Browser                                                                | Works |
+| ---------------------------------------------------------------------- | ----- |
+| Chrome, Edge and other Chromium browsers 94+, desktop and Android      | Yes   |
+| Firefox 130+, desktop                                                  | Yes   |
+| Safari 16.4+ and any browser on iPhone or iPad (sound needs Safari 26) | Yes   |
+| Firefox for Android                                                    | No    |
+
+Phones and tablets get touch input and an on-screen keyboard.
+
+**Wayland?** Not yet; on Linux voxl streams X11 displays, Xvfb included. The virtual
+desktops voxl is built for run on Xvfb (E2B's and Daytona's do too), and X11 lets voxl
+capture them without a permission prompt, with damage events that keep a still screen at
+no CPU and power `/wait`. Wayland support is being worked on.
 
 **Does it use the GPU?** Not yet. voxl encodes H.264 on the CPU with x264: 1.3–1.7 cores
 for a busy 2560x1600 desktop, X server included (see the CPU table above). Hardware
