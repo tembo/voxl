@@ -99,6 +99,7 @@ async def main():
                     if l < -1e6: l += 0x1000000
                     if os.environ.get('DBG') and len(lat) < 3: print('dbg', n, ms, l, file=sys.stderr)
                     if 0 <= l < 10000: lat.append(l); rlat.append(l - (now - trecv) * 1000)
+                    if os.environ.get('LATLOG'): open(os.environ['LATLOG'], 'a').write(f'{now:.3f} {l} {len(msg)}\n')
                 if now - sec0 >= 1:
                     seen_per_sec.append(len(cur) / (now - sec0)); cur = set(); sec0 = now
     s = sorted(seen_per_sec); l = sorted(lat); d = sorted(dec_ms)
