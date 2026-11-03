@@ -112,7 +112,7 @@ windows = { version = "0.61", features = [
 windows-core = "0.61"
 
 [build-dependencies]
-bindgen = "0.71"
+bindgen = "0.72"
 pkg-config = "0.3"
 vcpkg = "0.2"
 
