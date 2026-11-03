@@ -43,7 +43,15 @@ fn unix_libs(target: &str) -> Vec<std::path::PathBuf> {
     };
     let others: Vec<_> = libs
         .iter()
-        .map(|l| pkg_config::probe_library(l).expect(l))
+        .filter_map(|&l| match pkg_config::probe_library(l) {
+            // libyuv's CMake install writes no libyuv.pc, so Arch's and Debian's packages
+            // have none: link it from the default library path.
+            Err(_) if l == "libyuv" => {
+                println!("cargo:rustc-link-lib=yuv");
+                None
+            }
+            lib => Some(lib.expect(l)),
+        })
         .collect();
     // Embed library dirs so the binary runs outside the build shell. The link args only
     // reach voxl's own binary, so programs that embed voxl get the dirs as DEP_VOXL_RPATH.
