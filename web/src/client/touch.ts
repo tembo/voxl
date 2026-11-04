@@ -1,12 +1,13 @@
 // Touch: tap = click, drag = left-drag, long press = right click, two fingers =
-// scroll (content follows the fingers). A tap right after another one near it clicks
-// the same spot, so double-taps double-click despite the finger landing a little off.
+// scroll (content follows the fingers).
 import { cmd } from '../protocol';
 import type { App } from './app';
 
 const SLOP = 10;
 const LONG_PRESS = 550;
-/** Taps this close in time (GTK's and Qt's double-click time) and space hit one spot. */
+/** A tap this soon (GTK's and Qt's double-click time) and this close (CSS px) after
+ * the last one clicks the same spot, so double-taps double-click even though the
+ * finger lands a little off. */
 const MULTI_TAP_MS = 400;
 const MULTI_TAP_PX = 24;
 
