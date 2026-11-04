@@ -80,6 +80,8 @@
 				position: relative;
 				outline: none;
 				touch-action: none;
+				/* Pinch zoom's transform (zoom.ts) works from the top left. */
+				transform-origin: 0 0;
 			}
 			#screen {
 				position: absolute;
@@ -106,6 +108,8 @@
 				display: none;
 				pointer-events: none;
 				background-size: 100% 100%;
+				/* Undoing the zoom keeps the pointer's hotspot where it points. */
+				transform-origin: var(--hx) var(--hy);
 			}
 			#tp-pointer.dot {
 				width: 12px;

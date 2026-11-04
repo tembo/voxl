@@ -4,6 +4,7 @@ import type { App } from './app';
 import type { createCursor } from './cursor';
 import { createTouch } from './touch';
 import { createTrackpad } from './trackpad';
+import { createZoom } from './zoom';
 
 /** DOM button -> X button (left, middle, right, back, forward). */
 const BUTTONS = [1, 2, 3, 8, 9];
@@ -55,12 +56,19 @@ export function setupPointer(
 	/** Desktop pixels per on-screen pixel. */
 	const deskPerPx = () => app.desk.w / surface.getBoundingClientRect().width;
 
+	const zoom = createZoom(app);
 	const touch = createTouch(app, {
 		moveTo: (x, y) => move({ clientX: x, clientY: y }, true),
 		queueScroll,
 		deskPerPx,
+		zoom,
 	});
-	const trackpad = createTrackpad(app, { queueScroll, deskPerPx, cursor });
+	const trackpad = createTrackpad(app, {
+		queueScroll,
+		deskPerPx,
+		cursor,
+		zoom,
+	});
 	// Each gesture stays with the mode it started in, even if trackpad mode is toggled.
 	const touching = new Set<number>();
 	let tp: typeof touch = touch;

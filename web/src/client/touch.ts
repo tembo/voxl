@@ -1,7 +1,8 @@
 // Touch: tap = click, drag = left-drag, long press = right click, two fingers =
-// scroll (content follows the fingers).
+// scroll (content follows the fingers), pinch = zoom the view (see zoom.ts).
 import { cmd } from '../protocol';
 import type { App } from './app';
+import type { createZoom } from './zoom';
 
 const SLOP = 10;
 const LONG_PRESS = 550;
@@ -11,12 +12,14 @@ interface Hooks {
 	moveTo(x: number, y: number): void;
 	queueScroll(dx: number, dy: number): void;
 	deskPerPx(): number;
+	zoom: ReturnType<typeof createZoom>;
 }
 
 export function createTouch(app: App, hooks: Hooks) {
 	const { send } = app;
 	const pts = new Map<number, { x: number; y: number }>();
-	let mode: 'pending' | 'drag' | 'scroll' | 'done' | null = null;
+	let mode: 'pending' | 'drag' | 'two' | 'scroll' | 'pinch' | 'done' | null =
+		null;
 	let start = { x: 0, y: 0 };
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let lastMid: [number, number] = [0, 0];
@@ -52,8 +55,10 @@ export function createTouch(app: App, hooks: Hooks) {
 		} else if (pts.size === 2) {
 			clearTimeout(timer);
 			if (mode === 'drag') send(cmd.button(1, false));
-			mode = 'scroll';
+			// Undecided until the fingers either spread (pinch) or move together (scroll).
+			mode = 'two';
 			lastMid = mid();
+			hooks.zoom.begin(pts.values());
 		}
 	}
 	function move(e: PointerEvent) {
@@ -68,11 +73,19 @@ export function createTouch(app: App, hooks: Hooks) {
 			send(cmd.button(1, true));
 		}
 		if (mode === 'drag') hooks.moveTo(p.x, p.y);
-		else if (mode === 'scroll' && pts.size >= 2) {
-			const m = mid(),
-				k = hooks.deskPerPx();
-			hooks.queueScroll((lastMid[0] - m[0]) * k, (lastMid[1] - m[1]) * k);
-			lastMid = m;
+		else if (pts.size === 2) {
+			const m = mid();
+			if (mode === 'two') {
+				const moved = Math.hypot(m[0] - lastMid[0], m[1] - lastMid[1]) > SLOP;
+				if (hooks.zoom.pinching(pts.values(), moved)) mode = 'pinch';
+				else if (moved) mode = 'scroll';
+			}
+			if (mode === 'pinch') hooks.zoom.pinch(pts.values());
+			else if (mode === 'scroll') {
+				const k = hooks.deskPerPx();
+				hooks.queueScroll((lastMid[0] - m[0]) * k, (lastMid[1] - m[1]) * k);
+				lastMid = m;
+			}
 		}
 	}
 	function up(e: PointerEvent) {
@@ -85,7 +98,11 @@ export function createTouch(app: App, hooks: Hooks) {
 		} else if (mode === 'drag') {
 			send(cmd.button(1, false));
 			mode = 'done';
-		} else if (mode === 'scroll' && pts.size < 2) mode = 'done';
+		} else if (
+			(mode === 'two' || mode === 'scroll' || mode === 'pinch') &&
+			pts.size < 2
+		)
+			mode = 'done';
 		if (pts.size === 0) mode = null;
 	}
 	function cancel(e: PointerEvent) {
