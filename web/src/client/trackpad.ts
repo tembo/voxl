@@ -2,12 +2,14 @@
 // pointer jumping under the finger, the screen works like a laptop's trackpad, so the
 // finger never covers what it points at. Sliding moves the pointer (a quick slide goes
 // further than a slow one), a tap clicks where it is, holding still grabs (slide to
-// drag, lift to drop), a two-finger tap right-clicks and two fingers scroll. Touch
-// browsers show no CSS cursor, so the pointer is drawn here.
+// drag, lift to drop), a two-finger tap right-clicks, two fingers scroll and a pinch
+// zooms (see zoom.ts; the view follows the pointer). Touch browsers show no CSS cursor,
+// so the pointer is drawn here, at the same size whatever the zoom.
 import { cmd } from '../protocol';
 import type { App } from './app';
 import { el } from './app';
 import type { CursorImage } from './cursor';
+import type { createZoom } from './zoom';
 
 /** Moving less than this (CSS px) keeps a touch a tap or a hold. */
 const STILL = 4;
@@ -24,6 +26,7 @@ interface Hooks {
 	queueScroll(dx: number, dy: number): void;
 	deskPerPx(): number;
 	cursor: { image(): CursorImage | null; onChange(f: () => void): void };
+	zoom: ReturnType<typeof createZoom>;
 }
 
 export function createTrackpad(app: App, hooks: Hooks) {
@@ -41,8 +44,15 @@ export function createTrackpad(app: App, hooks: Hooks) {
 	const pos = { x: -1, y: -1 };
 	let sent = '';
 	const pts = new Map<number, { x: number; y: number }>();
-	let mode: 'pending' | 'move' | 'drag' | 'two' | 'scroll' | 'done' | null =
-		null;
+	let mode:
+		| 'pending'
+		| 'move'
+		| 'drag'
+		| 'two'
+		| 'scroll'
+		| 'pinch'
+		| 'done'
+		| null = null;
 	let start = { x: 0, y: 0, t: 0 };
 	let from = { x: 0, y: 0 };
 	let far = 0;
@@ -96,10 +106,11 @@ export function createTrackpad(app: App, hooks: Hooks) {
 		ptr.style.setProperty('--hx', `${hx}px`);
 		ptr.style.setProperty('--hy', `${hy}px`);
 		const s = app.view.scale;
-		ptr.style.transform = `translate(${pos.x * s - hx}px, ${pos.y * s - hy}px)`;
+		ptr.style.transform = `translate(${pos.x * s - hx}px, ${pos.y * s - hy}px) scale(${1 / hooks.zoom.z})`;
 		ptr.classList.toggle('down', mode === 'drag');
 	}
 	hooks.cursor.onChange(draw);
+	hooks.zoom.onChange(draw);
 
 	/** Moves the pointer by a finger movement (CSS px) made over `dt` ms. */
 	function nudge(dx: number, dy: number, dt: number) {
@@ -110,6 +121,11 @@ export function createTrackpad(app: App, hooks: Hooks) {
 		pos.y = Math.max(0, Math.min(app.desk.h - 1, pos.y + dy * gain));
 		sendPos();
 		draw();
+		const r = app.surface.getBoundingClientRect();
+		hooks.zoom.reveal(
+			r.left + (pos.x / app.desk.w) * r.width,
+			r.top + (pos.y / app.desk.h) * r.height
+		);
 	}
 
 	function set(v: boolean) {
@@ -148,6 +164,7 @@ export function createTrackpad(app: App, hooks: Hooks) {
 			mode = mode === 'pending' || mode === 'move' ? 'two' : 'scroll';
 			lastMid = mid();
 			start = { x: lastMid[0], y: lastMid[1], t: e.timeStamp };
+			hooks.zoom.begin(pts.values());
 			draw();
 		}
 	}
@@ -169,16 +186,17 @@ export function createTrackpad(app: App, hooks: Hooks) {
 			} else if (mode === 'move' || mode === 'drag') nudge(dx, dy, dt);
 		} else if (pts.size === 2) {
 			const m = mid();
-			if (
-				mode === 'two' &&
-				Math.hypot(m[0] - start.x, m[1] - start.y) > TAP_SLOP
-			)
-				mode = 'scroll';
-			if (mode === 'scroll') {
+			if (mode === 'two') {
+				const moved = Math.hypot(m[0] - start.x, m[1] - start.y) > TAP_SLOP;
+				if (hooks.zoom.pinching(pts.values(), moved)) mode = 'pinch';
+				else if (moved) mode = 'scroll';
+			}
+			if (mode === 'pinch') hooks.zoom.pinch(pts.values());
+			else if (mode === 'scroll') {
 				const k = hooks.deskPerPx();
 				hooks.queueScroll((lastMid[0] - m[0]) * k, (lastMid[1] - m[1]) * k);
+				lastMid = m;
 			}
-			lastMid = m;
 		}
 	}
 	function up(e: PointerEvent) {
@@ -204,7 +222,8 @@ export function createTrackpad(app: App, hooks: Hooks) {
 		} else if (mode === 'two') {
 			click(3);
 			mode = 'done';
-		} else if (mode === 'scroll' || mode === 'move') mode = 'done';
+		} else if (mode === 'scroll' || mode === 'pinch' || mode === 'move')
+			mode = 'done';
 		if (pts.size === 0) mode = null;
 		draw();
 	}
