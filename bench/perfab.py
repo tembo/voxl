@@ -50,7 +50,7 @@ def start_voxl(binary, extra):
     env = dict(os.environ, DISPLAY=BD, RUST_LOG=os.environ.get('RUST_LOG', 'info'))
     log = open('/tmp/voxl-bench.log', 'w')
     args = [binary, f'--port={PORT}', '--framerate=60', '--preset=ultrafast', '--max-kbps=30000',
-            '--audio-enabled=false'] + extra
+            '--audio-enabled=false', '--enable-basic-auth=false'] + extra
     p = subprocess.Popen(args, env=env, stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
     for _ in range(50):
         try:

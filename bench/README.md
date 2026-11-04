@@ -55,6 +55,14 @@ sleep 1; BENCH_DISPLAY=:5 env/openbox.sh &
   the native client's FPS and latency together with the server's CPU (voxl and Xvfb),
   a per-thread breakdown of voxl and its `/stats` (encode and convert time, average QP).
   JSON lines in `$OUT`.
+- `stale.sh <voxl> [runs]`: on a 10 Mbps / 40 ms link, a detailed 2000x1600 window
+  appears (`WINDOW=text`, or `photo` for detail at every scale, from `stillpic.py`, shown
+  with `feh`) and a small animation keeps running; `stalecheck.py` then compares the
+  viewer's decoded picture of the window with the screen (PSNR, and 16x16 blocks off by
+  more than 20 levels). Checks that a crushed scene change gets sharpened, not left stale.
+- `scenes.sh <voxl> [mbps/rtt]`: six large windows and root repaints in a row, with a viewer
+  connected; `stripelog.py` summarizes the encode thread from voxl's `VOXL_DEBUG_STRIPES`
+  log (time, frames over 33 ms, frames encoded twice, sharpening dropped).
 - `nclient.py` with `LATLOG=path` also writes every marker it reads as `time latency bytes`.
 - `VOXL_PSNR=1` in voxl's environment logs the luma PSNR of what viewers decode (x264's
   own measurement against its input) every 300 frames: quality at a given bitrate.

@@ -281,6 +281,10 @@ pub struct Hub {
     /// The encoder sent a keyframe nobody asked for (a scene change crushed to fit the
     /// bitrate): the whole screen needs sharpening, not just what changed.
     pub resharpen: AtomicBool,
+    /// Macroblocks a paint-over meant to sharpen but the encoder left out or dropped
+    /// (row-major, the capture's size; empty when none): the capture loop marks them
+    /// to sharpen again, once the rate allows it.
+    pub repaint: Mutex<Vec<u8>>,
     /// Last cursor message, replayed to new clients.
     pub cursor: Mutex<Option<Bytes>>,
     /// Wakes the capture thread (acks, joins, keyframe requests).
@@ -311,6 +315,7 @@ impl Hub {
             link_clear: AtomicBool::new(true),
             link_kbps: AtomicU32::new(0),
             resharpen: AtomicBool::new(false),
+            repaint: Mutex::new(Vec::new()),
             stripes: Mutex::new(Vec::new()),
             cursor: Mutex::new(None),
             waker: Wake::new().expect("wake"),

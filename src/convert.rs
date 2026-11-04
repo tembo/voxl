@@ -108,6 +108,8 @@ fn split_rows(y0: usize, y1: usize, threads: usize, run: impl Fn(usize, usize) +
         }
     }
     run(y0, (y0 + chunk).min(y1));
+    // Only the helpers hold senders now: if one dies, recv fails instead of waiting forever.
+    drop(done_tx);
     for _ in 0..sent {
         done_rx.recv().expect("convert thread gone");
     }

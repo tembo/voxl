@@ -38,8 +38,12 @@ struct Job {
     paintover_final: bool,
     /// Rows that changed in this capture.
     band: Option<Band>,
-    /// Per-macroblock change map for this capture (None: analyse everything).
+    /// Macroblocks that changed in this capture (None: analyse everything). They are
+    /// always encoded.
     mb_dirty: Option<Arc<Vec<u8>>>,
+    /// Macroblocks to sharpen (paint-over), encoded only where the frame's QP makes them
+    /// sharper; the encoder hands back any it leaves out (`Hub::repaint`).
+    refine: Option<Arc<Vec<u8>>>,
     captured_at: Instant,
     marker_ms: i64,
 }
@@ -561,6 +565,14 @@ fn capture_loop(
         }
         note_changes(cap, &hub);
         hub.drain_wake();
+        // Sharpening the encoder left out (the rate didn't allow it yet): mark it again,
+        // and have a paint-over follow even if nothing moves.
+        let repaint = std::mem::take(&mut *hub.repaint.lock());
+        if repaint.len() == refiner.pending.len() {
+            refiner.mark(&repaint);
+            paintover_left = paintover_left.max(1);
+            last_motion = Instant::now();
+        }
         let snaps = std::mem::take(&mut *hub.snapshots.lock());
         if !snaps.is_empty() {
             // The whole current screen, whether or not anyone is watching. Damage
@@ -765,30 +777,33 @@ fn capture_loop(
         if frame_paintover && paintover_left == 0 {
             refiner.clear_all();
         }
-        // A refinement frame encodes what moved plus what is due; everything else stays skipped.
-        let mb_map = if want_key {
-            None
+        // A refinement frame encodes what moved plus what is due; everything else stays
+        // skipped. What moved and what is due travel apart: a frame that moved is always
+        // sent, the sharpening only where it helps.
+        let (mb_map, refine_map) = if want_key {
+            (None, None)
         } else if frame_paintover {
-            paint_map.map(|(m, b)| {
+            let refine = paint_map.map(|(m, b)| {
                 band = Some(match band {
                     Some(x) => union(Some(x), b),
                     None => b,
                 });
                 Arc::new(m)
-            })
+            });
+            let nothing_moved = refine.as_ref().map(|m| Arc::new(vec![0; m.len()]));
+            (nothing_moved, refine)
         } else if let Some((rmap, rband)) = refine.take() {
             band = Some(match band {
                 Some(b) => union(Some(b), rband),
                 None => rband,
             });
-            let mut m = mb_dirty.take().unwrap_or_else(|| vec![1; rmap.len()]);
-            for (d, r) in m.iter_mut().zip(rmap) {
-                *d |= r;
-            }
             hub.stats.refines.fetch_add(1, Ordering::Relaxed);
-            Some(Arc::new(m))
+            // Without a change map everything is encoded anyway.
+            let moved = mb_dirty.take().map(Arc::new);
+            let refine = moved.as_ref().map(|_| Arc::new(rmap));
+            (moved, refine)
         } else {
-            mb_dirty.take().map(Arc::new)
+            (mb_dirty.take().map(Arc::new), None)
         };
         last_capture = t0;
         next_idx = 1 - idx;
@@ -800,6 +815,7 @@ fn capture_loop(
                 paintover,
                 paintover_final: frame_paintover && paintover_left == 0,
                 mb_dirty: mb_map,
+                refine: refine_map,
                 band,
                 captured_at: origin,
                 marker_ms,
@@ -906,6 +922,44 @@ struct QpCtl {
     roomy: bool,
     /// QP added to what frames ask for while the stream is over --max-kbps (`MaxRate`).
     bias: f64,
+    /// QP each macroblock of the stripe was last coded at, row-major (51 until known).
+    coded: Vec<u8>,
+    /// QP of the frame x264 refers to. x264 only skips a block marked unchanged outright
+    /// when the reference is the frame just before and was coded at that QP or coarser
+    /// (`effective_qp`, the frame's QP for every block): a sharper frame re-analyses
+    /// every block and re-codes those coded coarser than it (encoder/analyse.c).
+    ref_qp: i32,
+    /// The frame before was dropped (`invalidate_last`), so the next one refers two
+    /// frames back and gets no outright skips either.
+    hints_lost: bool,
+    /// Motion QP doesn't step below this (since `floor_at`): a step down to just under
+    /// it overshot. Re-coding what's still coarse can cost far more than the moving
+    /// blocks predict, so the step isn't retried every frame, only now and then.
+    floor: i32,
+    floor_at: Instant,
+}
+
+/// How long a step down that overshot isn't tried again (`QpCtl::floor`).
+const FLOOR_HOLD: Duration = Duration::from_secs(2);
+
+/// Seconds of the measured link a frame that sharpens may take (see `stripe_worker`).
+const SHARPEN_LINK: f64 = 0.15;
+
+/// Unchanged blocks counted by the QP they were coded at (`QpCtl::coarse`).
+type Coarse = [u32; 52];
+
+/// Fold a measured cost per block (at QP 22) into `c`; `steady`: the frame was at about
+/// the QP it asked for.
+fn learn_cost(c: &mut Cost, per_mb: f64, steady: bool) {
+    c.avg = c.avg * 0.6 + per_mb * 0.4;
+    c.peak = per_mb.max(c.peak * 0.85);
+    if steady {
+        c.steady = if c.steady > 0.0 {
+            c.steady * 0.8 + per_mb * 0.2
+        } else {
+            per_mb
+        };
+    }
 }
 
 impl QpCtl {
@@ -920,13 +974,68 @@ impl QpCtl {
             fill: 0.0,
             size: 0.0,
             last: Instant::now(),
-            cost: [c(20.0), c(8.0), c(30.0)],
+            // Detail (Refine) is per block of detail added (`QpCtl::detail`).
+            cost: [c(20.0), c(40.0), c(30.0)],
             motion_qp: crate::encoder::MIN_QP,
             motion_bytes: 0.0,
             repair: 0.0,
             roomy: false,
             bias: 0.0,
+            coded: Vec::new(),
+            ref_qp: 51,
+            hints_lost: false,
+            floor: 0,
+            floor_at: Instant::now(),
         }
+    }
+
+    /// The unchanged blocks of a frame (`unchanged[i] != 0`), counted by the QP they were
+    /// coded at; none when every block is encoded anyway.
+    fn coarse(&self, unchanged: Option<&[u8]>) -> Coarse {
+        let mut h = [0; 52];
+        if let Some(u) = unchanged {
+            for (&u, &c) in u.iter().zip(&self.coded) {
+                if u != 0 {
+                    h[c.min(51) as usize] += 1;
+                }
+            }
+        }
+        h
+    }
+
+    /// The coarsest QP among the blocks `of` marks (`of[i] != 0`): no frame at that QP
+    /// or coarser makes them any sharper.
+    fn coarsest(&self, of: &[u8]) -> i32 {
+        of.iter()
+            .zip(&self.coded)
+            .filter(|(&o, _)| o != 0)
+            .map(|(_, &c)| c as i32)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Record a kept frame at `qp`: what it encoded (every block for a keyframe or
+    /// without a map, else those `unchanged` doesn't mark) is now at `qp`, and so are
+    /// the unchanged blocks it re-coded. `rescan`: it referred two frames back (a
+    /// re-encode), so it re-coded like a frame sharper than its reference.
+    fn kept(&mut self, qp: i32, key: bool, unchanged: Option<&[u8]>, rescan: bool) {
+        let q = qp.clamp(0, 51) as u8;
+        let recode = rescan || qp < self.ref_qp || self.hints_lost;
+        match unchanged {
+            Some(u) if !key => {
+                for (c, &u) in self.coded.iter_mut().zip(u) {
+                    if u == 0 || (recode && *c > q) {
+                        *c = q;
+                    }
+                }
+            }
+            _ => {
+                self.coded.fill(q);
+                self.floor = 0;
+            }
+        }
+        self.ref_qp = qp;
+        self.hints_lost = false;
     }
 
     /// Bytes the next frame may take: what the buffer holds after refilling at
@@ -981,22 +1090,58 @@ impl QpCtl {
             && mbs.max(1) as f64 * steady * size_at(want) * 4.0 <= budget
     }
 
-    /// Predicted bytes of a frame of `kind` at `qp` encoding `mbs` macroblocks.
-    fn predict(&self, kind: Kind, qp: i32, mbs: usize) -> f64 {
-        let c = &self.cost[kind as usize];
-        mbs.max(1) as f64 * c.avg.max(c.peak) * size_at(qp as f64)
+    /// Detail a frame at `qp` adds to blocks already coded: the ones it sharpens
+    /// (`refine`) and, below the reference's QP or after a dropped frame, the unchanged
+    /// ones it re-codes (`coarse`), both counted by the QP they were coded at. Bringing
+    /// a block from QP `c` to `qp` only adds the detail in between, so it counts as
+    /// `size_at(qp) - size_at(c)` of a block coded afresh: a step of one QP over a whole
+    /// window is cheap, going from 51 to 16 isn't.
+    fn detail(&self, qp: i32, refine: &Coarse, coarse: &Coarse) -> f64 {
+        let at = size_at(qp as f64);
+        let recode = qp < self.ref_qp || self.hints_lost;
+        ((qp.clamp(0, 51) + 1) as usize..52)
+            .map(|c| {
+                let n = refine[c] + if recode { coarse[c] } else { 0 };
+                n as f64 * (at - size_at(c as f64)).max(0.0)
+            })
+            .sum()
     }
 
-    /// QP for a frame of `kind` that wants `want` and encodes `mbs` macroblocks: the
-    /// first from `want` up whose predicted size fits `budget` (51 if none does).
+    /// Predicted bytes of a frame at `qp`: `moved` blocks of new content, at what
+    /// `kind` costs per block (a keyframe its own, anything else motion's), plus the
+    /// detail it adds to blocks already coded (`detail`), at what detail costs.
+    fn predict(&self, kind: Kind, qp: i32, moved: usize, refine: &Coarse, coarse: &Coarse) -> f64 {
+        let fresh = if kind == Kind::Key {
+            Kind::Key
+        } else {
+            Kind::Motion
+        };
+        let c = &self.cost[fresh as usize];
+        let d = &self.cost[Kind::Refine as usize];
+        moved as f64 * c.avg.max(c.peak) * size_at(qp as f64)
+            + self.detail(qp, refine, coarse) * d.avg.max(d.peak)
+    }
+
+    /// QP for a frame of `kind` that wants `want`, with `moved` blocks of new content
+    /// and the `refine` blocks to sharpen: the first from `want` up whose predicted size
+    /// fits `budget` (51 if none does), counting what a sharper frame re-codes
+    /// (`predict`), so a step down that would re-code a crushed window waits for room.
     /// Motion QP rises to that at once but comes down in steps: a frame sharper than
     /// its reference also re-encodes the detail the reference lost, at a cost per QP
     /// learned from earlier steps, so it comes down as far as that cost fits the
     /// budget (as a VBV lets the quantizer down).
-    fn qp(&self, kind: Kind, want: f64, mbs: usize, budget: f64) -> i32 {
+    fn qp(
+        &self,
+        kind: Kind,
+        want: f64,
+        moved: usize,
+        refine: &Coarse,
+        budget: f64,
+        coarse: &Coarse,
+    ) -> i32 {
         let want = ((want + self.bias).round() as i32).clamp(crate::encoder::MIN_QP, 51);
         let fit = (want..=51)
-            .find(|&q| self.predict(kind, q, mbs) <= budget)
+            .find(|&q| self.predict(kind, q, moved, refine, coarse) <= budget)
             .unwrap_or(51);
         if kind != Kind::Motion || fit >= self.motion_qp {
             return fit;
@@ -1013,29 +1158,54 @@ impl QpCtl {
         } else {
             1
         };
-        (self.motion_qp - step).max(fit)
+        let floor = if self.floor_at.elapsed() < FLOOR_HOLD {
+            self.floor
+        } else {
+            0
+        };
+        (self.motion_qp - step).max(fit).max(floor)
     }
 
-    /// Learn from an encoded frame (sent or not) that wanted QP `want`.
-    fn learn(&mut self, kind: Kind, qp: i32, want: f64, mbs: usize, bytes: usize, slices: u32) {
-        // A motion frame that came down in QP was partly a repair (see `qp`): it says
-        // what coming down costs, not what steady motion does.
-        if !(kind == Kind::Motion && self.learn_repair(qp, bytes)) {
-            // Slice headers and the like cost the same whatever changed.
-            let payload = bytes.saturating_sub(8 * slices as usize) as f64;
-            let per_mb = payload / mbs.max(1) as f64 / size_at(qp as f64);
-            let c = &mut self.cost[kind as usize];
-            c.avg = c.avg * 0.6 + per_mb * 0.4;
-            c.peak = per_mb.max(c.peak * 0.85);
+    /// Learn from an encoded frame (sent or not) that wanted QP `want`, with `moved`
+    /// blocks of new content and the `refine` and `coarse` blocks `predict` counted.
+    #[allow(clippy::too_many_arguments)]
+    fn learn(
+        &mut self,
+        kind: Kind,
+        qp: i32,
+        want: f64,
+        moved: usize,
+        refine: &Coarse,
+        coarse: &Coarse,
+        bytes: usize,
+        slices: u32,
+    ) {
+        // Slice headers and the like cost the same whatever changed.
+        let payload = bytes.saturating_sub(8 * slices as usize) as f64;
+        let fresh = if kind == Kind::Key {
+            Kind::Key
+        } else {
+            Kind::Motion
+        };
+        let detail = self.detail(qp, refine, coarse);
+        let new_content = moved as f64 * size_at(qp as f64);
+        // A motion frame that came down in QP was partly a repair (see `qp`).
+        let stepped = kind == Kind::Motion && self.learn_repair(qp, bytes);
+        if detail > 0.0 && detail >= new_content * 0.25 {
+            // Mostly detail added to blocks already coded: what detail costs, after what
+            // the new content is expected to take.
+            let c = &self.cost[fresh as usize];
+            let rest = (payload - new_content * c.avg).max(payload * 0.25);
+            learn_cost(&mut self.cost[Kind::Refine as usize], rest / detail, false);
+        } else if !stepped && moved > 0 {
             // Only frames at (about) the quality asked for: costs at coarse QPs don't
             // carry over to fine ones.
-            if qp as f64 <= want.round() + 2.0 {
-                c.steady = if c.steady > 0.0 {
-                    c.steady * 0.8 + per_mb * 0.2
-                } else {
-                    per_mb
-                };
-            }
+            let steady = qp as f64 <= want.round() + 2.0;
+            learn_cost(
+                &mut self.cost[fresh as usize],
+                payload / new_content,
+                steady,
+            );
         }
         self.note(kind, qp, bytes);
     }
@@ -1136,10 +1306,13 @@ struct StripeJob {
     buf: SendPtr<I420>,
     ts: i64,
     force_idr: bool,
-    kind: Kind,
     /// QP the frame asks for (motion frames go lower when little changed).
     qp: f32,
+    /// QP sharpening asks for (--paintover-qp).
+    po_qp: f32,
     cap: u32,
+    /// `cap` is twice the stripe's share, as for any job that sharpens.
+    doubled: bool,
     /// The link shows no queueing (`Hub::link_clear`).
     clear: bool,
     /// This stripe's share of the link's measured capacity (kbit/s), 0 if unknown.
@@ -1147,12 +1320,15 @@ struct StripeJob {
     /// QP the stream adds to what frames ask for (`MaxRate`).
     bias: f64,
     mb_dirty: Option<Arc<Vec<u8>>>,
+    /// Macroblocks to sharpen, where the frame's QP allows it (`Job::refine`).
+    refine: Option<Arc<Vec<u8>>>,
     mb_cols: usize,
 }
 
-/// Stripe index, its output (keyframe or not) if it produced any, the QP used, and a
-/// frame to send before the output (standing in for an overshoot that was re-encoded).
-type StripeResult = (usize, Option<(bool, Vec<u8>)>, i32, Option<Vec<u8>>);
+/// Stripe index, its output (keyframe or not) if it produced any, the QP used, a frame
+/// to send before the output (standing in for an overshoot that was re-encoded), and
+/// whether sharpening the job asked for was left out, to be marked again.
+type StripeResult = (usize, Option<(bool, Vec<u8>)>, i32, Option<Vec<u8>>, bool);
 
 /// x264's sliced threading costs ~3x the CPU of one thread on desktop content (and on
 /// small updates is even slower), so a stripe encodes single-threaded and only fans out
@@ -1254,6 +1430,7 @@ fn stripe_worker(
         predicted_ms: 0.0,
     };
     let mbs_total = s.h.div_ceil(16) * s.cfg.width.div_ceil(16) as usize;
+    s.rc.coded = vec![51; mbs_total];
     while let Ok(job) = rx.recv() {
         let buf = unsafe { &*job.buf.0 };
         let suv = buf.stride_uv();
@@ -1266,46 +1443,51 @@ fn stripe_worker(
         };
         let mut out = Vec::with_capacity(64 << 10);
         out.resize(HDR, 0);
-        // x264 wants X264_MBINFO_CONSTANT (1) on unchanged macroblocks of this stripe.
-        let mut info = job.mb_dirty.as_ref().map(|d| {
-            let rows = s.h.div_ceil(16);
+        // This stripe's rows of a screen-wide macroblock map.
+        let rows_of = |d: &Arc<Vec<u8>>| {
             let start = (s.y / 16) * job.mb_cols;
-            d[start..start + rows * job.mb_cols]
-                .iter()
-                .map(|&x| (x == 0) as u8)
-                .collect::<Vec<u8>>()
-        });
-        let mbs = if job.force_idr {
-            mbs_total
+            d[start..start + s.h.div_ceil(16) * job.mb_cols].to_vec()
+        };
+        // x264 wants X264_MBINFO_CONSTANT (1) on unchanged macroblocks of this stripe.
+        let moved: Option<Vec<u8>> = job
+            .mb_dirty
+            .as_ref()
+            .map(|d| rows_of(d).iter().map(|&x| (x == 0) as u8).collect());
+        // Blocks to sharpen that didn't move (those that did are encoded anyway).
+        let sharpen: Option<Vec<u8>> = match (&job.refine, &moved) {
+            (Some(r), Some(m)) => Some(
+                rows_of(r)
+                    .iter()
+                    .zip(m)
+                    .map(|(&r, &u)| (r != 0 && u != 0) as u8)
+                    .collect::<Vec<u8>>(),
+            ),
+            _ => None,
+        }
+        .filter(|v| v.iter().any(|&x| x != 0));
+        let moved_mbs = match &moved {
+            Some(m) if !job.force_idr => m.iter().filter(|&&c| c == 0).count(),
+            _ => mbs_total,
+        };
+        // Small updates (typing, a spinner) are cheap: encode them sharper, as CRF
+        // would, by up to 6 QP for a sliver of the screen.
+        let motion_want = job.qp as f64
+            + (moved_mbs.max(1) as f64 * 4.0 / mbs_total as f64)
+                .log2()
+                .clamp(-6.0, 0.0);
+        // A keyframe is what a new viewer sees first; don't starve it to the steady-state
+        // frame budget (up to ~8 frames' worth at 4x the cap). Everything after refers
+        // back to it: 3 QP sharper, as x264's I/P ratio.
+        let (cap, buf_frames) = if job.force_idr {
+            (job.cap.saturating_mul(4).max(16_000), 8.0)
         } else {
-            info.as_ref()
-                .map_or(mbs_total, |m| m.iter().filter(|&&c| c == 0).count())
+            (job.cap, 1.25)
         };
-        let (cap, buf_frames, want) = match job.kind {
-            // A keyframe is what a new viewer sees first; don't starve it to the
-            // steady-state frame budget (up to ~8 frames' worth at 4x the cap).
-            // Everything after refers back to it: 3 QP sharper, as x264's I/P ratio.
-            Kind::Key => (
-                job.cap.saturating_mul(4).max(16_000),
-                8.0,
-                job.qp as f64 - 3.0,
-            ),
-            // Small updates (typing, a spinner) are cheap: encode them sharper, as
-            // CRF would, by up to 6 QP for a sliver of the screen.
-            Kind::Motion => (
-                job.cap,
-                1.25,
-                job.qp as f64
-                    + (mbs.max(1) as f64 * 4.0 / mbs_total as f64)
-                        .log2()
-                        .clamp(-6.0, 0.0),
-            ),
-            Kind::Refine => (job.cap, 1.25, job.qp as f64),
-        };
-        let fresh = job.kind == Kind::Key;
+        let fresh = job.force_idr;
         // What a frame may take with the buffer full.
         let nominal = cap as f64 * 1000.0 / s.cfg.fps.max(1) as f64 * buf_frames * 0.85 / 8.0;
-        let roomy = s.rc.is_roomy(want, mbs, nominal, cap, job.link_kbps);
+        let roomy =
+            s.rc.is_roomy(motion_want, moved_mbs, nominal, cap, job.link_kbps);
         let budget = s.rc.budget(
             cap,
             buf_frames,
@@ -1316,12 +1498,99 @@ fn stripe_worker(
             roomy,
         );
         s.rc.bias = job.bias;
-        let mut qp = s.rc.qp(job.kind, want, mbs, budget);
-        // A paint-over only helps if it's sharper than the picture it refines. When the
-        // budget only allows the QP the screen already has (or coarser), encoding it
-        // would cost a full encode and show nothing new.
-        if job.kind == Kind::Refine && qp >= s.rc.motion_qp {
-            if done.send((i, None, qp, None)).is_err() {
+        // Sharpening re-codes everything still coarse in one frame (x264 refers to the
+        // frame's QP for every block), so after a scene change crushed to the budget it
+        // never fits a frame's share. Like a keyframe, it may take more while the link
+        // is clear and the buffer full: up to SHARPEN_LINK of the measured link (4
+        // frames' share until it's measured). The debt it leaves holds the frames after
+        // it to the link's rate until it's repaid.
+        let sharpen_allowance = if job.link_kbps > 0 {
+            job.link_kbps as f64 * 1000.0 / 8.0 * SHARPEN_LINK
+        } else {
+            nominal * 4.0
+        }
+        .max(budget);
+        // Full: as full as the buffer motion frames see (a job that sharpens gets twice
+        // the cap, and so twice the buffer, which the fill never reaches).
+        let full = s.rc.size * if job.doubled { 0.5 } else { 1.0 } * 0.9;
+        let sharpen_budget = if job.clear && s.rc.fill >= full {
+            sharpen_allowance
+        } else {
+            budget
+        };
+        // Sharpening only goes in where the frame's QP (counting the blocks a sharper
+        // frame re-codes) is finer than what those blocks have; otherwise it's left out
+        // and handed back, if a full buffer could ever afford it.
+        let sharpen_at = |rc: &QpCtl, budget: f64| {
+            let sh = sharpen.as_deref()?;
+            let unchanged: Vec<u8> = moved
+                .as_deref()?
+                .iter()
+                .zip(sh)
+                .map(|(&u, &x)| (u != 0 && x == 0) as u8)
+                .collect();
+            let coarse = rc.coarse(Some(&unchanged));
+            let refine = rc.coarse(Some(sh));
+            let q = rc.qp(
+                Kind::Refine,
+                job.po_qp as f64,
+                moved_mbs,
+                &refine,
+                budget,
+                &coarse,
+            );
+            (q < rc.coarsest(sh)).then_some((q, unchanged, refine, coarse))
+        };
+        let worth_retry = |rc: &QpCtl| sharpen_at(rc, sharpen_allowance).is_some();
+        let with_sharpen = if job.force_idr {
+            None
+        } else {
+            sharpen_at(&s.rc, sharpen_budget)
+        };
+        let mut left_out = sharpen.is_some() && with_sharpen.is_none() && worth_retry(&s.rc);
+        let none: Coarse = [0; 52];
+        // The frame: its kind and wanted QP, blocks of new content, blocks it sharpens and
+        // unchanged blocks (each by coded QP), the map x264 gets, and its QP.
+        let (kind, want, new_mbs, refine, coarse, mut info, mut qp) = if job.force_idr {
+            let want = job.qp as f64 - 3.0;
+            let q = s.rc.qp(Kind::Key, want, mbs_total, &none, budget, &none);
+            (Kind::Key, want, mbs_total, none, none, moved.clone(), q)
+        } else if let Some((q, unchanged, refine, coarse)) = with_sharpen {
+            let want = job.po_qp as f64;
+            (
+                Kind::Refine,
+                want,
+                moved_mbs,
+                refine,
+                coarse,
+                Some(unchanged),
+                q,
+            )
+        } else {
+            let coarse = s.rc.coarse(moved.as_deref());
+            let q =
+                s.rc.qp(Kind::Motion, motion_want, moved_mbs, &none, budget, &coarse);
+            let want = motion_want;
+            (
+                Kind::Motion,
+                want,
+                moved_mbs,
+                none,
+                coarse,
+                moved.clone(),
+                q,
+            )
+        };
+        // Blocks the frame encodes (for the thread governor's cost model and logs).
+        let mbs = new_mbs + refine.iter().sum::<u32>() as usize;
+        let budget = if kind == Kind::Refine {
+            sharpen_budget
+        } else {
+            budget
+        };
+        if kind == Kind::Motion && moved_mbs == 0 {
+            // Nothing in the stripe moved and its sharpening has to wait: no frame.
+            if done.send((i, None, qp, None, left_out)).is_err() {
                 return;
             }
             continue;
@@ -1329,6 +1598,10 @@ fn stripe_worker(
         let mut filler = None;
         // A paint-over replaced by its stand-in: its encode isn't what viewers get.
         let mut dropped = false;
+        // The map x264 gets (it reads it during the encode): kept to record what was coded.
+        let mut coded_map = info.clone();
+        // A re-encode refers two frames back, so x264 re-codes like a sharper frame.
+        let mut rescan = false;
         let te = Instant::now();
         let mut r = s.enc.encode(
             &planes,
@@ -1340,7 +1613,7 @@ fn stripe_worker(
         );
         if let Ok(key) = r {
             // A reopened encoder (adaptive threads) starts with an IDR of its own.
-            let kind = if key { Kind::Key } else { job.kind };
+            let kind = if key { Kind::Key } else { kind };
             let bytes = out.len() - HDR;
             if debug {
                 log::info!("stripe y{} qp {qp} (wants {want:.1}) {mbs} mbs {bytes} bytes (budget {budget:.0})", s.y);
@@ -1356,7 +1629,7 @@ fn stripe_worker(
             // few times its budget costs no time on the wire: only re-encode when far
             // over, and spare the encode time.
             let limit = if job.link_kbps >= cap.saturating_mul(2) {
-                nominal * 3.0
+                (nominal * 3.0).max(budget * 1.5)
             } else {
                 budget * 1.5
             };
@@ -1381,15 +1654,26 @@ fn stripe_worker(
             // screen sharpened afterwards.
             let key_budget = (bytes as f64 * 0.5).min(nominal * 4.0);
             let key_qp = (over && kind == Kind::Motion && fill.is_none())
-                .then(|| s.rc.qp(Kind::Key, want - 3.0, mbs_total, key_budget))
-                .filter(|&q| s.rc.predict(Kind::Key, q, mbs_total) <= key_budget);
-            if let (Some(f), Kind::Refine) = (&fill, kind) {
+                .then(|| {
+                    s.rc.qp(Kind::Key, want - 3.0, mbs_total, &none, key_budget, &none)
+                })
+                .filter(|&q| s.rc.predict(Kind::Key, q, mbs_total, &none, &none) <= key_budget);
+            if let (Some(f), Kind::Refine, 0) = (&fill, kind, moved_mbs) {
                 // A paint-over that overshot is dropped, not re-encoded: the picture on
                 // screen is right already, only less sharp, and a coarser re-encode
                 // would refine little at the price of a second full encode. The
-                // stand-in takes its place, and its real cost is learned, so the next
-                // paint-over asks for a QP that fits (or is skipped, above).
-                s.rc.learn(kind, qp, want, mbs, bytes, s.cfg.threads);
+                // stand-in takes its place, its real cost is learned, and its blocks go
+                // back to be sharpened once a QP that helps fits.
+                s.rc.learn(
+                    kind,
+                    qp,
+                    want,
+                    new_mbs,
+                    &refine,
+                    &coarse,
+                    bytes,
+                    s.cfg.threads,
+                );
                 if debug {
                     log::info!(
                         "stripe y{} paint-over overshot {bytes} bytes at qp {qp}: dropped",
@@ -1399,6 +1683,48 @@ fn stripe_worker(
                 out.truncate(HDR);
                 out.extend_from_slice(f);
                 dropped = true;
+                // x264 dropped its reference: the next frame refers two frames back.
+                s.rc.hints_lost = true;
+                left_out = worth_retry(&s.rc);
+            } else if let (Some(f), Kind::Refine) = (&fill, kind) {
+                // A frame that moved and carried sharpening that overshot: what moved
+                // goes out again on its own (it's never dropped), the sharpening goes
+                // back to wait for a QP that fits, and its real cost is learned.
+                s.rc.learn(
+                    kind,
+                    qp,
+                    want,
+                    new_mbs,
+                    &refine,
+                    &coarse,
+                    bytes,
+                    s.cfg.threads,
+                );
+                // The re-encode refers two frames back: no outright skips.
+                s.rc.hints_lost = true;
+                let coarse = s.rc.coarse(moved.as_deref());
+                let q =
+                    s.rc.qp(Kind::Motion, motion_want, moved_mbs, &none, budget, &coarse);
+                info = moved.clone();
+                coded_map = moved.clone();
+                out.truncate(HDR);
+                r = s
+                    .enc
+                    .encode(&planes, job.ts, false, q, info.as_deref_mut(), &mut out);
+                if debug {
+                    log::info!(
+                        "stripe y{} overshot {bytes} bytes at qp {qp} with sharpening: what moved again at qp {q}, {} bytes",
+                        s.y,
+                        out.len() - HDR
+                    );
+                }
+                qp = q;
+                rescan = true;
+                s.rc.note(Kind::Motion, qp, out.len() - HDR);
+                left_out = worth_retry(&s.rc);
+                let mut v = vec![0u8; HDR];
+                v.extend_from_slice(f);
+                filler = Some(v);
             } else if let Some(f) = fill {
                 // A step down in QP that cost too much goes back to where it came
                 // from (the cost was the repair, which a coarser QP doesn't have);
@@ -1427,11 +1753,14 @@ fn stripe_worker(
                     );
                 }
                 // A one-off: it says nothing about the frames after it, unless it was
-                // a step down in QP that cost more than expected.
-                if kind == Kind::Motion {
-                    s.rc.learn_repair(qp, bytes);
+                // a step down in QP that cost more than expected; that step isn't tried
+                // again for a while.
+                if kind == Kind::Motion && s.rc.learn_repair(qp, bytes) {
+                    s.rc.floor = qp + 1;
+                    s.rc.floor_at = Instant::now();
                 }
                 qp = q;
+                rescan = true;
                 s.rc.note(kind, qp, out.len() - HDR);
                 let mut v = vec![0u8; HDR];
                 v.extend_from_slice(&f);
@@ -1439,6 +1768,7 @@ fn stripe_worker(
             } else if let Some(q) = key_qp {
                 out.truncate(HDR);
                 qp = q;
+                coded_map = None;
                 r = s.enc.encode(&planes, job.ts, true, qp, None, &mut out);
                 if r.is_ok() {
                     // Learn from the keyframe only: the frame it replaced says nothing
@@ -1448,6 +1778,8 @@ fn stripe_worker(
                         qp,
                         want - 3.0,
                         mbs_total,
+                        &none,
+                        &none,
                         out.len() - HDR,
                         s.cfg.threads,
                     );
@@ -1460,11 +1792,27 @@ fn stripe_worker(
                     );
                 }
             } else {
-                s.rc.learn(kind, qp, want, mbs, bytes, s.cfg.threads);
+                s.rc.learn(
+                    kind,
+                    qp,
+                    want,
+                    new_mbs,
+                    &refine,
+                    &coarse,
+                    bytes,
+                    s.cfg.threads,
+                );
             }
             s.rc.spend(out.len() - HDR, fresh);
-            if r.is_ok() && !dropped {
+            if let (Ok(key), false) = (&r, dropped) {
+                let key = *key;
                 s.enc.count_psnr();
+                s.rc.kept(qp, key, coded_map.as_deref(), rescan);
+                // Sharpening that went in short of what it asks for goes back for another
+                // round, as long as a full allowance could make it sharper still.
+                if kind == Kind::Refine && !rescan && (qp as f32) > job.po_qp + 0.5 {
+                    left_out = worth_retry(&s.rc);
+                }
             }
         }
         if debug {
@@ -1511,7 +1859,7 @@ fn stripe_worker(
                 None
             }
         };
-        if done.send((i, res, qp, filler)).is_err() {
+        if done.send((i, res, qp, filler, left_out)).is_err() {
             return;
         }
     }
@@ -1565,14 +1913,6 @@ fn encode_loop(
             continue;
         }
         let target = hub.target_kbps.load(Ordering::Relaxed);
-        let kind = if job.force_idr {
-            Kind::Key
-        } else if job.paintover {
-            Kind::Refine
-        } else {
-            Kind::Motion
-        };
-        let want_qp = if job.paintover { po_qp } else { qp };
         // Each stripe may use up to twice its area share of the budget; the delay-based
         // controller reins the total in if several stripes move at once.
         let share = ((target as u64 * 2) / n as u64).max(target as u64 / n as u64 + 1) as u32;
@@ -1592,13 +1932,15 @@ fn encode_loop(
                     buf: buf_ptr,
                     ts,
                     force_idr: job.force_idr,
-                    kind,
-                    qp: want_qp,
+                    qp,
+                    po_qp,
                     cap,
+                    doubled: job.paintover,
                     clear: hub.link_clear.load(Ordering::Relaxed),
                     link_kbps: hub.link_kbps.load(Ordering::Relaxed) / n as u32,
                     bias,
                     mb_dirty: job.mb_dirty.clone(),
+                    refine: job.refine.clone(),
                     mb_cols: job.buf.width.div_ceil(16),
                 });
                 pending += 1;
@@ -1606,8 +1948,12 @@ fn encode_loop(
         }
         let mut results: Vec<Option<(bool, Vec<u8>)>> = (0..n).map(|_| None).collect();
         let mut fillers = Vec::new();
+        let mut undone = Vec::new();
         for _ in 0..pending {
-            if let Ok((i, r, qp, f)) = done_rx.recv() {
+            if let Ok((i, r, qp, f, left_out)) = done_rx.recv() {
+                if left_out {
+                    undone.push(i);
+                }
                 if r.is_some() {
                     hub.stats.qp_total.fetch_add(qp as u64, Ordering::Relaxed);
                     hub.stats.qp_frames.fetch_add(1, Ordering::Relaxed);
@@ -1618,7 +1964,24 @@ fn encode_loop(
                 }
             }
         }
+        let cols = job.buf.width.div_ceil(16);
         let _ = ret.send((job.idx, job.buf));
+        if let (Some(refine), false) = (&job.refine, undone.is_empty()) {
+            // Sharpening a stripe left out goes back to the capture loop, its rows only.
+            let mut repaint = hub.repaint.lock();
+            if repaint.len() != refine.len() {
+                *repaint = vec![0; refine.len()];
+            }
+            for &i in &undone {
+                let (y, h, _) = stripes[i];
+                let rows = (y / 16 * cols)..((y + h).div_ceil(16) * cols).min(refine.len());
+                for (r, &m) in repaint[rows.clone()].iter_mut().zip(&refine[rows]) {
+                    *r |= m;
+                }
+            }
+            drop(repaint);
+            hub.wake();
+        }
         for (y, h, touched) in stripes.iter_mut() {
             if job.paintover_final {
                 *touched = false;
@@ -1828,5 +2191,90 @@ mod tests {
         m.sent(500_000);
         m.window -= Duration::from_millis(500);
         assert_eq!(m.bias(), 1.0);
+    }
+
+    /// A rate controller for `blocks` macroblocks, all coded at `qp` by a keyframe.
+    fn coded_at(blocks: usize, qp: i32) -> QpCtl {
+        let mut rc = QpCtl::new();
+        rc.coded = vec![51; blocks];
+        rc.kept(qp, true, None, false);
+        rc.note(Kind::Key, qp, 0);
+        rc
+    }
+
+    #[test]
+    fn sharper_frames_recode_what_is_coarser() {
+        let mut rc = coded_at(10, 40);
+        // Block 0 moved, the other nine didn't.
+        let mut unchanged = vec![1u8; 10];
+        unchanged[0] = 0;
+        let coarse = rc.coarse(Some(&unchanged));
+        assert_eq!(coarse[40], 9);
+        // At the reference's QP or coarser x264 skips them outright; sharper, it re-codes
+        // every one coded coarser, adding only the detail between the two QPs.
+        let none = [0; 52];
+        assert_eq!(rc.detail(40, &none, &coarse), 0.0);
+        assert_eq!(rc.detail(45, &none, &coarse), 0.0);
+        let step = 9.0 * (size_at(39.0) - size_at(40.0));
+        assert!((rc.detail(39, &none, &coarse) - step).abs() < 1e-9);
+        // Blocks to sharpen count whatever the reference: 9 blocks from 40 to 39.
+        assert!(
+            (rc.detail(45, &coarse, &none)).abs() < 1e-9,
+            "45 isn't sharper than 40"
+        );
+        assert!((rc.detail(39, &coarse, &none) - step).abs() < 1e-9);
+        // Right after a dropped frame there are no outright skips at any QP.
+        rc.hints_lost = true;
+        assert!((rc.detail(39, &none, &coarse) - step).abs() < 1e-9);
+        assert_eq!(
+            rc.detail(41, &none, &coarse),
+            0.0,
+            "none is coarser than 41"
+        );
+        rc.hints_lost = false;
+        // A coarser frame codes what moved; a sharper one also re-codes the rest.
+        rc.kept(45, false, Some(&unchanged), false);
+        assert_eq!(rc.coded[0], 45);
+        assert_eq!(rc.coded[1], 40);
+        rc.kept(35, false, Some(&unchanged), false);
+        assert!(rc.coded.iter().all(|&c| c == 35));
+        assert_eq!(rc.coarsest(&[1, 1, 0, 0, 0, 0, 0, 0, 0, 0]), 35);
+    }
+
+    #[test]
+    fn no_step_down_that_recodes_a_crushed_window() {
+        // A scene change crushed 1000 blocks to QP 51; a 10-block animation keeps moving.
+        let mut rc = coded_at(1010, 51);
+        rc.size = 100_000.0;
+        rc.fill = rc.size;
+        rc.motion_bytes = 100.0;
+        let mut unchanged = vec![1u8; 1010];
+        unchanged[..10].fill(0);
+        let crushed = rc.coarse(Some(&unchanged));
+        // Stepping down would re-code the whole window (about 870 bytes of detail here):
+        // it doesn't fit, so QP stays.
+        assert_eq!(rc.qp(Kind::Motion, 20.0, 10, &[0; 52], 500.0, &crushed), 51);
+        // With nothing coarse to re-code, the same frame steps down.
+        assert_eq!(rc.qp(Kind::Motion, 20.0, 10, &[0; 52], 500.0, &[0; 52]), 50);
+    }
+
+    #[test]
+    fn a_step_down_that_overshot_waits() {
+        let mut rc = coded_at(10, 45);
+        rc.size = 100_000.0;
+        rc.fill = rc.size;
+        rc.motion_bytes = 100.0;
+        rc.floor = 45;
+        rc.floor_at = Instant::now();
+        assert_eq!(
+            rc.qp(Kind::Motion, 20.0, 10, &[0; 52], 50_000.0, &[0; 52]),
+            45
+        );
+        // After FLOOR_HOLD it's tried again.
+        rc.floor_at = Instant::now() - FLOOR_HOLD;
+        assert_eq!(
+            rc.qp(Kind::Motion, 20.0, 10, &[0; 52], 50_000.0, &[0; 52]),
+            44
+        );
     }
 }
