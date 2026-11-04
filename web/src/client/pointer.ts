@@ -1,12 +1,18 @@
 // Mouse, wheel/trackpad and touch input on the desktop surface.
 import { cmd } from '../protocol';
 import type { App } from './app';
+import type { createCursor } from './cursor';
 import { createTouch } from './touch';
+import { createTrackpad } from './trackpad';
 
 /** DOM button -> X button (left, middle, right, back, forward). */
 const BUTTONS = [1, 2, 3, 8, 9];
 
-export function setupPointer(app: App, onInteract: () => void) {
+export function setupPointer(
+	app: App,
+	cursor: ReturnType<typeof createCursor>,
+	onInteract: () => void
+) {
 	const { surface, send } = app;
 
 	function toDesk(p: { clientX: number; clientY: number }): [number, number] {
@@ -54,16 +60,22 @@ export function setupPointer(app: App, onInteract: () => void) {
 		queueScroll,
 		deskPerPx,
 	});
+	const trackpad = createTrackpad(app, { queueScroll, deskPerPx, cursor });
+	// Each gesture stays with the mode it started in, even if trackpad mode is toggled.
+	const touching = new Set<number>();
+	let tp: typeof touch = touch;
 
 	surface.addEventListener('pointermove', (e) => {
-		if (e.pointerType === 'touch') touch.move(e);
+		if (e.pointerType === 'touch') tp.move(e);
 		else move(e);
 	});
 	surface.addEventListener('pointerdown', (e) => {
 		e.preventDefault();
 		onInteract();
 		if (e.pointerType === 'touch') {
-			touch.down(e);
+			if (!touching.size) tp = trackpad.on ? trackpad : touch;
+			touching.add(e.pointerId);
+			tp.down(e);
 			return;
 		}
 		app.kbd.focus({ preventScroll: true });
@@ -76,15 +88,18 @@ export function setupPointer(app: App, onInteract: () => void) {
 	surface.addEventListener('pointerup', (e) => {
 		e.preventDefault();
 		if (e.pointerType === 'touch') {
-			touch.up(e);
+			touching.delete(e.pointerId);
+			tp.up(e);
 			return;
 		}
 		move(e);
 		send(cmd.button(BUTTONS[e.button] || 1, false));
 	});
 	surface.addEventListener('pointercancel', (e) => {
-		if (e.pointerType === 'touch') touch.cancel(e);
-		else send(cmd.releaseAll);
+		if (e.pointerType === 'touch') {
+			touching.delete(e.pointerId);
+			tp.cancel(e);
+		} else send(cmd.releaseAll);
 	});
 	surface.addEventListener('contextmenu', (e) => e.preventDefault());
 	surface.addEventListener(

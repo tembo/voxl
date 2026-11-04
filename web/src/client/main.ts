@@ -92,7 +92,7 @@ function main() {
 		audio.start();
 		clipboard.flush();
 	};
-	setupPointer(app, onInteract);
+	setupPointer(app, cursor, onInteract);
 	setupKeyboard(app, clipboard, onInteract);
 	setupToolbar(app, video.layout);
 	const files = createFiles(app);
