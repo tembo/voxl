@@ -1,7 +1,7 @@
 [package]
 # `voxl` on crates.io belongs to an unrelated crate; the binary is still `voxl`.
 name = "voxl-server"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 license = "MIT"
 description = "Low-latency desktop streaming for the browser: an X11 display, a Mac's screen or a Windows desktop as H.264 over a WebSocket"
@@ -112,7 +112,7 @@ windows = { version = "0.61", features = [
 windows-core = "0.61"
 
 [build-dependencies]
-bindgen = "0.71"
+bindgen = "0.72"
 pkg-config = "0.3"
 vcpkg = "0.2"
 

@@ -113,9 +113,10 @@ impl Encoder {
             param.analyse.b_mb_info = (std::env::var("VOXL_NO_MBINFO").is_err()) as i32;
             param.i_sync_lookahead = 0;
             param.rc.b_mb_tree = 0;
-            // BT.601 limited range, matching libyuv ARGBToI420.
+            // sRGB content (BT.709 primaries, sRGB transfer) in BT.601 limited range,
+            // matching libyuv ARGBToI420 and the macOS NV12 capture.
             param.vui.i_colorprim = 1;
-            param.vui.i_transfer = 1;
+            param.vui.i_transfer = 13; // IEC 61966-2-1: every capture path delivers sRGB
             param.vui.i_colmatrix = 6;
             param.vui.b_fullrange = 0;
             let profile = c"high";

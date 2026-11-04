@@ -181,6 +181,9 @@ impl Capturer {
                 });
                 cfg.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
                 cfg.setColorMatrix(&*(kCGDisplayStreamYCbCrMatrix_ITU_R_601_4 as *const CFString));
+                // Convert to sRGB on the GPU: without this, wide-gamut displays (P3) are
+                // captured in their native space and shown desaturated as BT.709/sRGB.
+                cfg.setColorSpaceName(&*(kCGColorSpaceSRGB as *const CFString));
                 // Clients draw the cursor themselves (see desktop.rs), so pointer motion
                 // costs no encode and has no stream latency.
                 // If the system cursor can't be read, it has to be in the video.
