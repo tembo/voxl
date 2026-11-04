@@ -3,7 +3,8 @@
 # On a 10 Mbps / 40 ms link (shaper.py), a detailed 2000x1600 window appears (a scene
 # change the bitrate crushes) on a plain screen, and a small 520x200 animation starts 0.5 s later and keeps
 # running. Once the window has been still for a few seconds, stalecheck.py compares the
-# viewer's decoded picture of the window with the real screen. Needs loadgen (see README)
+# viewer's decoded picture of the window with the real screen, and reports the animation's
+# frame rate and latency, second by second, while the window sharpens. Needs loadgen (see README)
 # feh, xsetroot and an Xvfb on BENCH_DISPLAY (default :2); voxl is started on port 6902.
 cd "$(dirname "$(readlink -f "$0")")"
 BIN=${1:?voxl binary}
@@ -22,7 +23,7 @@ for run in $(seq 1 "$RUNS"); do
   ./py.sh shaper.py 7902 localhost:6902 10 40 >/dev/null 2>&1 &
   shaper=$!
   sleep 1
-  ./py.sh stalecheck.py localhost:7902 localhost:6902 18 0,0,2000,1600 /tmp/stale-seen.png >/tmp/stale.json &
+  MARKER=2020,700 ./py.sh stalecheck.py localhost:7902 localhost:6902 18 0,0,2000,1600 /tmp/stale-seen.png >/tmp/stale.json &
   check=$!
   # Wait for the viewer to be streaming, so the window is a scene change, not part of
   # the keyframe a new viewer starts with.

@@ -937,13 +937,25 @@ struct QpCtl {
     /// blocks predict, so the step isn't retried every frame, only now and then.
     floor: i32,
     floor_at: Instant,
+    /// Bits sharpening may spend (`sharpen_budget`), apart from the buffer motion frames
+    /// draw on: sharpening still pixels never starves what moves.
+    sharpen_fill: f64,
+    sharpen_last: Instant,
 }
 
 /// How long a step down that overshot isn't tried again (`QpCtl::floor`).
 const FLOOR_HOLD: Duration = Duration::from_secs(2);
 
-/// Seconds of the measured link a frame that sharpens may take (see `stripe_worker`).
-const SHARPEN_LINK: f64 = 0.15;
+/// Share of the link sharpening refills at (`QpCtl::sharpen_budget`): the rest stays
+/// with what moves. After a detailed window is crushed on a 10 Mbps link, 10% of the
+/// link sharpens it within seconds while a small animation keeps its frame rate and
+/// latency close to main's (bench/stale.sh); 20% and up made the animation choppy.
+const SHARPEN_SHARE: f64 = 0.1;
+
+/// Most a frame may add for sharpening, in frame intervals of the link: the frames behind
+/// it wait at most this long. Fewer means smaller steps, which detailed content (a photo)
+/// can't take one QP at a time: at 2, such a window stayed at QP 37 on 10 Mbps.
+const SHARPEN_FRAMES: f64 = 4.0;
 
 /// Unchanged blocks counted by the QP they were coded at (`QpCtl::coarse`).
 type Coarse = [u32; 52];
@@ -986,7 +998,26 @@ impl QpCtl {
             hints_lost: false,
             floor: 0,
             floor_at: Instant::now(),
+            sharpen_fill: 0.0,
+            sharpen_last: Instant::now(),
         }
+    }
+
+    /// Bytes sharpening may add to a frame now, and at most: its own budget, refilled at
+    /// SHARPEN_SHARE of the link (of half the cap until the link is measured) and holding
+    /// at most SHARPEN_FRAMES frame intervals of it, so a frame that sharpens delays the
+    /// ones behind it by that much at worst.
+    fn sharpen_budget(&mut self, cap_kbps: u32, link_kbps: u32, fps: u32) -> (f64, f64) {
+        let rate = if link_kbps > 0 {
+            link_kbps as f64 * 1000.0
+        } else {
+            cap_kbps as f64 * 500.0
+        };
+        let most = rate * SHARPEN_FRAMES / fps.max(1) as f64;
+        let refill = rate * SHARPEN_SHARE * self.sharpen_last.elapsed().as_secs_f64();
+        self.sharpen_fill = (self.sharpen_fill + refill).min(most);
+        self.sharpen_last = Instant::now();
+        (self.sharpen_fill / 8.0, most / 8.0)
     }
 
     /// The unchanged blocks of a frame (`unchanged[i] != 0`), counted by the QP they were
@@ -1233,6 +1264,14 @@ impl QpCtl {
             self.motion_qp = qp;
             self.motion_bytes = bytes as f64;
         }
+    }
+
+    /// Charge a frame that sharpened: its own budget first, the rest to the buffer.
+    fn spend_sharpened(&mut self, bytes: usize) {
+        let bits = bytes as f64 * 8.0;
+        let own = bits.min(self.sharpen_fill.max(0.0));
+        self.sharpen_fill -= own;
+        self.fill -= bits - own;
     }
 
     /// Charge a sent frame to the buffer.
@@ -1500,24 +1539,14 @@ fn stripe_worker(
         s.rc.bias = job.bias;
         // Sharpening re-codes everything still coarse in one frame (x264 refers to the
         // frame's QP for every block), so after a scene change crushed to the budget it
-        // never fits a frame's share. Like a keyframe, it may take more while the link
-        // is clear and the buffer full: up to SHARPEN_LINK of the measured link (4
-        // frames' share until it's measured). The debt it leaves holds the frames after
-        // it to the link's rate until it's repaid.
-        let sharpen_allowance = if job.link_kbps > 0 {
-            job.link_kbps as f64 * 1000.0 / 8.0 * SHARPEN_LINK
-        } else {
-            nominal * 4.0
-        }
-        .max(budget);
-        // Full: as full as the buffer motion frames see (a job that sharpens gets twice
-        // the cap, and so twice the buffer, which the fill never reaches).
-        let full = s.rc.size * if job.doubled { 0.5 } else { 1.0 } * 0.9;
-        let sharpen_budget = if job.clear && s.rc.fill >= full {
-            sharpen_allowance
-        } else {
-            budget
-        };
+        // never fits a frame's share. It gets its own budget on top (`sharpen_budget`),
+        // so it goes in steps the link carries beside what moves.
+        let base_cap = if job.doubled { cap / 2 } else { cap };
+        let (sharpen_now, sharpen_most) = s.rc.sharpen_budget(base_cap, job.link_kbps, s.cfg.fps);
+        let sharpen_budget = budget + sharpen_now;
+        // What a frame that sharpens could take at best: a whole frame's share and a full
+        // sharpening budget.
+        let sharpen_allowance = nominal + sharpen_most;
         // Sharpening only goes in where the frame's QP (counting the blocks a sharper
         // frame re-codes) is finer than what those blocks have; otherwise it's left out
         // and handed back, if a full buffer could ever afford it.
@@ -1803,7 +1832,11 @@ fn stripe_worker(
                     s.cfg.threads,
                 );
             }
-            s.rc.spend(out.len() - HDR, fresh);
+            if kind == Kind::Refine && !dropped && !rescan {
+                s.rc.spend_sharpened(out.len() - HDR);
+            } else {
+                s.rc.spend(out.len() - HDR, fresh);
+            }
             if let (Ok(key), false) = (&r, dropped) {
                 let key = *key;
                 s.enc.count_psnr();
