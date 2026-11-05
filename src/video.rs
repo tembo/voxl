@@ -871,48 +871,94 @@ impl ThreadGovernor {
 /// estimate can't follow a dragged window or a fast scroll: the moved area counts as new
 /// pixels and the QP lands 7-10 steps above `--crf`, although the real search codes the
 /// move as cheap motion vectors (a few KB a frame). Big moves went blocky, with nothing
-/// saved that the bitrate cap needed. Motion frames get a CRF lowered by what the estimate
-/// adds, so they stay at the configured quality. The lower QPs x264 picks for small
-/// updates (typing) and paint-overs are kept, and VBV still raises the QP when the link
-/// is short.
+/// saved that the bitrate cap needed. Motion frames that come out that cheap get a CRF
+/// lowered by what the estimate adds, so they stay at the configured quality. Video and
+/// new content really are complex, and x264's higher QP there saves real bits, so those
+/// are left alone, as are the lower QPs x264 picks for small updates (typing) and
+/// paint-overs. VBV still raises the QP when the link is short.
 #[derive(Default)]
 struct MotionQuality {
-    /// QP steps x264's complexity estimate adds to a motion frame (negative for simple
-    /// ones). The estimate is blurred over the last few frames, so the last frame's is a
-    /// good guess at the next one's.
+    /// QP steps x264's complexity estimate adds to the next frame (negative for simple
+    /// ones). x264 blurs it over the frames it encodes, paint-overs included, so each
+    /// frame's is a good guess at the next one's.
     complexity: f32,
+    /// log2 of the bits per changed macroblock of recent motion frames, scaled to the
+    /// configured CRF. Averaged in the log domain: one frame of new content (a menu
+    /// opening mid-drag) shouldn't outweigh the run of cheap frames around it.
+    mb_bits_log2: f32,
+    /// QP steps taken off the CRF of motion frames now.
+    applied: f32,
 }
 
 /// Most QP steps taken off a motion frame's CRF.
 const MAX_MOTION_EXCESS: f32 = 12.0;
 
+/// Bits per changed macroblock (at the configured CRF) under which motion counts as
+/// cheap: a dragged window or a scrolled page costs 10-30, video and new content 50 and
+/// more.
+const CHEAP_MB_BITS: f32 = 40.0;
+
 impl MotionQuality {
     /// The CRF to encode a motion frame with, for the configured `crf`.
-    fn crf(&self, crf: f32) -> f32 {
-        // Whole steps: x264 is reconfigured whenever the CRF changes.
-        let excess = self.complexity.clamp(0.0, MAX_MOTION_EXCESS).round();
-        (crf - excess).max(0.0)
+    fn crf(&mut self, crf: f32) -> f32 {
+        let want = if self.mb_bits_log2 < CHEAP_MB_BITS.log2() {
+            self.complexity.clamp(0.0, MAX_MOTION_EXCESS)
+        } else {
+            0.0
+        };
+        // Whole steps, and only once the estimate has moved a full step: every change
+        // reconfigures x264.
+        if (want - self.applied).abs() >= 1.0 {
+            self.applied = want.round();
+        }
+        (crf - self.applied).max(0.0)
     }
 
-    /// Notes what x264 made of a motion frame it was given `crf` for.
-    ///
+    /// Notes what x264 made of a frame it was given `crf` for. `size` is set for a
+    /// motion frame (not a paint-over).
+    fn note(&mut self, e: &Encoded, crf: f32, size: Option<MotionSize>) {
+        // A keyframe's QP isn't picked from the complexity estimate.
+        let (false, Some(qp)) = (e.keyframe, e.qp) else {
+            return;
+        };
+        self.observe(crf, qp, e);
+        // Small updates cost more per macroblock (headers, a cursor's edges) and never
+        // get x264's QP up; only big ones tell what kind of motion this is.
+        if let Some(m) = size.filter(|m| m.changed * 16 >= m.mbs) {
+            // Halving the quantizer step (6 QP) about doubles the bits.
+            let b = (m.bits.max(1) as f32 / m.changed.max(1) as f32).log2() + (qp - m.crf) / 6.0;
+            self.mb_bits_log2 = self.mb_bits_log2 * 0.7 + b * 0.3;
+        }
+    }
+
     /// x264 starts from QP0 = `crf` + complexity. VBV may raise that before the frame
-    /// (to `e.qp`) and row by row within it (to an average x264 doesn't report), never
-    /// below QP0 or below the frame's starting QP, and `e.crf_avg` is `crf` + average -
-    /// QP0. So the complexity lies between `e.qp - e.crf_avg` (no row raised) and
-    /// `e.qp - crf` (nothing raised before the frame), give or take the rounding of
-    /// `e.qp`: one value when VBV stayed out, a range when it didn't. Then the last
-    /// estimate is kept while it fits, else moved to the nearest end, so a frame VBV
-    /// squeezed doesn't throw away what earlier frames showed.
-    fn observe(&mut self, crf: f32, e: &Encoded) {
-        let lo = e.qp - 0.5 - e.crf_avg;
-        let hi = e.qp + 0.5 - crf;
+    /// (to `qp`) and row by row within it (to an average x264 doesn't report), never
+    /// below QP0 or, with a VBV buffer over 1.1 frames, below the frame's starting QP,
+    /// and `e.crf_avg` is `crf` + average - QP0. So the complexity lies between
+    /// `qp - e.crf_avg` (no row raised) and `qp - crf` (nothing raised before the
+    /// frame), give or take the rounding of `qp`: one value when VBV stayed out, a range
+    /// when it didn't. Then the last estimate is kept while it fits, else moved to the
+    /// nearest end, so a frame VBV squeezed doesn't throw away what earlier frames showed.
+    fn observe(&mut self, crf: f32, qp: f32, e: &Encoded) {
+        let lo = qp - 0.5 - e.crf_avg;
+        let hi = qp + 0.5 - crf;
         self.complexity = if hi - lo < 1.25 {
             (lo + hi) / 2.0
         } else {
             self.complexity.max(lo).min(hi)
         };
     }
+}
+
+/// How big a motion frame came out, for MotionQuality.
+#[derive(Clone, Copy)]
+struct MotionSize {
+    bits: usize,
+    /// Macroblocks that changed, of the stripe's `mbs`.
+    changed: usize,
+    mbs: usize,
+    /// The configured CRF.
+    crf: f32,
 }
 
 fn stripe_worker(
@@ -975,6 +1021,11 @@ fn stripe_worker(
                 .map(|&x| (x == 0) as u8)
                 .collect::<Vec<u8>>()
         });
+        // Changed macroblocks in this stripe (all of them without a damage map).
+        let stripe_mbs = s.h.div_ceil(16) * job.mb_cols;
+        let changed = info
+            .as_ref()
+            .map_or(stripe_mbs, |m| m.iter().filter(|&&c| c == 0).count());
         let te = Instant::now();
         let r = s.enc.encode(
             &planes,
@@ -995,13 +1046,11 @@ fn stripe_worker(
             );
         }
         if s.max_threads > 1 {
-            // Changed macroblocks in this stripe (all of them without a damage map).
-            let changed = info
-                .as_ref()
-                .map_or((s.h.div_ceil(16) * job.mb_cols) as f64, |m| {
-                    m.iter().filter(|&&c| c == 0).count() as f64
-                });
-            if let Some(t) = gov.want(te.elapsed().as_secs_f64() * 1000.0, changed, s.max_threads) {
+            if let Some(t) = gov.want(
+                te.elapsed().as_secs_f64() * 1000.0,
+                changed as f64,
+                s.max_threads,
+            ) {
                 match Encoder::new(&EncoderConfig {
                     threads: t,
                     ..s.cfg.clone()
@@ -1011,8 +1060,10 @@ fn stripe_worker(
                             "stripe {i}: encoder now {t} thread(s) (encode {:.1} ms)",
                             gov.ewma_ms
                         );
-                        // A fresh encoder opens with an IDR on its next frame.
+                        // A fresh encoder opens with an IDR on its next frame, and
+                        // its rate control starts over.
                         s.enc = e;
+                        motion = MotionQuality::default();
                         s.applied_kbps = 0;
                         gov.threads = t;
                         gov.heavy = 0;
@@ -1024,9 +1075,13 @@ fn stripe_worker(
         }
         let res = match r {
             Ok(e) => {
-                if is_motion {
-                    motion.observe(crf, &e);
-                }
+                let size = is_motion.then(|| MotionSize {
+                    bits: (out.len() - HDR) * 8,
+                    changed,
+                    mbs: stripe_mbs,
+                    crf: job.crf,
+                });
+                motion.note(&e, crf, size);
                 (out.len() > HDR).then_some((e.keyframe, out))
             }
             Err(e) => {
@@ -1279,85 +1334,150 @@ fn marker_age(ms: i64) -> i64 {
 mod tests {
     use super::*;
 
-    /// A desktop (vertical gradient) with a window of text-like detail dragged 48 px a
-    /// frame across it, as luma rows.
-    fn drag_frame(y: &mut [u8], w: usize, h: usize, frame: usize) {
-        let (ww, wh) = (w / 2, h / 2);
-        let x0 = 48 * frame % (w - ww);
-        let y0 = h / 4;
-        for row in 0..h {
-            let line = &mut y[row * w..(row + 1) * w];
-            line.fill((40 + row * 120 / h) as u8);
-            if (y0..y0 + wh).contains(&row) {
-                let r = row - y0;
-                for (x, p) in line[x0..x0 + ww].iter_mut().enumerate() {
-                    // Lines of "glyphs": dark strokes on white, a blank gap between lines.
-                    let glyph = (x / 9 * 2654435761 + r / 18 * 40503) >> 7;
-                    let ink = r % 18 < 12 && (glyph >> (x % 9 + r % 18 % 6)) & 1 == 1;
-                    *p = if ink { 30 } else { 235 };
+    const W: usize = 1280;
+    const H: usize = 768;
+
+    /// What the screen shows in a test sequence.
+    #[derive(Clone, Copy)]
+    enum Scene {
+        /// A window of text-like detail dragged 48 px a frame across a gradient desktop.
+        Drag,
+        /// Noise over the whole screen, new every frame: content that really is complex.
+        Noise,
+    }
+
+    fn draw(y: &mut [u8], scene: Scene, frame: usize) {
+        match scene {
+            Scene::Drag => {
+                let (ww, wh) = (W / 2, H / 2);
+                let x0 = 48 * frame % (W - ww);
+                let y0 = H / 4;
+                for row in 0..H {
+                    let line = &mut y[row * W..(row + 1) * W];
+                    line.fill((40 + row * 120 / H) as u8);
+                    if (y0..y0 + wh).contains(&row) {
+                        let r = row - y0;
+                        for (x, p) in line[x0..x0 + ww].iter_mut().enumerate() {
+                            // Lines of "glyphs": dark strokes on white, a gap between lines.
+                            let glyph =
+                                ((x / 9) as u64 * 2654435761 + (r / 18) as u64 * 40503) >> 7;
+                            let ink = r % 18 < 12 && (glyph >> (x % 9 + r % 18 % 6)) & 1 == 1;
+                            *p = if ink { 30 } else { 235 };
+                        }
+                    }
+                }
+            }
+            Scene::Noise => {
+                let mut state = (frame as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15);
+                for p in y.iter_mut() {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    *p = 64 + (state % 128) as u8;
                 }
             }
         }
     }
 
-    /// One frame of `drag`: the CRF it was given, what x264 made of it and MotionQuality's
-    /// estimate after it.
-    struct DragFrame {
+    /// One frame as a stripe worker saw it: the CRF it handed x264 and what came back.
+    struct Frame {
         crf: f32,
         e: Encoded,
-        estimate: f32,
+        complexity: f32,
     }
 
-    /// Encodes the drag the way a stripe worker does, under a bitrate cap of `max_kbps`
-    /// (0: none), with or without MotionQuality. Returns the frames after the first ten,
-    /// once x264's rate control has settled.
-    fn drag(correct: bool, crf: f32, max_kbps: u32) -> Vec<DragFrame> {
-        let (w, h) = (1280usize, 768usize);
-        let mut enc = Encoder::new(&EncoderConfig {
-            width: w as u32,
-            height: h as u32,
-            fps: 60,
-            preset: "ultrafast".into(),
-            threads: 1,
-            crf,
-            max_kbps,
-        })
-        .unwrap();
-        let (u, v) = (vec![128u8; w * h / 4], vec![128u8; w * h / 4]);
-        let mut y = vec![0u8; w * h];
-        let mut motion = MotionQuality::default();
-        let mut applied = crf;
-        let mut frames = Vec::new();
-        for f in 0..40 {
-            drag_frame(&mut y, w, h, f);
-            let c = if correct { motion.crf(crf) } else { crf };
-            if c != applied {
-                enc.set_rate(c, max_kbps);
-                applied = c;
-            }
-            let planes = Planes {
-                y: &y,
-                u: &u,
-                v: &v,
-                stride_y: w,
-                stride_uv: w / 2,
-            };
-            let mut out = Vec::new();
-            let e = enc
-                .encode(&planes, f as i64 * 16, f == 0, None, None, &mut out)
-                .unwrap();
-            if f > 0 {
-                motion.observe(c, &e);
-            }
-            if f >= 10 {
-                frames.push(DragFrame {
-                    crf: c,
-                    e,
-                    estimate: motion.complexity,
-                });
+    /// Encodes frames the way a stripe worker does, under a bitrate cap of `max_kbps`
+    /// (0: none), with or without MotionQuality.
+    struct Run {
+        enc: Encoder,
+        motion: MotionQuality,
+        correct: bool,
+        crf: f32,
+        max_kbps: u32,
+        applied: f32,
+        y: Vec<u8>,
+        n: usize,
+    }
+
+    impl Run {
+        fn new(correct: bool, crf: f32, max_kbps: u32) -> Run {
+            Run {
+                enc: Encoder::new(&EncoderConfig {
+                    width: W as u32,
+                    height: H as u32,
+                    fps: 60,
+                    preset: "ultrafast".into(),
+                    threads: 1,
+                    crf,
+                    max_kbps,
+                })
+                .unwrap(),
+                motion: MotionQuality::default(),
+                correct,
+                crf,
+                max_kbps,
+                applied: crf,
+                y: vec![0; W * H],
+                n: 0,
             }
         }
-        frames
+
+        /// Encodes the next frame of `scene` as a motion frame, or the current picture
+        /// again as a paint-over at `paintover_crf`.
+        fn frame(&mut self, scene: Scene, paintover_crf: Option<f32>) -> Frame {
+            let motion = paintover_crf.is_none();
+            if motion {
+                draw(&mut self.y, scene, self.n);
+            }
+            let c = match paintover_crf {
+                Some(c) => c,
+                None if self.correct => self.motion.crf(self.crf),
+                None => self.crf,
+            };
+            if c != self.applied {
+                self.enc.set_rate(c, self.max_kbps);
+                self.applied = c;
+            }
+            let (u, v) = (vec![128u8; W * H / 4], vec![128u8; W * H / 4]);
+            let planes = Planes {
+                y: &self.y,
+                u: &u,
+                v: &v,
+                stride_y: W,
+                stride_uv: W / 2,
+            };
+            let mut out = Vec::new();
+            let e = self
+                .enc
+                .encode(
+                    &planes,
+                    self.n as i64 * 16,
+                    self.n == 0,
+                    None,
+                    None,
+                    &mut out,
+                )
+                .unwrap();
+            let mbs = W / 16 * H / 16;
+            let size = motion.then_some(MotionSize {
+                bits: out.len() * 8,
+                changed: mbs,
+                mbs,
+                crf: self.crf,
+            });
+            self.motion.note(&e, c, size);
+            self.n += 1;
+            Frame {
+                crf: c,
+                complexity: self.motion.complexity,
+                e,
+            }
+        }
+
+        /// 40 motion frames of `scene`; returns the last 30, once rate control settled.
+        fn motion(mut self, scene: Scene) -> Vec<Frame> {
+            (0..40).map(|_| self.frame(scene, None)).skip(10).collect()
+        }
     }
 
     fn mean(v: impl Iterator<Item = f32>) -> f32 {
@@ -1365,11 +1485,15 @@ mod tests {
         sum / n as f32
     }
 
+    fn qp(f: &Frame) -> f32 {
+        f.e.qp.unwrap()
+    }
+
     #[test]
     fn dragged_window_stays_at_crf() {
         let crf = 24.0;
-        let plain = mean(drag(false, crf, 0).iter().map(|f| f.e.qp));
-        let corrected = mean(drag(true, crf, 0).iter().map(|f| f.e.qp));
+        let plain = mean(Run::new(false, crf, 0).motion(Scene::Drag).iter().map(qp));
+        let corrected = mean(Run::new(true, crf, 0).motion(Scene::Drag).iter().map(qp));
         // The scene has to show the problem for the check below to mean anything.
         assert!(
             plain > crf + 3.0,
@@ -1388,20 +1512,55 @@ mod tests {
     fn capped_drag_keeps_its_estimate() {
         let crf = 24.0;
         // Without a cap the complexity is exactly what x264 added to the QP.
-        let complexity = mean(drag(false, crf, 0).iter().map(|f| f.e.qp - f.crf));
-        let capped = drag(true, crf, 20_000);
+        let plain = Run::new(false, crf, 0).motion(Scene::Drag);
+        let complexity = mean(plain.iter().map(|f| qp(f) - f.crf));
+        let capped = Run::new(true, crf, 20_000).motion(Scene::Drag);
         let start_qp_says = capped
             .iter()
-            .map(|f| f.e.qp - f.e.crf_avg)
+            .map(|f| qp(f) - f.e.crf_avg)
             .fold(f32::MAX, f32::min);
         assert!(
             start_qp_says < complexity - 4.0,
             "VBV never raised rows enough to matter (lowest {start_qp_says:.1}, complexity {complexity:.1})"
         );
-        let lowest = capped.iter().map(|f| f.estimate).fold(f32::MAX, f32::min);
+        let lowest = capped.iter().map(|f| f.complexity).fold(f32::MAX, f32::min);
         assert!(
             lowest > complexity - 3.0,
             "estimate fell to {lowest:.1} under the cap, complexity {complexity:.1}"
+        );
+    }
+
+    /// Content that really is complex keeps x264's QP: lowering it would only spend bits.
+    #[test]
+    fn complex_content_is_left_alone() {
+        let crf = 24.0;
+        let plain = mean(Run::new(false, crf, 0).motion(Scene::Noise).iter().map(qp));
+        let corrected = Run::new(true, crf, 0).motion(Scene::Noise);
+        assert!(
+            plain > crf + 3.0,
+            "x264 didn't raise the QP for noise ({plain:.1}, CRF {crf})"
+        );
+        let lowered = corrected.iter().filter(|f| f.crf != crf).count();
+        assert_eq!(lowered, 0, "{lowered} noise frames got a lowered CRF");
+    }
+
+    /// Once the screen goes still the paint-overs show x264 forgetting the drag, so the
+    /// next motion frame isn't handed the drag's correction.
+    #[test]
+    fn paintovers_wind_the_correction_down() {
+        let crf = 24.0;
+        let mut run = Run::new(true, crf, 0);
+        for _ in 0..40 {
+            run.frame(Scene::Drag, None);
+        }
+        let during = crf - run.motion.crf(crf);
+        for _ in 0..3 {
+            run.frame(Scene::Drag, Some(16.0));
+        }
+        let after = crf - run.motion.crf(crf);
+        assert!(
+            after <= during / 2.0,
+            "correction {after} after the paint-overs, {during} during the drag"
         );
     }
 }
