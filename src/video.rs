@@ -2,7 +2,7 @@
 
 use crate::capture::{Band, Capturer};
 use crate::convert::I420;
-use crate::encoder::{Encoder, EncoderConfig, Planes};
+use crate::encoder::{Encoded, Encoder, EncoderConfig, Planes};
 use crate::hub::wait_any;
 use crate::hub::{Hub, Inflight, Out};
 use bytes::Bytes;
@@ -774,6 +774,8 @@ struct StripeJob {
     buf: SendPtr<I420>,
     ts: i64,
     force_idr: bool,
+    /// A paint-over or refinement pass (`crf` is the paint-over CRF).
+    paintover: bool,
     crf: f32,
     cap: u32,
     mb_dirty: Option<Arc<Vec<u8>>>,
@@ -865,6 +867,37 @@ impl ThreadGovernor {
     }
 }
 
+/// x264's CRF raises the QP of frames it judges complex, and its quick half-resolution
+/// estimate can't follow a dragged window or a fast scroll: the moved area counts as new
+/// pixels and the QP lands 7-10 steps above `--crf`, although the real search codes the
+/// move as cheap motion vectors (a few KB a frame). Big moves went blocky, with nothing
+/// saved that the bitrate cap needed. Motion frames get a CRF lowered by what the estimate
+/// added to the last one, so they stay at the configured quality. The lower QPs x264 picks
+/// for small updates (typing) and paint-overs are kept, and VBV still raises the QP when
+/// the link is short.
+#[derive(Default)]
+struct MotionQuality {
+    /// QP steps the complexity estimate added to the last motion frame (none below 0).
+    excess: f32,
+}
+
+/// Most QP steps taken off a motion frame's CRF.
+const MAX_MOTION_EXCESS: f32 = 12.0;
+
+impl MotionQuality {
+    /// The CRF to encode a motion frame with, for the configured `crf`.
+    fn crf(&self, crf: f32) -> f32 {
+        // Whole steps: x264 is reconfigured whenever the CRF changes.
+        (crf - self.excess.round()).max(0.0)
+    }
+
+    /// Notes what x264 made of a motion frame. Its complexity estimate is blurred over
+    /// the last few frames, so this one's is a good guess at the next one's.
+    fn observe(&mut self, e: &Encoded) {
+        self.excess = e.complexity_qp.clamp(0.0, MAX_MOTION_EXCESS);
+    }
+}
+
 fn stripe_worker(
     i: usize,
     mut s: Stripe,
@@ -881,8 +914,15 @@ fn stripe_worker(
         fit: CostFit::default(),
         predicted_ms: 0.0,
     };
+    let mut motion = MotionQuality::default();
     while let Ok(job) = rx.recv() {
         let buf = unsafe { &*job.buf.0 };
+        let is_motion = !job.force_idr && !job.paintover;
+        let crf = if is_motion {
+            motion.crf(job.crf)
+        } else {
+            job.crf
+        };
         if job.force_idr {
             // A keyframe is what a new viewer sees first; don't starve it to the
             // steady-state frame budget (up to ~8 frames' worth at 4x the cap).
@@ -893,9 +933,9 @@ fn stripe_worker(
         } else {
             let moved = s.applied_kbps == 0
                 || (job.cap as f64 - s.applied_kbps as f64).abs() > s.applied_kbps as f64 * 0.04;
-            if job.crf != s.applied_crf || moved {
-                s.enc.set_rate(job.crf, job.cap);
-                s.applied_crf = job.crf;
+            if crf != s.applied_crf || moved {
+                s.enc.set_rate(crf, job.cap);
+                s.applied_crf = crf;
                 s.applied_kbps = job.cap;
             }
         }
@@ -966,8 +1006,12 @@ fn stripe_worker(
             }
         }
         let res = match r {
-            Ok(key) if out.len() > HDR => Some((key, out)),
-            Ok(_) => None,
+            Ok(e) => {
+                if is_motion {
+                    motion.observe(&e);
+                }
+                (out.len() > HDR).then_some((e.keyframe, out))
+            }
             Err(e) => {
                 log::error!("{e}");
                 None
@@ -1044,6 +1088,7 @@ fn encode_loop(
                     buf: buf_ptr,
                     ts,
                     force_idr: job.force_idr,
+                    paintover: job.paintover,
                     crf: want_crf,
                     cap,
                     mb_dirty: job.mb_dirty.clone(),
@@ -1211,4 +1256,94 @@ fn marker_age(ms: i64) -> i64 {
         .as_millis() as i64)
         & 0xffffff;
     now - ms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A desktop (vertical gradient) with a window of text-like detail dragged 48 px a
+    /// frame across it, as luma rows.
+    fn drag_frame(y: &mut [u8], w: usize, h: usize, frame: usize) {
+        let (ww, wh) = (w / 2, h / 2);
+        let x0 = 48 * frame % (w - ww);
+        let y0 = h / 4;
+        for row in 0..h {
+            let line = &mut y[row * w..(row + 1) * w];
+            line.fill((40 + row * 120 / h) as u8);
+            if (y0..y0 + wh).contains(&row) {
+                let r = row - y0;
+                for (x, p) in line[x0..x0 + ww].iter_mut().enumerate() {
+                    // Lines of "glyphs": dark strokes on white, a blank gap between lines.
+                    let glyph = (x / 9 * 2654435761 + r / 18 * 40503) >> 7;
+                    let ink = r % 18 < 12 && (glyph >> (x % 9 + r % 18 % 6)) & 1 == 1;
+                    *p = if ink { 30 } else { 235 };
+                }
+            }
+        }
+    }
+
+    /// Mean QP of the drag frames once x264's rate control has settled, encoded the way
+    /// a stripe worker does (without a bitrate cap), with or without MotionQuality.
+    fn drag_qp(correct: bool, crf: f32) -> f32 {
+        let (w, h) = (1280usize, 768usize);
+        let mut enc = Encoder::new(&EncoderConfig {
+            width: w as u32,
+            height: h as u32,
+            fps: 60,
+            preset: "ultrafast".into(),
+            threads: 1,
+            crf,
+            max_kbps: 0,
+        })
+        .unwrap();
+        let (u, v) = (vec![128u8; w * h / 4], vec![128u8; w * h / 4]);
+        let mut y = vec![0u8; w * h];
+        let mut motion = MotionQuality::default();
+        let mut applied = crf;
+        let mut qps = Vec::new();
+        for f in 0..40 {
+            drag_frame(&mut y, w, h, f);
+            let c = if correct { motion.crf(crf) } else { crf };
+            if c != applied {
+                enc.set_rate(c, 0);
+                applied = c;
+            }
+            let planes = Planes {
+                y: &y,
+                u: &u,
+                v: &v,
+                stride_y: w,
+                stride_uv: w / 2,
+            };
+            let mut out = Vec::new();
+            let e = enc
+                .encode(&planes, f as i64 * 16, f == 0, None, None, &mut out)
+                .unwrap();
+            if f > 0 {
+                motion.observe(&e);
+            }
+            if f >= 10 {
+                // Without VBV the frame's QP is the CRF it got plus the complexity part.
+                qps.push(c + e.complexity_qp);
+            }
+        }
+        qps.iter().sum::<f32>() / qps.len() as f32
+    }
+
+    #[test]
+    fn dragged_window_stays_at_crf() {
+        let crf = 24.0;
+        let plain = drag_qp(false, crf);
+        let corrected = drag_qp(true, crf);
+        // The scene has to show the problem for the check below to mean anything.
+        assert!(
+            plain > crf + 3.0,
+            "x264 coded the drag at QP {plain:.1} without the correction (CRF {crf})"
+        );
+        assert!(
+            corrected < crf + 1.0,
+            "drag frames at QP {corrected:.1} for CRF {crf}"
+        );
+    }
 }

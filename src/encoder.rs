@@ -148,7 +148,7 @@ impl Encoder {
     }
 
     /// Encode one picture. `force_idr` requests a keyframe, `qp` (if set) forces the frame QP.
-    /// Appends Annex-B output to `out` and returns whether it is a keyframe.
+    /// Appends Annex-B output to `out`.
     /// `mb_info` (one byte per macroblock, X264_MBINFO_CONSTANT for unchanged ones) lets
     /// x264 skip analysis of static areas; it is consumed before this returns.
     pub fn encode(
@@ -159,7 +159,7 @@ impl Encoder {
         qp: Option<i32>,
         mb_info: Option<&mut [u8]>,
         out: &mut Vec<u8>,
-    ) -> Result<bool, String> {
+    ) -> Result<Encoded, String> {
         unsafe {
             self.pic.img.plane[0] = p.y.as_ptr() as *mut u8;
             self.pic.img.plane[1] = p.u.as_ptr() as *mut u8;
@@ -200,9 +200,24 @@ impl Encoder {
                     pic_out.i_pts
                 );
             }
-            Ok(pic_out.b_keyframe != 0)
+            // f_crf_avg is the CRF plus what VBV added to the QP, so the rest of the gap
+            // between the frame's QP and it is what the complexity estimate added.
+            let frame_qp = pic_out.i_qpplus1 - 1;
+            Ok(Encoded {
+                keyframe: pic_out.b_keyframe != 0,
+                complexity_qp: (frame_qp as f64 - pic_out.prop.f_crf_avg) as f32,
+            })
         }
     }
+}
+
+/// What x264 made of one picture.
+pub struct Encoded {
+    pub keyframe: bool,
+    /// QP steps x264's rate control moved this frame from the CRF it was given for how
+    /// complex it judged the frame (negative for simple ones). What VBV added to keep
+    /// under the bitrate cap is not included.
+    pub complexity_qp: f32,
 }
 
 impl Drop for Encoder {
