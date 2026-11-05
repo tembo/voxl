@@ -504,6 +504,8 @@ export function createSettings(
 	let resolution: ReturnType<typeof select> | null = null;
 	let resolutionText: HTMLElement | null = null;
 	let resolutionNote: HTMLElement | null = null;
+	let scaling: HTMLSelectElement | null = null;
+	let scalingNote: HTMLElement | null = null;
 	/** This page is on the screen it shows, so Auto can't follow its window. */
 	let onShownScreen = false;
 	const errTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -598,6 +600,8 @@ export function createSettings(
 		const sec = section('Display');
 		resolution = null;
 		resolutionText = null;
+		scaling = null;
+		scalingNote = null;
 		if (!l.resize) {
 			const { r, ctl } = row('Resolution', 'Set by the host');
 			resolutionText = h('span', 's-value');
@@ -652,23 +656,23 @@ export function createSettings(
 					send('resize_scale', Math.round((base * 10000) / Number(v)) / 100)
 			);
 			sctl.append(sc.wrap);
+			scaling = sc.input;
+			scalingNote = h('div', 's-note');
+			sr.append(scalingNote);
 			controls.set('resize_scale', {
 				err: serr,
 				set: (v) => {
 					const p = Math.round(((base / Number(v)) * 100) / 5) * 5;
 					sc.set(String(p));
-					// A scale shows only while the desktop follows the window.
-					sc.input.disabled = app.readOnly || msg?.values.auto_resize !== true;
+					showDesk();
 				},
-				disable: (off) =>
-					(sc.input.disabled = off || msg?.values.auto_resize !== true),
+				disable: () => showDesk(),
 			});
 			sec.append(sr);
 		}
 		return sec;
 	}
 
-	/** Shows the desktop's size in the resolution row. */
 	/**
 	 * This window's size in desktop pixels, and the menu size Auto would pick for it
 	 * (the biggest that fits, as the server does), from the latest settings.
@@ -686,8 +690,18 @@ export function createSettings(
 		return { want: `${w}x${ht}`, pick: pick ? `${pick[0]}x${pick[1]}` : '' };
 	}
 
+	/** Shows the desktop's size in the resolution row, and whether Scaling applies. */
 	function showDesk() {
 		const auto = msg?.values.auto_resize === true;
+		// Scaling sizes the desktop to the window, so it applies only while Auto
+		// follows one: not with a fixed resolution, nor on the computer shown.
+		if (scaling) scaling.disabled = app.readOnly || !auto || onShownScreen;
+		if (scalingNote)
+			scalingNote.textContent = onShownScreen
+				? 'Scaling applies when Auto follows a window, which it doesn’t on the computer it shows.'
+				: !auto
+					? 'Applies with Auto resolution.'
+					: '';
 		if (resolutionNote) {
 			// On the host, Auto holds its own resolution: show what the window would get.
 			const fit = onShownScreen && auto ? windowFit() : null;
