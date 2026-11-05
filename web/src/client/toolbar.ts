@@ -1,5 +1,5 @@
 // Toolbar (top right on hover; bottom right and always visible on touch devices):
-// on-screen keyboard, files, microphone and fullscreen buttons.
+// on-screen keyboard, files, microphone, settings and fullscreen buttons.
 import type { App } from './app';
 import { el } from './app';
 
@@ -22,7 +22,7 @@ export function setupToolbar(app: App, onFullscreenChange: () => void) {
 			if (
 				e.pointerType === 'mouse' &&
 				e.clientY < 48 &&
-				e.clientX > window.innerWidth - 160
+				e.clientX > tools.getBoundingClientRect().left - 24
 			)
 				show(2500);
 		});

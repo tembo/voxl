@@ -28,8 +28,10 @@ const UNCLAIMED: Duration = Duration::from_secs(60);
 
 pub struct Recorder {
     pub hub: Arc<Hub>,
-    /// Longest recording; a started one stops on its own after this.
+    /// Longest recording (--max-record-seconds); a started one stops on its own after
+    /// this, or after `limit_secs` when the settings panel set a shorter one.
     pub max: Duration,
+    pub limit_secs: AtomicU64,
     active: Mutex<HashMap<u64, Active>>,
     next: AtomicU64,
 }
@@ -44,9 +46,18 @@ impl Recorder {
         Arc::new(Recorder {
             hub,
             max,
+            limit_secs: AtomicU64::new(0),
             active: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
         })
+    }
+
+    /// The longest recording now allowed.
+    pub fn max_len(&self) -> Duration {
+        match self.limit_secs.load(Ordering::Relaxed) {
+            0 => self.max,
+            s => self.max.min(Duration::from_secs(s)),
+        }
     }
 }
 
@@ -218,7 +229,7 @@ pub async fn record(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let secs: f64 = q.get("seconds").and_then(|s| s.parse().ok()).unwrap_or(5.0);
-    let Some(len) = record_len(secs, r.max) else {
+    let Some(len) = record_len(secs, r.max_len()) else {
         return err(StatusCode::BAD_REQUEST, "seconds must be positive");
     };
     // The deadline ends it; the stop side is never used.
@@ -236,7 +247,8 @@ pub async fn record(
 
 pub async fn start(State(r): State<Arc<Recorder>>) -> Response {
     let (stop_tx, stop) = oneshot::channel();
-    let done = match begin(&r, stop, r.max) {
+    let max = r.max_len();
+    let done = match begin(&r, stop, max) {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -253,14 +265,14 @@ pub async fn start(State(r): State<Arc<Recorder>>) -> Response {
     // instead of holding the clip in memory forever.
     let rec = r.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(rec.max + UNCLAIMED).await;
+        tokio::time::sleep(max + UNCLAIMED).await;
         if rec.active.lock().remove(&id).is_some() {
             log::info!("recording {id} was never stopped; discarded");
         }
     });
     (
         [(header::CONTENT_TYPE, "application/json")],
-        serde_json::json!({ "id": id, "max_seconds": r.max.as_secs() }).to_string(),
+        serde_json::json!({ "id": id, "max_seconds": max.as_secs() }).to_string(),
     )
         .into_response()
 }

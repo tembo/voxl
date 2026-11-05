@@ -27,6 +27,21 @@ pub struct VideoConfig {
     pub coalesce: Duration,
     pub stripes: u32,
     pub adaptive_threads: bool,
+    /// Auto quality: `crf` is only where the quality starts; the rate controller
+    /// sharpens it while the path has room and backs off when latency builds.
+    pub auto_quality: bool,
+}
+
+impl VideoConfig {
+    /// Whether going from `old` to this needs the encoders rebuilt; the other settings
+    /// apply to the next frame.
+    pub fn needs_rebuild(&self, old: &VideoConfig) -> bool {
+        self.fps != old.fps
+            || self.preset != old.preset
+            || self.threads != old.threads
+            || self.adaptive_threads != old.adaptive_threads
+            || self.stripes != old.stripes
+    }
 }
 
 struct Job {
@@ -72,7 +87,10 @@ pub fn spawn(
 ) -> Result<(), String> {
     if let Some(s) = &screen {
         *hub.resize_max.lock() = Some(s.max());
+        *hub.resize_sizes.lock() = s.sizes();
     }
+    *hub.video_cfg.lock() = Some(cfg.clone());
+    let mut cfg = cfg;
     let mut p = build(&cfg, &hub)?;
     std::thread::Builder::new()
         .name("capture".into())
@@ -101,7 +119,13 @@ pub fn spawn(
             if let (Some(s), Some((w, h))) = (screen.as_mut(), req) {
                 if let Err(e) = s.resize(w, h) {
                     log::warn!("resize to {w}x{h} failed: {e}");
+                    // It stays as it was: compare the next request with that.
+                    *hub.resize_target.lock() = None;
                 }
+            }
+            // The settings panel may have changed the configuration (see capture_loop).
+            if let Some(c) = hub.video_cfg.lock().clone() {
+                cfg = c;
             }
             p = match build(&cfg, &hub) {
                 Ok(p) => p,
@@ -229,12 +253,44 @@ struct RateCtl {
     /// Delivery rate observed at the last congestion: the path's likely capacity.
     ceiling: f64,
     ceiling_at: Instant,
+    /// Auto quality (None: the configured CRF holds).
+    quality: Option<AutoQuality>,
 }
+
+/// The CRF auto quality has settled on, and the range it moves in.
+struct AutoQuality {
+    crf: f32,
+    last: Instant,
+}
+
+/// Auto quality's sharpest motion CRF: paint-over's default, so still areas never come
+/// out softer than moving ones.
+const AUTO_BEST_CRF: f32 = 16.0;
+/// Its softest: past this, a lower bitrate costs less than blockier text.
+const AUTO_WORST_CRF: f32 = 34.0;
 
 /// Starting point for a new session's bitrate cap (kbit/s).
 const START_KBPS: f64 = 8000.0;
 
 impl RateCtl {
+    fn for_config(cfg: &VideoConfig) -> Self {
+        let mut rc = Self::new(cfg.max_kbps as f64, cfg.min_kbps as f64);
+        rc.set_quality(cfg.auto_quality, cfg.crf);
+        rc
+    }
+
+    /// Auto quality on (starting from `crf` if it was off) or off.
+    fn set_quality(&mut self, auto: bool, crf: f32) {
+        if !auto {
+            self.quality = None;
+        } else if self.quality.is_none() {
+            self.quality = Some(AutoQuality {
+                crf: crf.clamp(AUTO_BEST_CRF, AUTO_WORST_CRF),
+                last: Instant::now(),
+            });
+        }
+    }
+
     fn new(max: f64, min: f64) -> Self {
         let past = Instant::now() - Duration::from_secs(10);
         RateCtl {
@@ -247,7 +303,16 @@ impl RateCtl {
             slow_start: true,
             ceiling: f64::MAX,
             ceiling_at: past,
+            quality: None,
         }
+    }
+
+    /// New ceiling and floor from the settings panel, effective at once.
+    fn set_limits(&mut self, max: f64, min: f64) {
+        self.max = max;
+        self.min = min.min(max);
+        self.target = self.target.clamp(self.min, self.max);
+        self.ceiling = f64::MAX;
     }
 
     fn update(&mut self, hub: &Hub, clients: &[Arc<crate::hub::Client>]) {
@@ -295,6 +360,12 @@ impl RateCtl {
             self.target = t.max(self.min);
             self.last_dec = now;
             self.slow_start = false;
+            // Auto quality gives way too: a softer picture needs fewer bits right away,
+            // where a lower cap alone only squeezes the next frames.
+            if let Some(q) = &mut self.quality {
+                q.crf = (q.crf + 2.0).min(AUTO_WORST_CRF);
+                q.last = now;
+            }
             log::debug!(
                 "rate: congested, target {:.0} kbps (delivered {:.0})",
                 self.target,
@@ -341,6 +412,37 @@ impl RateCtl {
                 self.target = (self.target * 1.02).min(self.max);
                 self.last_inc = now;
             }
+        }
+        if let Some(q) = &mut self.quality {
+            // Room to spare: the screen is moving but the stream uses well under its
+            // cap, so the quality setting, not the path, holds the picture back. Sharpen
+            // a step a second until the stream presses the cap (which then rises while
+            // the path stays clear) or latency builds (which backs both off above).
+            if !congested
+                && clear
+                && self.last_dec.elapsed() >= Duration::from_secs(2)
+                && q.last.elapsed() >= Duration::from_secs(1)
+                && delivered >= 300.0
+                && delivered < self.target * 0.6
+                && q.crf > AUTO_BEST_CRF
+            {
+                q.crf = (q.crf - 1.0).max(AUTO_BEST_CRF);
+                q.last = now;
+                log::debug!("rate: auto quality sharpens to crf {}", q.crf);
+            }
+            hub.auto_crf.store(q.crf.to_bits(), Ordering::Relaxed);
+        } else {
+            hub.auto_crf.store(0, Ordering::Relaxed);
+        }
+        // Auto sound: leave a slow link's bits to the picture.
+        let top = hub.audio_auto.load(Ordering::Relaxed);
+        if top > 0 {
+            let b = match self.target {
+                t if t < 1500.0 => 32000,
+                t if t < 4000.0 => 64000,
+                _ => top,
+            };
+            hub.audio_bitrate.store(b.min(top), Ordering::Relaxed);
         }
         hub.target_kbps.store(self.target as u32, Ordering::Relaxed);
     }
@@ -458,7 +560,7 @@ fn note_changes(cap: &mut Capturer, hub: &Hub) {
 
 fn capture_loop(
     cap: &mut Capturer,
-    cfg: VideoConfig,
+    mut cfg: VideoConfig,
     hub: Arc<Hub>,
     job_tx: mpsc::SyncSender<Job>,
     ret_rx: mpsc::Receiver<(usize, Box<I420>)>,
@@ -477,7 +579,7 @@ fn capture_loop(
     let mut last_capture = Instant::now() - interval;
     let mut last_motion = Instant::now();
     let mut paintover_left = 0u32;
-    let mut rc = RateCtl::new(cfg.max_kbps as f64, cfg.min_kbps as f64);
+    let mut rc = RateCtl::for_config(&cfg);
     hub.target_kbps.store(rc.target as u32, Ordering::Relaxed);
     let mut had_clients = false;
     let mut full_next = true;
@@ -487,6 +589,23 @@ fn capture_loop(
     loop {
         if hub.resize_req.lock().is_some() || cap.needs_rebuild() {
             return Ok(());
+        }
+        // Settings changed from the panel: apply them, or rebuild if the encoders must.
+        if hub.video_dirty.swap(false, Ordering::Relaxed) {
+            if let Some(new) = hub.video_cfg.lock().clone() {
+                if new.needs_rebuild(&cfg) {
+                    log::info!("video settings changed; restarting the encoder");
+                    return Ok(());
+                }
+                rc.set_limits(new.max_kbps as f64, new.min_kbps as f64);
+                // Turning auto quality on (again) starts it from the configured CRF.
+                if new.auto_quality && !cfg.auto_quality {
+                    rc.set_quality(false, new.crf);
+                }
+                rc.set_quality(new.auto_quality, new.crf);
+                hub.target_kbps.store(rc.target as u32, Ordering::Relaxed);
+                cfg = new;
+            }
         }
         cap.pump()?;
         if cap.needs_rebuild() {
@@ -519,7 +638,7 @@ fn capture_loop(
         let clients = hub.video_clients();
         if clients.is_empty() {
             if had_clients {
-                rc = RateCtl::new(cfg.max_kbps as f64, cfg.min_kbps as f64);
+                rc = RateCtl::for_config(&cfg);
                 hub.target_kbps.store(rc.target as u32, Ordering::Relaxed);
             }
             had_clients = false;
@@ -1025,6 +1144,17 @@ fn encode_loop(
             continue;
         }
         let target = hub.target_kbps.load(Ordering::Relaxed);
+        // Read per frame: the settings panel can change quality while this runs.
+        let (crf, po_crf) = hub
+            .video_cfg
+            .lock()
+            .as_ref()
+            .map_or((crf, po_crf), |c| (c.crf, c.paintover_crf));
+        // Auto quality's CRF, when it is on (paint-over keeps its own).
+        let crf = match hub.auto_crf.load(Ordering::Relaxed) {
+            0 => crf,
+            bits => f32::from_bits(bits),
+        };
         let want_crf = if job.paintover { po_crf } else { crf };
         // Each stripe may use up to twice its area share of the budget; the delay-based
         // controller reins the total in if several stripes move at once.
@@ -1211,4 +1341,80 @@ fn marker_age(ms: i64) -> i64 {
         .as_millis() as i64)
         & 0xffffff;
     now - ms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One viewer whose acks say it receives `kbps` with `queue_ms` of queueing.
+    fn viewer(hub: &Hub, kbps: f64, queue_ms: f64) -> Arc<crate::hub::Client> {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let c = hub.add_client(tx);
+        c.started.store(true, Ordering::Relaxed);
+        c.min_rtt_ms.store(20, Ordering::Relaxed);
+        c.delivered.lock().rate_bps = kbps * 1000.0;
+        c.delay.lock().queue_ms = queue_ms;
+        c
+    }
+
+    /// Lets the controller act on its next update, as if enough time had passed.
+    fn later(rc: &mut RateCtl) {
+        let past = Instant::now() - Duration::from_secs(10);
+        rc.last_eval = past;
+        rc.last_dec = past;
+        rc.last_inc = past;
+        if let Some(q) = &mut rc.quality {
+            q.last = past;
+        }
+    }
+
+    fn crf(hub: &Hub) -> f32 {
+        f32::from_bits(hub.auto_crf.load(Ordering::Relaxed))
+    }
+
+    #[test]
+    fn auto_quality_sharpens_with_room_and_backs_off_under_latency() {
+        let hub = Hub::new();
+        let mut rc = RateCtl::new(30000.0, 2000.0);
+        rc.set_quality(true, 24.0);
+        // Moving content well under the cap, no queueing: a step sharper each time.
+        let c = viewer(&hub, 1500.0, 0.0);
+        let clients = vec![c.clone()];
+        for want in [23.0, 22.0, 21.0] {
+            later(&mut rc);
+            rc.update(&hub, &clients);
+            assert_eq!(crf(&hub), want);
+        }
+        // Queueing builds: quality gives way at once, with the bitrate cap.
+        let before = rc.target;
+        c.delay.lock().queue_ms = 60.0;
+        later(&mut rc);
+        rc.update(&hub, &clients);
+        assert_eq!(crf(&hub), 23.0);
+        assert!(rc.target < before);
+        // An idle screen says nothing about the path: quality stays put.
+        c.delay.lock().queue_ms = 0.0;
+        c.delivered.lock().rate_bps = 0.0;
+        later(&mut rc);
+        rc.update(&hub, &clients);
+        assert_eq!(crf(&hub), 23.0);
+    }
+
+    #[test]
+    fn auto_quality_stays_within_its_range_and_turns_off() {
+        let hub = Hub::new();
+        let mut rc = RateCtl::new(30000.0, 2000.0);
+        rc.set_quality(true, 40.0);
+        let clients = vec![viewer(&hub, 0.0, 80.0)];
+        for _ in 0..10 {
+            later(&mut rc);
+            rc.update(&hub, &clients);
+        }
+        assert_eq!(crf(&hub), AUTO_WORST_CRF);
+        rc.set_quality(false, 24.0);
+        later(&mut rc);
+        rc.update(&hub, &clients);
+        assert_eq!(hub.auto_crf.load(Ordering::Relaxed), 0);
+    }
 }

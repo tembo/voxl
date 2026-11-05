@@ -471,5 +471,5 @@ export function createFiles(app: App) {
 		);
 	});
 
-	return { setup };
+	return { setup, close };
 }

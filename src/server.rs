@@ -27,6 +27,8 @@ pub struct AppState {
     /// Viewers only watch: input, clipboard writes and the microphone are refused (--read-only).
     pub read_only: bool,
     pub recorder: Arc<crate::record::Recorder>,
+    /// What the toolbar's settings panel can change while voxl runs.
+    pub settings: Arc<crate::settings::Settings>,
     /// The web client's page, with its title filled in (`index_html`).
     pub index: Bytes,
     /// The page's icon and its content type (--favicon).
@@ -215,12 +217,18 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     let client = s.hub.add_client(tx);
     log::info!("client {} connected", client.id);
     client.send(Out::Text(s.hub.hello()));
+    client.send(Out::Text(s.settings.message()));
     if let Some(c) = s.hub.cursor.lock().clone() {
         client.send(Out::Bin(c));
     }
+    let settings = s.settings.clone();
     let writer = tokio::spawn(async move {
         let dbg = std::env::var("VOXL_DEBUG_MARKER").is_ok();
         while let Some(m) = rx.recv().await {
+            // The settings panel can stop the desktop's clipboard going out.
+            if is_clipboard(&m) && !settings.clip_out() {
+                continue;
+            }
             let t = Instant::now();
             let big = matches!(&m, Out::Bin(b) if b.len() > 2000);
             let msg = match m {
@@ -259,7 +267,9 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
             // microphone audio), so a read-only viewer's are all dropped.
             Message::Binary(_) if s.read_only => {}
             // 0x11: clipboard image (PNG) pasted on the client.
-            Message::Binary(b) if b.first() == Some(&0x11) && b.len() > 1 => {
+            Message::Binary(b)
+                if b.first() == Some(&0x11) && b.len() > 1 && s.settings.clip_in() =>
+            {
                 if let Some(tx) = s.hub.input.lock().as_ref() {
                     let _ = tx.send(InputEvent::Clipboard(crate::desktop::ClipContent::Image(
                         b[1..].to_vec(),
@@ -291,6 +301,16 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     }
     s.hub.remove_client(client.id);
     log::info!("client {} disconnected", client.id);
+}
+
+/// The desktop's clipboard on its way to a viewer: an image (0x04) or text,
+/// `{"d":"...","t":"clip"}` (serde_json writes keys in order, and a quote inside the
+/// text is escaped, so only the real key can end the message this way).
+fn is_clipboard(m: &Out) -> bool {
+    match m {
+        Out::Bin(b) => b.first() == Some(&0x04),
+        Out::Text(t) => t.ends_with("\"t\":\"clip\"}"),
+    }
 }
 
 fn num<T: std::str::FromStr>(it: &mut std::str::Split<'_, char>) -> Option<T> {
@@ -355,9 +375,24 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
             }
         }
         "r" => input(InputEvent::ReleaseAll),
-        "c" => input(InputEvent::Clipboard(crate::desktop::ClipContent::Text(
-            rest.to_string(),
-        ))),
+        "c" if s.settings.clip_in() => input(InputEvent::Clipboard(
+            crate::desktop::ClipContent::Text(rest.to_string()),
+        )),
+        // set,key,value: the settings panel. Everyone sees the result; the sender alone
+        // hears why a value was refused.
+        "set" => {
+            let (key, value) = rest.split_once(',').unwrap_or((rest, ""));
+            match s.settings.set(key, value) {
+                Ok(()) => s.settings.broadcast(),
+                Err(e) => {
+                    c.send(Out::Text(
+                        serde_json::json!({"t": "settingsError", "key": key, "error": e})
+                            .to_string(),
+                    ));
+                    c.send(Out::Text(s.settings.message()));
+                }
+            }
+        }
         "v" => {
             let on = rest == "1";
             c.video.store(on, Ordering::Relaxed);
@@ -380,19 +415,24 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
         }
         // sz,w,h: the desktop size this client's window wants (dynamic resolution).
         // The latest request wins; the video thread clamps it and applies it.
-        "sz" if s.resize => {
+        // Unless the settings panel turned Auto rescale off.
+        "sz" if s.resize && s.settings.auto_resize() => {
             if let (Some(w), Some(h), Some(max)) = (
                 num::<u32>(&mut it),
                 num::<u32>(&mut it),
                 *s.hub.resize_max.lock(),
             ) {
-                let want = crate::screen::fit(w, h, max);
-                let current = (
-                    s.hub.width.load(Ordering::Relaxed),
-                    s.hub.height.load(Ordering::Relaxed),
-                );
-                *s.hub.resize_req.lock() = (want != current).then_some(want);
-                s.hub.wake();
+                // sz,w,h,p: a periodic recheck, followed only from the viewer whose
+                // window the desktop follows, so two windows don't take turns.
+                let owner = &s.hub.resize_owner;
+                if it.next() == Some("p") {
+                    let o = owner.load(Ordering::Relaxed);
+                    if o != 0 && o != c.id {
+                        return;
+                    }
+                }
+                owner.store(c.id, Ordering::Relaxed);
+                s.hub.request_size(crate::screen::fit(w, h, max));
             }
         }
         "kf" => {
@@ -436,13 +476,18 @@ mod tests {
         "au,1",
         "mi,1",
         "sz,640,480",
+        "sz,640,480,p",
         "kf",
         "po,1",
+        "set,audio_bitrate,64000",
     ];
 
     /// Sends every command to a server that has input, a microphone and resizing wired
     /// up, and returns (input events, microphone messages, a resize was asked for).
-    fn drive(read_only: bool) -> (usize, usize, bool) {
+    type Rx<T> = std::sync::mpsc::Receiver<T>;
+
+    /// A server with input, a microphone and resizing wired up.
+    fn app(read_only: bool) -> (AppState, Rx<InputEvent>, Rx<crate::mic::MicMsg>) {
         let hub = Hub::new();
         hub.width.store(1280, Ordering::Relaxed);
         hub.height.store(800, Ordering::Relaxed);
@@ -450,25 +495,43 @@ mod tests {
         let (input_tx, input_rx) = std::sync::mpsc::channel();
         *hub.input.lock() = Some(input_tx);
         let (mic_tx, mic_rx) = std::sync::mpsc::channel();
+        let files = Arc::new(crate::files::Files {
+            root: std::env::temp_dir(),
+            upload: false,
+            download: false,
+            default_dir: String::new(),
+            max_upload_bytes: 0,
+            live: Default::default(),
+        });
+        let recorder = crate::record::Recorder::new(hub.clone(), Duration::from_secs(1));
+        let settings = crate::settings::Settings::new(
+            hub.clone(),
+            files.clone(),
+            recorder.clone(),
+            true,
+            true,
+            true,
+        );
         let s = AppState {
             hub: hub.clone(),
             audio: true,
             epoch: Instant::now(),
-            files: Arc::new(crate::files::Files {
-                root: std::env::temp_dir(),
-                upload: false,
-                download: false,
-                default_dir: String::new(),
-                max_upload_bytes: 0,
-            }),
+            files,
             mic: Some(mic_tx),
             resize: true,
             read_only,
-            recorder: crate::record::Recorder::new(hub.clone(), Duration::from_secs(1)),
+            recorder,
+            settings,
             index: Bytes::new(),
             favicon: Bytes::new(),
             favicon_type: "image/x-icon",
         };
+        (s, input_rx, mic_rx)
+    }
+
+    fn drive(read_only: bool) -> (usize, usize, bool) {
+        let (s, input_rx, mic_rx) = app(read_only);
+        let hub = s.hub.clone();
         let (tx, _rx) = mpsc::unbounded_channel();
         let client = hub.add_client(tx);
         let mut rtts = Default::default();
@@ -476,10 +539,12 @@ mod tests {
             handle_text(&s, &client, c, &mut rtts);
         }
         let resized = hub.resize_req.lock().is_some();
+        // A setting changed: also something only a viewer that can act may do.
+        let set = hub.audio_bitrate.load(Ordering::Relaxed) == 64000;
         (
             input_rx.try_iter().count(),
             mic_rx.try_iter().count(),
-            resized,
+            resized || set,
         )
     }
 
@@ -488,7 +553,34 @@ mod tests {
         let (input, mic, resized) = drive(true);
         assert_eq!(input, 0, "input events from a read-only viewer");
         assert_eq!(mic, 0, "microphone messages from a read-only viewer");
-        assert!(!resized, "a read-only viewer resized the desktop");
+        assert!(
+            !resized,
+            "a read-only viewer resized the desktop or changed a setting"
+        );
+    }
+
+    #[test]
+    fn rechecks_follow_only_the_window_the_desktop_follows() {
+        let (s, _input, _mic) = app(false);
+        let mut rtts = Default::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let a = s.hub.add_client(tx);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let b = s.hub.add_client(tx);
+        // What each platform makes of a size (macOS and Windows snap to a mode).
+        let fit = |w, h| Some(crate::screen::fit(w, h, (2560, 1600)));
+        let req = || *s.hub.resize_req.lock();
+        handle_text(&s, &a, "sz,1920,1080", &mut rtts);
+        let a_size = req();
+        assert_eq!(a_size, fit(1920, 1080));
+        // B's periodic recheck doesn't pull the desktop to its window...
+        handle_text(&s, &b, "sz,1024,768,p", &mut rtts);
+        assert_eq!(req(), a_size);
+        // ...but its own window changing does, and then its rechecks count.
+        handle_text(&s, &b, "sz,1024,768", &mut rtts);
+        assert_eq!(req(), fit(1024, 768));
+        handle_text(&s, &b, "sz,1280,720,p", &mut rtts);
+        assert_eq!(req(), fit(1280, 720));
     }
 
     #[test]
