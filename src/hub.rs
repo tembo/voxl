@@ -33,6 +33,8 @@ pub struct Client {
     /// Has received a keyframe since (re)starting video.
     pub started: AtomicBool,
     pub delay: Mutex<DelayEst>,
+    /// Asked the viewer in control to hand it over.
+    pub wants_control: AtomicBool,
 }
 
 /// Send->ack delay tracking: `base` is the (slowly expiring) minimum, the excess over
@@ -260,6 +262,9 @@ pub struct Hub {
     pub snapshots: Mutex<Vec<tokio::sync::oneshot::Sender<Arc<crate::record::Snapshot>>>>,
     /// When each part of the screen last changed (`/wait`).
     pub activity: crate::wait::Activity,
+    /// The viewer whose input reaches the desktop. None means anyone's does (no viewer
+    /// has claimed it, as with --read-only, where nobody's input is accepted anyway).
+    pub control: Mutex<Option<u64>>,
 }
 
 impl Hub {
@@ -281,6 +286,7 @@ impl Hub {
             hello_extra: Mutex::new(serde_json::Map::new()),
             snapshots: Mutex::new(Vec::new()),
             activity: Default::default(),
+            control: Mutex::new(None),
         })
     }
 
@@ -312,14 +318,88 @@ impl Hub {
                 base_at: Instant::now(),
                 queue_ms: 0.0,
             }),
+            wants_control: AtomicBool::new(false),
         });
         self.clients.lock().push(c.clone());
         c
     }
 
+    /// Removes a viewer. If it was in control, control passes to whoever asked for it
+    /// first, or else to the viewer connected longest.
     pub fn remove_client(&self, id: u64) {
-        self.clients.lock().retain(|c| c.id != id);
+        let next = {
+            let mut clients = self.clients.lock();
+            clients.retain(|c| c.id != id);
+            clients
+                .iter()
+                .find(|c| c.wants_control.load(Ordering::Relaxed))
+                .or(clients.first())
+                .map(|c| c.id)
+        };
+        let mut control = self.control.lock();
+        if *control == Some(id) {
+            *control = next;
+            if let Some(c) = self.client(next) {
+                c.wants_control.store(false, Ordering::Relaxed);
+            }
+        }
+        drop(control);
         self.wake();
+    }
+
+    fn client(&self, id: Option<u64>) -> Option<Arc<Client>> {
+        let id = id?;
+        self.clients.lock().iter().find(|c| c.id == id).cloned()
+    }
+
+    /// Whether this viewer's input may reach the desktop.
+    pub fn in_control(&self, id: u64) -> bool {
+        self.control.lock().is_none_or(|c| c == id)
+    }
+
+    /// Gives control to `id` if nobody has it (the first viewer to connect).
+    pub fn claim_control(&self, id: u64) {
+        self.control.lock().get_or_insert(id);
+    }
+
+    /// Hands control from `from` (who must hold it) to `to` (who must be connected).
+    pub fn give_control(&self, from: u64, to: u64) -> bool {
+        let mut control = self.control.lock();
+        if *control != Some(from) || from == to {
+            return false;
+        }
+        let Some(c) = self.client(Some(to)) else {
+            return false;
+        };
+        c.wants_control.store(false, Ordering::Relaxed);
+        *control = Some(to);
+        true
+    }
+
+    /// Tells every viewer who is connected, who is in control and who has asked for it:
+    /// `{"t":"users","you":2,"control":1,"users":[{"id":1,"req":false},...]}`.
+    pub fn send_users(&self) {
+        let control = *self.control.lock();
+        let clients = self.clients.lock().clone();
+        let users: Vec<_> = clients
+            .iter()
+            .map(
+                |c| serde_json::json!({"id": c.id, "req": c.wants_control.load(Ordering::Relaxed)}),
+            )
+            .collect();
+        for c in &clients {
+            c.send(Out::Text(
+                serde_json::json!({"t": "users", "you": c.id, "control": control, "users": users})
+                    .to_string(),
+            ));
+        }
+    }
+
+    /// Sends `m` to every viewer except `id`.
+    pub fn broadcast_others(&self, id: u64, m: &str) {
+        for c in self.clients.lock().iter().filter(|c| c.id != id) {
+            c.send(Out::Text(m.to_string()));
+        }
     }
 
     pub fn video_clients(&self) -> Vec<Arc<Client>> {

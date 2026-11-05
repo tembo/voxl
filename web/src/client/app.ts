@@ -17,6 +17,8 @@ export interface App {
 	remoteMac: boolean;
 	/** The server only shows the desktop (--read-only), from the server's hello. */
 	readOnly: boolean;
+	/** This viewer's input reaches the desktop (another viewer may be in control). */
+	inControl: boolean;
 	inIframe: boolean;
 	/** Desktop size in pixels; 0 until the server says hello. */
 	desk: { w: number; h: number };

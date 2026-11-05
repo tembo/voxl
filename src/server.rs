@@ -215,6 +215,11 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     let client = s.hub.add_client(tx);
     log::info!("client {} connected", client.id);
     client.send(Out::Text(s.hub.hello()));
+    // The first viewer is in control; with --read-only nobody is.
+    if !s.read_only {
+        s.hub.claim_control(client.id);
+    }
+    s.hub.send_users();
     if let Some(c) = s.hub.cursor.lock().clone() {
         client.send(Out::Bin(c));
     }
@@ -259,7 +264,9 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
             // microphone audio), so a read-only viewer's are all dropped.
             Message::Binary(_) if s.read_only => {}
             // 0x11: clipboard image (PNG) pasted on the client.
-            Message::Binary(b) if b.first() == Some(&0x11) && b.len() > 1 => {
+            Message::Binary(b)
+                if b.first() == Some(&0x11) && b.len() > 1 && s.hub.in_control(client.id) =>
+            {
                 if let Some(tx) = s.hub.input.lock().as_ref() {
                     let _ = tx.send(InputEvent::Clipboard(crate::desktop::ClipContent::Image(
                         b[1..].to_vec(),
@@ -283,19 +290,38 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     }
     pinger.abort();
     writer.abort();
-    if let Some(tx) = s.hub.input.lock().as_ref() {
-        let _ = tx.send(InputEvent::ReleaseAll);
+    // Let go of what this viewer held down, unless someone else is driving.
+    if s.hub.in_control(client.id) {
+        if let Some(tx) = s.hub.input.lock().as_ref() {
+            let _ = tx.send(InputEvent::ReleaseAll);
+        }
     }
     if let Some(tx) = &s.mic {
         let _ = tx.send(crate::mic::MicMsg::Stop(client.id));
     }
     s.hub.remove_client(client.id);
+    s.hub
+        .broadcast_others(client.id, &pointer_msg(client.id, None));
+    s.hub.send_users();
     log::info!("client {} disconnected", client.id);
 }
 
 fn num<T: std::str::FromStr>(it: &mut std::str::Split<'_, char>) -> Option<T> {
     it.next()?.trim().parse().ok()
 }
+
+/// Where a viewer's pointer is on the desktop, for the other viewers to draw:
+/// `{"t":"pc","id":2,"x":10,"y":20}`, or without x and y once it has left.
+fn pointer_msg(id: u64, at: Option<(i32, i32)>) -> String {
+    match at {
+        Some((x, y)) => serde_json::json!({"t": "pc", "id": id, "x": x, "y": y}),
+        None => serde_json::json!({"t": "pc", "id": id}),
+    }
+    .to_string()
+}
+
+/// Commands that act on the desktop, accepted only from the viewer in control.
+const CONTROL_COMMANDS: &[&str] = &["m", "b", "s", "sp", "k", "r", "c", "sz"];
 
 /// Commands a --read-only viewer may send: acks, video and audio on/off, keyframe
 /// requests and ping replies. Everything else acts on the desktop (input, clipboard,
@@ -316,16 +342,44 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
         }
     };
     let mut it = rest.split(',');
+    // Every viewer's pointer is shown to the others, but only the one in control moves
+    // the desktop's.
+    if cmd == "m" {
+        if let (Some(x), Some(y)) = (num::<i32>(&mut it), num::<i32>(&mut it)) {
+            s.hub
+                .broadcast_others(c.id, &pointer_msg(c.id, Some((x, y))));
+            if s.hub.in_control(c.id) {
+                input(InputEvent::Move { x, y });
+            }
+        }
+        return;
+    }
+    if CONTROL_COMMANDS.contains(&cmd) && !s.hub.in_control(c.id) {
+        return;
+    }
     match cmd {
+        // ph: this viewer's pointer left the desktop (or its tab was hidden).
+        "ph" => s.hub.broadcast_others(c.id, &pointer_msg(c.id, None)),
+        // cr,1 / cr,0: ask for control, or take the request back.
+        "cr" => {
+            c.wants_control.store(rest == "1", Ordering::Relaxed);
+            s.hub.send_users();
+        }
+        // cg,id: the viewer in control hands it to another one.
+        "cg" => {
+            if let Some(to) = num::<u64>(&mut it) {
+                if s.hub.give_control(c.id, to) {
+                    // Keys and buttons the old controller held must not stay down.
+                    input(InputEvent::ReleaseAll);
+                    log::info!("client {} gave control to client {to}", c.id);
+                    s.hub.send_users();
+                }
+            }
+        }
         "a" => {
             if let Some(id) = num::<u32>(&mut it) {
                 c.on_ack(id);
                 s.hub.wake();
-            }
-        }
-        "m" => {
-            if let (Some(x), Some(y)) = (num(&mut it), num(&mut it)) {
-                input(InputEvent::Move { x, y });
             }
         }
         "b" => {
@@ -438,11 +492,17 @@ mod tests {
         "sz,640,480",
         "kf",
         "po,1",
+        "ph",
+        "cr,1",
+        "cg,1",
     ];
 
     /// Sends every command to a server that has input, a microphone and resizing wired
     /// up, and returns (input events, microphone messages, a resize was asked for).
-    fn drive(read_only: bool) -> (usize, usize, bool) {
+    type Rx<T> = std::sync::mpsc::Receiver<T>;
+
+    /// A server with input, a microphone and resizing wired up.
+    fn app(read_only: bool) -> (AppState, Rx<InputEvent>, Rx<crate::mic::MicMsg>) {
         let hub = Hub::new();
         hub.width.store(1280, Ordering::Relaxed);
         hub.height.store(800, Ordering::Relaxed);
@@ -469,18 +529,130 @@ mod tests {
             favicon: Bytes::new(),
             favicon_type: "image/x-icon",
         };
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let client = hub.add_client(tx);
-        let mut rtts = Default::default();
-        for c in ALL {
-            handle_text(&s, &client, c, &mut rtts);
+        (s, input_rx, mic_rx)
+    }
+
+    /// A viewer connecting as `handle_socket` does, and its outgoing messages.
+    fn connect(s: &AppState) -> (Arc<Client>, mpsc::UnboundedReceiver<Out>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let client = s.hub.add_client(tx);
+        if !s.read_only {
+            s.hub.claim_control(client.id);
         }
-        let resized = hub.resize_req.lock().is_some();
+        (client, rx)
+    }
+
+    fn send(s: &AppState, c: &Arc<Client>, cmds: &[&str]) {
+        let mut rtts = Default::default();
+        for cmd in cmds {
+            handle_text(s, c, cmd, &mut rtts);
+        }
+    }
+
+    /// Text messages a viewer was sent, parsed.
+    fn texts(rx: &mut mpsc::UnboundedReceiver<Out>) -> Vec<serde_json::Value> {
+        let mut v = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            if let Out::Text(t) = m {
+                v.push(serde_json::from_str(&t).unwrap());
+            }
+        }
+        v
+    }
+
+    /// Sends every command to a server that has input, a microphone and resizing wired
+    /// up, and returns (input events, microphone messages, a resize was asked for).
+    fn drive(read_only: bool) -> (usize, usize, bool) {
+        let (s, input_rx, mic_rx) = app(read_only);
+        let (client, _rx) = connect(&s);
+        send(&s, &client, ALL);
+        let resized = s.hub.resize_req.lock().is_some();
         (
             input_rx.try_iter().count(),
             mic_rx.try_iter().count(),
             resized,
         )
+    }
+
+    #[test]
+    fn only_the_viewer_in_control_drives_the_desktop() {
+        let (s, input_rx, _mic) = app(false);
+        let (first, _rx1) = connect(&s);
+        let (second, mut rx2) = connect(&s);
+        assert_eq!(*s.hub.control.lock(), Some(first.id));
+
+        // The second viewer's input is dropped, but its pointer is still shown to others.
+        send(
+            &s,
+            &second,
+            &["m,5,6", "b,1,1", "k,65,1", "c,text", "sz,640,480"],
+        );
+        assert_eq!(input_rx.try_iter().count(), 0);
+        assert!(s.hub.resize_req.lock().is_none());
+        // Nor can it hand itself control.
+        send(&s, &second, &[&format!("cg,{}", second.id)]);
+        assert_eq!(*s.hub.control.lock(), Some(first.id));
+
+        // The first viewer's pointer reaches both the desktop and the other viewer.
+        texts(&mut rx2);
+        send(&s, &first, &["m,10,20"]);
+        assert!(matches!(
+            input_rx.try_recv(),
+            Ok(InputEvent::Move { x: 10, y: 20 })
+        ));
+        let pc = texts(&mut rx2);
+        assert_eq!(pc[0]["t"], "pc");
+        assert_eq!(pc[0]["id"], first.id);
+        assert_eq!(pc[0]["x"], 10);
+
+        // A request is announced; handing over releases held input and moves control.
+        send(&s, &second, &["cr,1"]);
+        let users = texts(&mut rx2).pop().unwrap();
+        assert_eq!(users["t"], "users");
+        assert_eq!(users["you"], second.id);
+        assert_eq!(users["control"], first.id);
+        assert_eq!(users["users"][1]["req"], true);
+        send(&s, &first, &[&format!("cg,{}", second.id)]);
+        assert_eq!(*s.hub.control.lock(), Some(second.id));
+        assert!(matches!(input_rx.try_recv(), Ok(InputEvent::ReleaseAll)));
+        assert!(!second.wants_control.load(Ordering::Relaxed));
+        send(&s, &first, &["k,65,1"]);
+        send(&s, &second, &["k,66,1"]);
+        let keys: Vec<_> = input_rx.try_iter().collect();
+        assert!(matches!(keys[..], [InputEvent::Key { keysym: 66, .. }]));
+    }
+
+    #[test]
+    fn control_passes_on_when_its_viewer_leaves() {
+        let (s, _input, _mic) = app(false);
+        let (first, _rx1) = connect(&s);
+        let (second, _rx2) = connect(&s);
+        let (third, _rx3) = connect(&s);
+        // Whoever asked gets it, ahead of the viewer connected longest.
+        third.wants_control.store(true, Ordering::Relaxed);
+        s.hub.remove_client(first.id);
+        assert_eq!(*s.hub.control.lock(), Some(third.id));
+        // With no one asking, the viewer connected longest does.
+        s.hub.remove_client(third.id);
+        assert_eq!(*s.hub.control.lock(), Some(second.id));
+        s.hub.remove_client(second.id);
+        assert_eq!(*s.hub.control.lock(), None);
+        // A viewer leaving that wasn't in control changes nothing.
+        let (a, _ra) = connect(&s);
+        let (b, _rb) = connect(&s);
+        s.hub.remove_client(b.id);
+        assert_eq!(*s.hub.control.lock(), Some(a.id));
+    }
+
+    #[test]
+    fn read_only_viewers_are_never_in_control() {
+        let (s, _input, _mic) = app(true);
+        let (_first, _rx1) = connect(&s);
+        let (second, _rx2) = connect(&s);
+        assert_eq!(*s.hub.control.lock(), None);
+        send(&s, &second, &["cr,1", &format!("cg,{}", second.id)]);
+        assert!(!second.wants_control.load(Ordering::Relaxed));
+        assert_eq!(*s.hub.control.lock(), None);
     }
 
     #[test]

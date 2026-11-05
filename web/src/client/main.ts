@@ -1,6 +1,6 @@
 // Main thread: layout, input capture, cursor, clipboard, files, microphone and audio.
 // Video decode/paint and the socket live in the worker (worker.ts).
-import { cmd } from '../protocol';
+import { Bin, cmd } from '../protocol';
 import type { FromWorker, ToWorker } from '../protocol';
 import type { App } from './app';
 import { el } from './app';
@@ -13,6 +13,7 @@ import { createMic } from './mic';
 import { setupPointer } from './pointer';
 import { createResize } from './resize';
 import { setupToolbar } from './toolbar';
+import { createUsers } from './users';
 import { createVideo } from './video';
 
 /**
@@ -24,8 +25,17 @@ import { createVideo } from './video';
  */
 const READ_ONLY_COMMANDS = new Set(['a', 'v', 'au', 'kf', 'po']);
 
+/**
+ * Commands that act on the desktop, which the server takes only from the viewer in
+ * control (CONTROL_COMMANDS in server.rs). Pointer moves still go out: the other
+ * viewers see this viewer's pointer either way.
+ */
+const CONTROL_COMMANDS = new Set(['b', 's', 'sp', 'k', 'r', 'c', 'sz']);
+
 function blocksInput(app: App, command: string): boolean {
-	return app.readOnly && !READ_ONLY_COMMANDS.has(command.split(',')[0]);
+	const name = command.split(',')[0];
+	if (app.readOnly) return !READ_ONLY_COMMANDS.has(name);
+	return !app.inControl && CONTROL_COMMANDS.has(name);
 }
 
 function main() {
@@ -62,8 +72,10 @@ function main() {
 			if (!blocksInput(app, d)) post({ t: 'send', d });
 		},
 		sendBin: (type, bytes) => {
-			// The server drops every binary message from read-only viewers.
+			// The server drops every binary message from read-only viewers, and
+			// clipboard images from viewers not in control.
 			if (app.readOnly) return;
+			if (!app.inControl && type === Bin.ClipImageUp) return;
 			const msg = new Uint8Array(bytes.byteLength + 1);
 			msg[0] = type;
 			msg.set(bytes, 1);
@@ -75,6 +87,7 @@ function main() {
 		isMac: /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent),
 		remoteMac: false,
 		readOnly: false,
+		inControl: true,
 		inIframe: window !== window.top,
 		desk: { w: 0, h: 0 },
 		view: { scale: 1 },
@@ -94,10 +107,11 @@ function main() {
 	};
 	setupPointer(app, onInteract);
 	setupKeyboard(app, clipboard, onInteract);
-	setupToolbar(app, video.layout);
+	const toolbar = setupToolbar(app, video.layout);
 	const files = createFiles(app);
 	const mic = createMic(app);
 	const resize = createResize(app);
+	const users = createUsers(app, toolbar.show);
 
 	const offscreen = canvas.transferControlToOffscreen();
 	post(
@@ -117,7 +131,10 @@ function main() {
 	}
 	document.addEventListener('visibilitychange', () => {
 		updateVisibility();
-		if (document.hidden) app.send(cmd.releaseAll);
+		if (document.hidden) {
+			app.send(cmd.releaseAll);
+			app.send(cmd.pointerGone);
+		}
 	});
 	window.addEventListener('resize', () => {
 		video.layout();
@@ -147,6 +164,7 @@ function main() {
 			case 'status':
 				if (m.s === 'closed') {
 					mic.stop();
+					users.reset();
 					statusEl.style.display = '';
 					statusEl.textContent = 'Reconnecting…';
 				}
@@ -160,6 +178,12 @@ function main() {
 				break;
 			case 'clipImage':
 				clipboard.onRemoteImage(m.buf);
+				break;
+			case 'users':
+				users.onUsers(m);
+				break;
+			case 'pc':
+				users.onPointer(m);
 				break;
 			case 'mic':
 				if (!m.on) mic.stop();
