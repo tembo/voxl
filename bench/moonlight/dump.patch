@@ -1,0 +1,68 @@
+--- a/src/platform.c
++++ b/src/platform.c
+@@ -30,6 +30,9 @@
+ #include <string.h>
+ #include <unistd.h>
+ #include <dlfcn.h>
++#include <fcntl.h>
++#include <sys/time.h>
++#include <sys/uio.h>
+ 
+ typedef bool(*ImxInit)();
+ 
+@@ -138,8 +141,55 @@
+   }
+ }
+ 
++// Benchmark output for -platform fake: each decode unit, as received, to the file or FIFO
++// MOONLIGHT_DUMP names: arrival time (wall clock, microseconds), frame number, frame
++// type and length (little-endian u64, u32, u32, u32), then the Annex-B data.
++static int dump_fd = -1;
++
++static int dump_setup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
++  const char* path = getenv("MOONLIGHT_DUMP");
++  dump_fd = path ? open(path, O_WRONLY) : -1;
++  return 0;
++}
++
++static void dump_cleanup() {
++  if (dump_fd >= 0)
++    close(dump_fd);
++  dump_fd = -1;
++}
++
++static int dump_submit(PDECODE_UNIT du) {
++  if (dump_fd < 0)
++    return DR_OK;
++  struct timeval tv;
++  gettimeofday(&tv, NULL);
++  struct { uint64_t us; uint32_t frame, type, len; } __attribute__((packed)) hdr = {
++    (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec, du->frameNumber, du->frameType, du->fullLength };
++  struct iovec iov[64];
++  int n = 0;
++  iov[n].iov_base = &hdr; iov[n++].iov_len = sizeof(hdr);
++  for (PLENTRY e = du->bufferList; e != NULL; e = e->next) {
++    if (n == 64) {
++      if (writev(dump_fd, iov, n) < 0) return DR_OK;
++      n = 0;
++    }
++    iov[n].iov_base = e->data; iov[n++].iov_len = e->length;
++  }
++  writev(dump_fd, iov, n);
++  return DR_OK;
++}
++
++static DECODER_RENDERER_CALLBACKS decoder_callbacks_dump = {
++  .setup = dump_setup,
++  .cleanup = dump_cleanup,
++  .submitDecodeUnit = dump_submit,
++  .capabilities = CAPABILITY_DIRECT_SUBMIT,
++};
++
+ DECODER_RENDERER_CALLBACKS* platform_get_video(enum platform system) {
+   switch (system) {
++  case FAKE:
++    return getenv("MOONLIGHT_DUMP") ? &decoder_callbacks_dump : NULL;
+   #ifdef HAVE_X11
+   case X11:
+     return &decoder_callbacks_x11;
