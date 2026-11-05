@@ -1,6 +1,6 @@
 # Benchmarks
 
-Tools used to compare voxl with selkies and KasmVNC. Everything runs on a separate Xvfb display
+Tools used to compare voxl with selkies, KasmVNC, Neko, noVNC and Sunshine. Everything runs on a separate Xvfb display
 (`:2` by default, `BENCH_DISPLAY` to change it), so a live desktop isn't disturbed.
 
 ## Setup
@@ -40,6 +40,15 @@ sleep 1; BENCH_DISPLAY=:5 env/openbox.sh &
   `WEBSOCKIFY`), `env/neko.sh` (Neko's official image against the benchmark display;
   `NEKO_SHAPE=mbps/rtt` shapes its UDP media with `tc netem` in its own container
   network) or `env/neko-tuned.sh` (60 FPS x264).
+- `mlclient.py host secs [x y]`: native Moonlight client for Sunshine. Streams with
+  moonlight-embedded built by `moonlight/` (`nix-build moonlight`; its patch makes
+  `-platform fake` hand each frame over as it arrives), decodes with FFmpeg and reads the
+  marker. `MOONLIGHT` (the binary), `ML_HOME` (its pairing keys), `ML_BITRATE`. Same JSON.
+- `suite3.sh`: Sunshine through the same workloads and links (`CONFIGS`: `sunshine`,
+  `sunshine_tuned`; `REPS`), restarting it per run with `env/sunshine.sh` (`SUNSHINE`:
+  the binary; `SUNSHINE_SHAPE=mbps/rtt` runs it in its own container network shaped
+  with `tc netem`, like Neko). Pair once as `env/sunshine.sh` describes. `cpusuite2.sh`
+  measures its CPU with `SERVERS="sunshine sunshine_tuned"`.
 - `daytona_bench.py up|run|down`: a Daytona sandbox (default size, 2560x1600 desktop
   with x11vnc + noVNC) with the workloads in it, measured with `kclient.py` through
   Daytona's signed preview proxy (`KC_URL`, `KC_HEADERS`; `KC_CONNECT` to go through
