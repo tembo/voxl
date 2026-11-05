@@ -111,7 +111,11 @@ function main() {
 	const files = createFiles(app);
 	const mic = createMic(app);
 	const resize = createResize(app);
-	const users = createUsers(app, toolbar.show);
+	/** The hello's dynamic resolution setup, sent again when control comes here. */
+	let resizeCfg: { scale: number } | undefined;
+	// The desktop took the previous controller's window size; the size this window
+	// asked for while watching was dropped (only the viewer in control resizes).
+	const users = createUsers(app, toolbar.show, () => resize.setup(resizeCfg));
 
 	const offscreen = canvas.transferControlToOffscreen();
 	post(
@@ -158,6 +162,7 @@ function main() {
 				video.layout();
 				files.setup(m.files);
 				mic.setup(!!m.mic && !app.readOnly);
+				resizeCfg = m.resize;
 				resize.setup(m.resize);
 				statusEl.style.display = 'none';
 				break;

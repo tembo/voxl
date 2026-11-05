@@ -33,8 +33,14 @@ pub struct Client {
     /// Has received a keyframe since (re)starting video.
     pub started: AtomicBool,
     pub delay: Mutex<DelayEst>,
-    /// Asked the viewer in control to hand it over.
-    pub wants_control: AtomicBool,
+    /// A person at the web page, as opposed to a recording (`/record`), which also
+    /// takes the stream but isn't listed and never gets control.
+    pub viewer: AtomicBool,
+    /// When this viewer asked for control: a ticket from `Hub::next_request`, lower
+    /// is earlier; 0 when it hasn't asked.
+    pub wants_control: AtomicU64,
+    /// Where this viewer's pointer last was on the desktop, None once it left.
+    pub pointer: Mutex<Option<(i32, i32)>>,
 }
 
 /// Send->ack delay tracking: `base` is the (slowly expiring) minimum, the excess over
@@ -265,6 +271,8 @@ pub struct Hub {
     /// The viewer whose input reaches the desktop. None means anyone's does (no viewer
     /// has claimed it, as with --read-only, where nobody's input is accepted anyway).
     pub control: Mutex<Option<u64>>,
+    /// Tickets for requests for control, so the first to ask is first in line.
+    next_request: AtomicU64,
 }
 
 impl Hub {
@@ -287,6 +295,7 @@ impl Hub {
             snapshots: Mutex::new(Vec::new()),
             activity: Default::default(),
             control: Mutex::new(None),
+            next_request: AtomicU64::new(1),
         })
     }
 
@@ -318,32 +327,47 @@ impl Hub {
                 base_at: Instant::now(),
                 queue_ms: 0.0,
             }),
-            wants_control: AtomicBool::new(false),
+            viewer: AtomicBool::new(false),
+            wants_control: AtomicU64::new(0),
+            pointer: Mutex::new(None),
         });
         self.clients.lock().push(c.clone());
         c
     }
 
-    /// Removes a viewer. If it was in control, control passes to whoever asked for it
-    /// first, or else to the viewer connected longest.
+    /// The people at the web page, in the order they connected (not recordings).
+    fn viewers(&self) -> Vec<Arc<Client>> {
+        self.clients
+            .lock()
+            .iter()
+            .filter(|c| c.viewer.load(Ordering::Relaxed))
+            .cloned()
+            .collect()
+    }
+
+    /// Removes a client. If it was the viewer in control, control passes to the viewer
+    /// who asked for it first, or else to the viewer connected longest.
     pub fn remove_client(&self, id: u64) {
-        let next = {
-            let mut clients = self.clients.lock();
-            clients.retain(|c| c.id != id);
-            clients
-                .iter()
-                .find(|c| c.wants_control.load(Ordering::Relaxed))
-                .or(clients.first())
-                .map(|c| c.id)
-        };
+        self.clients.lock().retain(|c| c.id != id);
+        let viewers = self.viewers();
+        let next = viewers
+            .iter()
+            .filter(|c| c.wants_control.load(Ordering::Relaxed) > 0)
+            .min_by_key(|c| c.wants_control.load(Ordering::Relaxed))
+            .or(viewers.first())
+            .map(|c| c.id);
         let mut control = self.control.lock();
-        if *control == Some(id) {
+        let changed = *control == Some(id);
+        if changed {
             *control = next;
-            if let Some(c) = self.client(next) {
-                c.wants_control.store(false, Ordering::Relaxed);
-            }
         }
         drop(control);
+        if changed {
+            if let Some(c) = self.client(next) {
+                c.wants_control.store(0, Ordering::Relaxed);
+            }
+            self.cursor_to_controller();
+        }
         self.wake();
     }
 
@@ -362,32 +386,66 @@ impl Hub {
         self.control.lock().get_or_insert(id);
     }
 
-    /// Hands control from `from` (who must hold it) to `to` (who must be connected).
+    /// Asks for control (taking a place in line) or takes the request back.
+    pub fn request_control(&self, c: &Client, on: bool) {
+        let ticket = if on {
+            self.next_request.fetch_add(1, Ordering::Relaxed)
+        } else {
+            0
+        };
+        c.wants_control.store(ticket, Ordering::Relaxed);
+    }
+
+    /// Hands control from `from` (who must hold it) to `to` (a connected viewer).
     pub fn give_control(&self, from: u64, to: u64) -> bool {
         let mut control = self.control.lock();
         if *control != Some(from) || from == to {
             return false;
         }
-        let Some(c) = self.client(Some(to)) else {
+        let Some(c) = self
+            .client(Some(to))
+            .filter(|c| c.viewer.load(Ordering::Relaxed))
+        else {
             return false;
         };
-        c.wants_control.store(false, Ordering::Relaxed);
+        c.wants_control.store(0, Ordering::Relaxed);
         *control = Some(to);
+        drop(control);
+        // Keys and buttons the old controller held must not stay down.
+        if let Some(tx) = self.input.lock().as_ref() {
+            let _ = tx.send(crate::input::InputEvent::ReleaseAll);
+        }
+        self.cursor_to_controller();
         true
+    }
+
+    /// Puts the desktop's pointer where the viewer now in control has its own. While
+    /// watching, its moves only showed to the others, so without this its first click
+    /// would land wherever the previous viewer left the pointer.
+    fn cursor_to_controller(&self) {
+        let Some(at) = self
+            .client(*self.control.lock())
+            .and_then(|c| *c.pointer.lock())
+        else {
+            return;
+        };
+        if let Some(tx) = self.input.lock().as_ref() {
+            let _ = tx.send(crate::input::InputEvent::Move { x: at.0, y: at.1 });
+        }
     }
 
     /// Tells every viewer who is connected, who is in control and who has asked for it:
     /// `{"t":"users","you":2,"control":1,"users":[{"id":1,"req":false},...]}`.
     pub fn send_users(&self) {
         let control = *self.control.lock();
-        let clients = self.clients.lock().clone();
-        let users: Vec<_> = clients
+        let viewers = self.viewers();
+        let users: Vec<_> = viewers
             .iter()
-            .map(
-                |c| serde_json::json!({"id": c.id, "req": c.wants_control.load(Ordering::Relaxed)}),
-            )
+            .map(|c| {
+                serde_json::json!({"id": c.id, "req": c.wants_control.load(Ordering::Relaxed) > 0})
+            })
             .collect();
-        for c in &clients {
+        for c in &viewers {
             c.send(Out::Text(
                 serde_json::json!({"t": "users", "you": c.id, "control": control, "users": users})
                     .to_string(),
@@ -397,7 +455,7 @@ impl Hub {
 
     /// Sends `m` to every viewer except `id`.
     pub fn broadcast_others(&self, id: u64, m: &str) {
-        for c in self.clients.lock().iter().filter(|c| c.id != id) {
+        for c in self.viewers().iter().filter(|c| c.id != id) {
             c.send(Out::Text(m.to_string()));
         }
     }

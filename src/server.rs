@@ -215,7 +215,9 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     let client = s.hub.add_client(tx);
     log::info!("client {} connected", client.id);
     client.send(Out::Text(s.hub.hello()));
-    // The first viewer is in control; with --read-only nobody is.
+    // A person at the page, listed for the others. The first is in control; with
+    // --read-only nobody is.
+    client.viewer.store(true, Ordering::Relaxed);
     if !s.read_only {
         s.hub.claim_control(client.id);
     }
@@ -346,6 +348,7 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
     // the desktop's.
     if cmd == "m" {
         if let (Some(x), Some(y)) = (num::<i32>(&mut it), num::<i32>(&mut it)) {
+            *c.pointer.lock() = Some((x, y));
             s.hub
                 .broadcast_others(c.id, &pointer_msg(c.id, Some((x, y))));
             if s.hub.in_control(c.id) {
@@ -359,18 +362,19 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
     }
     match cmd {
         // ph: this viewer's pointer left the desktop (or its tab was hidden).
-        "ph" => s.hub.broadcast_others(c.id, &pointer_msg(c.id, None)),
+        "ph" => {
+            *c.pointer.lock() = None;
+            s.hub.broadcast_others(c.id, &pointer_msg(c.id, None));
+        }
         // cr,1 / cr,0: ask for control, or take the request back.
         "cr" => {
-            c.wants_control.store(rest == "1", Ordering::Relaxed);
+            s.hub.request_control(c, rest == "1");
             s.hub.send_users();
         }
         // cg,id: the viewer in control hands it to another one.
         "cg" => {
             if let Some(to) = num::<u64>(&mut it) {
                 if s.hub.give_control(c.id, to) {
-                    // Keys and buttons the old controller held must not stay down.
-                    input(InputEvent::ReleaseAll);
                     log::info!("client {} gave control to client {to}", c.id);
                     s.hub.send_users();
                 }
@@ -536,6 +540,7 @@ mod tests {
     fn connect(s: &AppState) -> (Arc<Client>, mpsc::UnboundedReceiver<Out>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let client = s.hub.add_client(tx);
+        client.viewer.store(true, Ordering::Relaxed);
         if !s.read_only {
             s.hub.claim_control(client.id);
         }
@@ -615,7 +620,13 @@ mod tests {
         send(&s, &first, &[&format!("cg,{}", second.id)]);
         assert_eq!(*s.hub.control.lock(), Some(second.id));
         assert!(matches!(input_rx.try_recv(), Ok(InputEvent::ReleaseAll)));
-        assert!(!second.wants_control.load(Ordering::Relaxed));
+        // The desktop's pointer goes to where the new controller's is (5,6), so its
+        // first click lands under its own pointer.
+        assert!(matches!(
+            input_rx.try_recv(),
+            Ok(InputEvent::Move { x: 5, y: 6 })
+        ));
+        assert_eq!(second.wants_control.load(Ordering::Relaxed), 0);
         send(&s, &first, &["k,65,1"]);
         send(&s, &second, &["k,66,1"]);
         let keys: Vec<_> = input_rx.try_iter().collect();
@@ -629,7 +640,7 @@ mod tests {
         let (second, _rx2) = connect(&s);
         let (third, _rx3) = connect(&s);
         // Whoever asked gets it, ahead of the viewer connected longest.
-        third.wants_control.store(true, Ordering::Relaxed);
+        s.hub.request_control(&third, true);
         s.hub.remove_client(first.id);
         assert_eq!(*s.hub.control.lock(), Some(third.id));
         // With no one asking, the viewer connected longest does.
@@ -645,13 +656,53 @@ mod tests {
     }
 
     #[test]
+    fn the_first_to_ask_is_first_in_line() {
+        let (s, _input, _mic) = app(false);
+        let (a, _ra) = connect(&s);
+        let (b, _rb) = connect(&s);
+        let (c, _rc) = connect(&s);
+        // C asks before B, the reverse of the order they connected in.
+        send(&s, &c, &["cr,1"]);
+        send(&s, &b, &["cr,1"]);
+        s.hub.remove_client(a.id);
+        assert_eq!(*s.hub.control.lock(), Some(c.id));
+        // Taking a request back gives up the place in line.
+        let (d, _rd) = connect(&s);
+        send(&s, &b, &["cr,0"]);
+        send(&s, &d, &["cr,1"]);
+        s.hub.remove_client(c.id);
+        assert_eq!(*s.hub.control.lock(), Some(d.id));
+    }
+
+    #[test]
+    fn recordings_are_not_people() {
+        let (s, _input, _mic) = app(false);
+        // A recording takes the stream the way /record does: a client, not a viewer.
+        let (tx, mut rec_rx) = mpsc::unbounded_channel();
+        let recording = s.hub.add_client(tx);
+        let (a, _ra) = connect(&s);
+        let (b, mut rb) = connect(&s);
+        assert_eq!(*s.hub.control.lock(), Some(a.id));
+        // Not listed, sent no presence, and not someone control can go to...
+        s.hub.send_users();
+        let users = texts(&mut rb).pop().unwrap();
+        assert_eq!(users["users"].as_array().unwrap().len(), 2);
+        assert!(!s.hub.give_control(a.id, recording.id));
+        send(&s, &a, &["m,1,2"]);
+        assert!(texts(&mut rec_rx).is_empty());
+        // ...even when it has been connected longest and the controller leaves.
+        s.hub.remove_client(a.id);
+        assert_eq!(*s.hub.control.lock(), Some(b.id));
+    }
+
+    #[test]
     fn read_only_viewers_are_never_in_control() {
         let (s, _input, _mic) = app(true);
         let (_first, _rx1) = connect(&s);
         let (second, _rx2) = connect(&s);
         assert_eq!(*s.hub.control.lock(), None);
         send(&s, &second, &["cr,1", &format!("cg,{}", second.id)]);
-        assert!(!second.wants_control.load(Ordering::Relaxed));
+        assert_eq!(second.wants_control.load(Ordering::Relaxed), 0);
         assert_eq!(*s.hub.control.lock(), None);
     }
 

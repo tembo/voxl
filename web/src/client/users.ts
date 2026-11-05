@@ -47,7 +47,12 @@ function button(label: string, primary: boolean, onClick: () => void) {
 	return b;
 }
 
-export function createUsers(app: App, showToolbar: (ms: number) => void) {
+export function createUsers(
+	app: App,
+	showToolbar: (ms: number) => void,
+	/** Control just came to this viewer. */
+	onGainControl: () => void
+) {
 	const btn = el<HTMLButtonElement>('users-btn');
 	const count = el('users-count');
 	const drop = el('users');
@@ -164,7 +169,9 @@ export function createUsers(app: App, showToolbar: (ms: number) => void) {
 	function onUsers(m: Users) {
 		const prev = state;
 		state = m;
+		const had = app.inControl;
 		app.inControl = mine();
+		if (!had && app.inControl) onGainControl();
 		// Someone joining or leaving brings the toolbar up for a moment.
 		if (multi() && prev?.users.length !== m.users.length) showToolbar(2500);
 
