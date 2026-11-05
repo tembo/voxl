@@ -63,13 +63,14 @@ frame being decoded. voxl's column is its best run of each test. To reproduce, s
 - **Sunshine:** [Sunshine](https://github.com/LizardByte/Sunshine) 2025.628 streaming to
   Moonlight ([moonlight-embedded](https://github.com/moonlight-stream/moonlight-embedded)
   2.7, patched to hand frames to the benchmark client). Sunshine is built around GPU
-  encoders; without a GPU it uses x264. **Sunshine** runs its defaults (`superfast` on 2
-  threads) at Moonlight's default 40 Mbps; **Sunshine, tuned** uses `ultrafast` on 4
-  threads at 30 Mbps, like voxl (8 or 16 threads did no better). Neither reaches 60 FPS
-  on this VM, and it keeps working while the screen is still (its idle CPU). Moonlight
-  doesn't adapt its bitrate, so on slow links it's set to 80% of the link. Its CPU was
-  measured in a later session, where voxl used 1.74, 1.65 and 1.99 cores on the same
-  workloads.
+  capture and encoding; without a GPU it falls back to copying the X11 screen and x264,
+  so these numbers show it on a GPU-less VM like the other tests, not on the gaming PC
+  it's made for. **Sunshine** runs its defaults (`superfast` on 2 threads) at Moonlight's
+  default 40 Mbps; **Sunshine, tuned** uses `ultrafast` on 4 threads at 30 Mbps, like
+  voxl (8 or 16 threads did no better). Neither reaches 60 FPS on this VM, and it keeps
+  working while the screen is still (its idle CPU). Moonlight doesn't adapt its bitrate,
+  so on slow links it's set to 80% of the link. Its CPU was measured in a later session,
+  where voxl used 1.74, 1.65 and 1.99 cores on the same workloads.
 - **noVNC:** x11vnc and noVNC as [E2B Desktop](https://github.com/e2b-dev/desktop)
   and Daytona ship them (`-forever -wait 50 -shared`, Tight encoding). x11vnc polls the
   screen, which caps it at 6–8 FPS.
@@ -78,7 +79,8 @@ frame being decoded. voxl's column is its best run of each test. To reproduce, s
   The workloads run inside the sandbox, sharing its CPU, and slow links are added on top
   of that internet path.
 - **Links:** a bottleneck with a deep queue: a TCP proxy for the WebSocket servers, and
-  `tc netem` for Neko's WebRTC media and Sunshine's video (UDP).
+  `tc netem` for Neko's WebRTC media and Sunshine's video (UDP). None of them drop
+  packets, where UDP with error correction would have the edge.
 
 ## Usage
 
