@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct VideoConfig {
+    #[cfg(target_os = "linux")]
+    pub wayland: Option<crate::wayland::Config>,
     pub display: Option<String>,
     pub fps: u32,
     pub preset: String,
@@ -116,6 +118,9 @@ pub fn spawn(
 }
 
 fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
+    #[cfg(target_os = "linux")]
+    let cap = Capturer::new(cfg.display.as_deref(), cfg.wayland.as_ref())?;
+    #[cfg(not(target_os = "linux"))]
     let cap = Capturer::new(cfg.display.as_deref())?;
     let (w, h) = (cap.width, cap.height);
     hub.width.store(w, Ordering::Relaxed);

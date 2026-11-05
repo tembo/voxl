@@ -1,0 +1,602 @@
+[
+  {
+    "backend": "wayland",
+    "mode": "idle",
+    "trial": 1,
+    "unattended": {
+      "seconds": 4.001480066000113,
+      "cpu_percent": [
+        0.0,
+        0.0,
+        2.75
+      ],
+      "encoded": 0,
+      "damage_events": 0
+    },
+    "streaming": {
+      "seconds": 11.991,
+      "unique_fps": 0.0,
+      "latency_ms": {
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "decode_ms_p50": null,
+      "cpu_percent": [
+        0.17,
+        0.0,
+        2.75
+      ],
+      "server_plus_compositor_cpu_percent": 0.17,
+      "mbps": 0.0,
+      "stats_delta": {
+        "bytes": 0,
+        "captured": 0,
+        "convert_us_total": 0,
+        "damage_events": 0,
+        "damage_wait_us_total": 0,
+        "encode_us_total": 0,
+        "encoded": 0,
+        "flow_blocked": 0,
+        "grab_us_total": 0,
+        "keyframes": 0,
+        "paintovers": 0,
+        "refines": 0,
+        "send_lat_us_total": 0,
+        "target_kbps": 0
+      },
+      "convert_ms_per_frame": 0.0,
+      "encode_ms_per_frame": 0.0
+    }
+  },
+  {
+    "backend": "x11",
+    "mode": "idle",
+    "trial": 1,
+    "unattended": {
+      "seconds": 4.001574539999638,
+      "cpu_percent": [
+        0.0,
+        0.0,
+        2.5
+      ],
+      "encoded": 0,
+      "damage_events": 0
+    },
+    "streaming": {
+      "seconds": 11.991,
+      "unique_fps": 0.0,
+      "latency_ms": {
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "decode_ms_p50": null,
+      "cpu_percent": [
+        0.08,
+        0.0,
+        2.67
+      ],
+      "server_plus_compositor_cpu_percent": 0.08,
+      "mbps": 0.0,
+      "stats_delta": {
+        "bytes": 0,
+        "captured": 0,
+        "convert_us_total": 0,
+        "damage_events": 0,
+        "damage_wait_us_total": 0,
+        "encode_us_total": 0,
+        "encoded": 0,
+        "flow_blocked": 0,
+        "grab_us_total": 0,
+        "keyframes": 0,
+        "paintovers": 0,
+        "refines": 0,
+        "send_lat_us_total": 0,
+        "target_kbps": 0
+      },
+      "convert_ms_per_frame": 0.0,
+      "encode_ms_per_frame": 0.0
+    }
+  },
+  {
+    "backend": "wayland",
+    "mode": "scroll",
+    "trial": 1,
+    "unattended": {
+      "seconds": 4.001804686000469,
+      "cpu_percent": [
+        0.75,
+        20.99,
+        12.24
+      ],
+      "encoded": 0,
+      "damage_events": 225
+    },
+    "streaming": {
+      "seconds": 12.003,
+      "unique_fps": 54.9,
+      "latency_ms": {
+        "p50": 32,
+        "p95": 47,
+        "p99": 55
+      },
+      "decode_ms_p50": 3.22,
+      "cpu_percent": [
+        91.39,
+        23.16,
+        13.58
+      ],
+      "server_plus_compositor_cpu_percent": 114.55,
+      "mbps": 2.415,
+      "stats_delta": {
+        "bytes": 3612300,
+        "captured": 658,
+        "convert_us_total": 835585,
+        "damage_events": 658,
+        "damage_wait_us_total": 62787,
+        "encode_us_total": 8671876,
+        "encoded": 657,
+        "flow_blocked": 0,
+        "grab_us_total": 15767,
+        "keyframes": 0,
+        "paintovers": 0,
+        "refines": 0,
+        "send_lat_us_total": 10442807,
+        "target_kbps": 0
+      },
+      "convert_ms_per_frame": 1.272,
+      "encode_ms_per_frame": 13.199
+    }
+  },
+  {
+    "backend": "x11",
+    "mode": "scroll",
+    "trial": 1,
+    "unattended": {
+      "seconds": 4.0041626959991845,
+      "cpu_percent": [
+        0.75,
+        11.99,
+        12.99
+      ],
+      "encoded": 0,
+      "damage_events": 240
+    },
+    "streaming": {
+      "seconds": 11.99,
+      "unique_fps": 59.72,
+      "latency_ms": {
+        "p50": 20,
+        "p95": 36,
+        "p99": 53
+      },
+      "decode_ms_p50": 3.08,
+      "cpu_percent": [
+        96.91,
+        14.76,
+        12.93
+      ],
+      "server_plus_compositor_cpu_percent": 111.67,
+      "mbps": 2.499,
+      "stats_delta": {
+        "bytes": 3742158,
+        "captured": 714,
+        "convert_us_total": 887410,
+        "damage_events": 717,
+        "damage_wait_us_total": 285739,
+        "encode_us_total": 9154548,
+        "encoded": 715,
+        "flow_blocked": 0,
+        "grab_us_total": 19825,
+        "keyframes": 0,
+        "paintovers": 0,
+        "refines": 0,
+        "send_lat_us_total": 11627756,
+        "target_kbps": 0
+      },
+      "convert_ms_per_frame": 1.241,
+      "encode_ms_per_frame": 12.804
+    }
+  },
+  {
+    "backend": "wayland",
+    "mode": "sparse",
+    "trial": 1,
+    "unattended": {
+      "seconds": 4.001618555999812,
+      "cpu_percent": [
+        1.0,
+        13.24,
+        0.75
+      ],
+      "encoded": 0,
+      "damage_events": 241
+    },
+    "streaming": {
+      "seconds": 11.99,
+      "unique_fps": 60.05,
+      "latency_ms": {
+        "p50": 13,
+        "p95": 20,
+        "p99": 25
+      },
+      "decode_ms_p50": 2.85,
+      "cpu_percent": [
+        51.21,
+        12.26,
+        0.75
+      ],
+      "server_plus_compositor_cpu_percent": 63.47,
+      "mbps": 0.144,
+      "stats_delta": {
+        "bytes": 212906,
+        "captured": 717,
+        "convert_us_total": 46721,
+        "damage_events": 717,
+        "damage_wait_us_total": 41832,
+        "encode_us_total": 5718816,
+        "encoded": 717,
+        "flow_blocked": 0,
+        "grab_us_total": 9290,
+        "keyframes": 0,
+        "paintovers": 0,
+        "refines": 0,
+        "send_lat_us_total": 5892056,
+        "target_kbps": 0
+      },
+      "convert_ms_per_frame": 0.065,
+      "encode_ms_per_frame": 7.976
+    }
+  },
+  {
+    "backend": "x11",
+    "mode": "sparse",
+    "trial": 1,
+    "unattended": {
+      "seconds": 4.001185006000014,
+      "cpu_percent": [
+        0.5,
+        1.0,
+        0.75
+      ],
+      "encoded": 0,
+      "damage_events": 241
+    },
+    "streaming": {
+      "seconds": 12.003,
+      "unique_fps": 59.9,
+      "latency_ms": {
+        "p50": 13,
+        "p95": 18,
+        "p99": 22
+      },
+      "decode_ms_p50": 3.02,
+      "cpu_percent": [
+        55.48,
+        0.92,
+        1.0
+      ],
+      "server_plus_compositor_cpu_percent": 56.4,
+      "mbps": 0.137,
+      "stats_delta": {
+        "bytes": 205573,
+        "captured": 719,
+        "convert_us_total": 55090,
+        "damage_events": 719,
+        "damage_wait_us_total": 8982,
+        "encode_us_total": 6224747,
+        "encoded": 718,
+        "flow_blocked": 0,
+        "grab_us_total": 10933,
+        "keyframes": 0,
+        "paintovers": 0,
+        "refines": 0,
+        "send_lat_us_total": 6380685,
+        "target_kbps": 0
+      },
+      "convert_ms_per_frame": 0.077,
+      "encode_ms_per_frame": 8.67
+    }
+  },
+  {
+    "backend": "wayland",
+    "mode": "idle",
+    "trial": 2,
+    "unattended": {
+      "seconds": 4.001472806000493,
+      "cpu_percent": [
+        0.0,
+        0.0,
+        3.0
+      ],
+      "encoded": 0,
+      "damage_events": 0
+    },
+    "streaming": {
+      "seconds": 11.993,
+      "unique_fps": 0.0,
+      "latency_ms": {
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "decode_ms_p50": null,
+      "cpu_percent": [
+        0.17,
+        0.0,
+        3.0
+      ],
+      "server_plus_compositor_cpu_percent": 0.17,
+      "mbps": 0.0,
+      "stats_delta": {
+        "bytes": 0,
+        "captured": 0,
+        "convert_us_total": 0,
+        "damage_events": 0,
+        "damage_wait_us_total": 0,
+        "encode_us_total": 0,
+        "encoded": 0,
+        "flow_blocked": 0,
+        "grab_us_total": 0,
+        "keyframes": 0,
+        "paintovers": 0,
+        "refines": 0,
+        "send_lat_us_total": 0,
+        "target_kbps": 0
+      },
+      "convert_ms_per_frame": 0.0,
+      "encode_ms_per_frame": 0.0
+    }
+  },
+  {
+    "backend": "x11",
+    "mode": "idle",
+    "trial": 2,
+    "unattended": {
+      "seconds": 4.0021840950003025,
+      "cpu_percent": [
+        0.0,
+        0.0,
+        2.75
+      ],
+      "encoded": 0,
+      "damage_events": 0
+    },
+    "streaming": {
+      "seconds": 11.99,
+      "unique_fps": 0.0,
+      "latency_ms": {
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "decode_ms_p50": null,
+      "cpu_percent": [
+        0.17,
+        0.0,
+        2.59
+      ],
+      "server_plus_compositor_cpu_percent": 0.17,
+      "mbps": 0.0,
+      "stats_delta": {
+        "bytes": 0,
+        "captured": 0,
+        "convert_us_total": 0,
+        "damage_events": 0,
+        "damage_wait_us_total": 0,
+        "encode_us_total": 0,
+        "encoded": 0,
+        "flow_blocked": 0,
+        "grab_us_total": 0,
+        "keyframes": 0,
+        "paintovers": 0,
+        "refines": 0,
+        "send_lat_us_total": 0,
+        "target_kbps": 0
+      },
+      "convert_ms_per_frame": 0.0,
+      "encode_ms_per_frame": 0.0
+    }
+  },
+  {
+    "backend": "wayland",
+    "mode": "scroll",
+    "trial": 2,
+    "unattended": {
+      "seconds": 4.001182996999887,
+      "cpu_percent": [
+        1.0,
+        20.74,
+        11.5
+      ],
+      "encoded": 0,
+      "damage_events": 224
+    },
+    "streaming": {
+      "seconds": 11.997,
+      "unique_fps": 54.93,
+      "latency_ms": {
+        "p50": 31,
+        "p95": 47,
+        "p99": 57
+      },
+      "decode_ms_p50": 3.21,
+      "cpu_percent": [
+        90.19,
+        22.92,
+        12.84
+      ],
+      "server_plus_compositor_cpu_percent": 113.11,
+      "mbps": 2.464,
+      "stats_delta": {
+        "bytes": 3694672,
+        "captured": 658,
+        "convert_us_total": 781572,
+        "damage_events": 658,
+        "damage_wait_us_total": 74512,
+        "encode_us_total": 8605926,
+        "encoded": 658,
+        "flow_blocked": 0,
+        "grab_us_total": 17911,
+        "keyframes": 0,
+        "paintovers": 0,
+        "refines": 0,
+        "send_lat_us_total": 10262669,
+        "target_kbps": 0
+      },
+      "convert_ms_per_frame": 1.188,
+      "encode_ms_per_frame": 13.079
+    }
+  },
+  {
+    "backend": "x11",
+    "mode": "scroll",
+    "trial": 2,
+    "unattended": {
+      "seconds": 4.001637083000787,
+      "cpu_percent": [
+        0.75,
+        12.24,
+        12.24
+      ],
+      "encoded": 0,
+      "damage_events": 240
+    },
+    "streaming": {
+      "seconds": 11.991,
+      "unique_fps": 59.88,
+      "latency_ms": {
+        "p50": 19,
+        "p95": 36,
+        "p99": 46
+      },
+      "decode_ms_p50": 3.11,
+      "cpu_percent": [
+        96.4,
+        14.43,
+        11.76
+      ],
+      "server_plus_compositor_cpu_percent": 110.83,
+      "mbps": 2.488,
+      "stats_delta": {
+        "bytes": 3710529,
+        "captured": 718,
+        "convert_us_total": 852732,
+        "damage_events": 719,
+        "damage_wait_us_total": 184585,
+        "encode_us_total": 9166015,
+        "encoded": 718,
+        "flow_blocked": 0,
+        "grab_us_total": 21874,
+        "keyframes": 0,
+        "paintovers": 0,
+        "refines": 0,
+        "send_lat_us_total": 11572667,
+        "target_kbps": 0
+      },
+      "convert_ms_per_frame": 1.188,
+      "encode_ms_per_frame": 12.766
+    }
+  },
+  {
+    "backend": "wayland",
+    "mode": "sparse",
+    "trial": 2,
+    "unattended": {
+      "seconds": 4.001688254000328,
+      "cpu_percent": [
+        1.0,
+        12.74,
+        0.75
+      ],
+      "encoded": 0,
+      "damage_events": 240
+    },
+    "streaming": {
+      "seconds": 11.999,
+      "unique_fps": 59.92,
+      "latency_ms": {
+        "p50": 14,
+        "p95": 22,
+        "p99": 29
+      },
+      "decode_ms_p50": 3.05,
+      "cpu_percent": [
+        54.09,
+        13.67,
+        0.75
+      ],
+      "server_plus_compositor_cpu_percent": 67.76,
+      "mbps": 0.149,
+      "stats_delta": {
+        "bytes": 223444,
+        "captured": 719,
+        "convert_us_total": 49297,
+        "damage_events": 719,
+        "damage_wait_us_total": 89150,
+        "encode_us_total": 6023394,
+        "encoded": 718,
+        "flow_blocked": 0,
+        "grab_us_total": 9703,
+        "keyframes": 0,
+        "paintovers": 0,
+        "refines": 0,
+        "send_lat_us_total": 6317589,
+        "target_kbps": 0
+      },
+      "convert_ms_per_frame": 0.069,
+      "encode_ms_per_frame": 8.389
+    }
+  },
+  {
+    "backend": "x11",
+    "mode": "sparse",
+    "trial": 2,
+    "unattended": {
+      "seconds": 4.00152186699961,
+      "cpu_percent": [
+        0.5,
+        1.0,
+        1.0
+      ],
+      "encoded": 0,
+      "damage_events": 241
+    },
+    "streaming": {
+      "seconds": 11.995,
+      "unique_fps": 59.94,
+      "latency_ms": {
+        "p50": 13,
+        "p95": 18,
+        "p99": 21
+      },
+      "decode_ms_p50": 3.0,
+      "cpu_percent": [
+        56.19,
+        0.83,
+        0.83
+      ],
+      "server_plus_compositor_cpu_percent": 57.02,
+      "mbps": 0.157,
+      "stats_delta": {
+        "bytes": 234737,
+        "captured": 717,
+        "convert_us_total": 45557,
+        "damage_events": 717,
+        "damage_wait_us_total": 7155,
+        "encode_us_total": 6368372,
+        "encoded": 717,
+        "flow_blocked": 0,
+        "grab_us_total": 8759,
+        "keyframes": 0,
+        "paintovers": 0,
+        "refines": 0,
+        "send_lat_us_total": 6502067,
+        "target_kbps": 0
+      },
+      "convert_ms_per_frame": 0.064,
+      "encode_ms_per_frame": 8.882
+    }
+  }
+]
