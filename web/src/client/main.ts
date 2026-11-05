@@ -104,10 +104,18 @@ function main() {
 		settings.sameScreen();
 		holdNative();
 	});
-	/** Auto on the host's own screen: keep the host's resolution (a no-op if it has it). */
+	/** Auto on the host's own screen is in effect (and native was asked for). */
+	let holding = false;
+	/**
+	 * Auto on the host's own screen: keep the host's resolution. Sent once, on
+	 * entering that state, and as a recheck: the server follows it only if no other
+	 * viewer's window is being followed, so a remote viewer on Auto keeps the desktop.
+	 */
 	function holdNative() {
+		const hold = autoResize && resize.sameScreen;
 		const [w, h] = native.split('x').map(Number);
-		if (autoResize && w && h) app.send(cmd.resize(w, h));
+		if (hold && !holding && w && h) app.send(cmd.resize(w, h, true));
+		holding = hold;
 	}
 	/**
 	 * The desktop follows this window (Auto resolution). Until the settings say, as

@@ -252,8 +252,8 @@ pub struct Hub {
     pub last_clipboard: Mutex<Option<String>>,
     /// Desktop size a client asked for (dynamic resolution), applied by the video thread.
     pub resize_req: Mutex<Option<(u32, u32)>>,
-    /// The size the desktop is changing to (or last changed to): while a change is
-    /// under way, `width` and `height` still say the old size.
+    /// The size the desktop is changing to: while a change is under way, `width` and
+    /// `height` still say the old size. None once it got there (`resize_done`).
     pub resize_target: Mutex<Option<(u32, u32)>>,
     /// Largest desktop size (Some when dynamic resolution is on).
     pub resize_max: Mutex<Option<(u32, u32)>>,
@@ -333,6 +333,16 @@ impl Hub {
             *target = Some(size);
             *self.resize_req.lock() = Some(size);
             self.wake();
+        }
+    }
+
+    /// The video thread rebuilt the capture: `width` and `height` are the desktop's
+    /// size again, so later requests compare with them (the host may change its
+    /// resolution itself), unless a newer request is still waiting.
+    pub fn resize_done(&self) {
+        let mut target = self.resize_target.lock();
+        if self.resize_req.lock().is_none() {
+            *target = None;
         }
     }
 

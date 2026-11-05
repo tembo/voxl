@@ -119,8 +119,6 @@ pub fn spawn(
             if let (Some(s), Some((w, h))) = (screen.as_mut(), req) {
                 if let Err(e) = s.resize(w, h) {
                     log::warn!("resize to {w}x{h} failed: {e}");
-                    // It stays as it was: compare the next request with that.
-                    *hub.resize_target.lock() = None;
                 }
             }
             // The settings panel may have changed the configuration (see capture_loop).
@@ -134,6 +132,8 @@ pub fn spawn(
                     std::process::exit(1);
                 }
             };
+            // The capture has the desktop's real size now, resized or not.
+            hub.resize_done();
         })
         .unwrap();
     Ok(())

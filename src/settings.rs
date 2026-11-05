@@ -545,6 +545,36 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_resize_stops_overriding_the_desktops_size() {
+        let s = settings(true, 0);
+        s.hub
+            .hello_extra
+            .lock()
+            .insert("resize".into(), json!({ "scale": 1.5 }));
+        *s.hub.resize_sizes.lock() = vec![(1280, 720), (1920, 1080)];
+        let at = |w, h| {
+            s.hub.width.store(w, Ordering::Relaxed);
+            s.hub.height.store(h, Ordering::Relaxed);
+        };
+        at(1920, 1080);
+        // The video thread takes the request, resizes and rebuilds the capture.
+        s.set("resolution", "1280x720").unwrap();
+        s.hub.resize_req.lock().take();
+        at(1280, 720);
+        s.hub.resize_done();
+        // The host then changes its resolution itself; asking for 1280x720 again
+        // must go through rather than match a stale target.
+        at(1920, 1080);
+        s.set("resolution", "1280x720").unwrap();
+        assert_eq!(*s.hub.resize_req.lock(), Some((1280, 720)));
+        // A rebuild finishing while a newer request waits keeps that request's target.
+        s.hub.resize_done();
+        s.set("resolution", "1280x720").unwrap();
+        assert_eq!(*s.hub.resize_req.lock(), Some((1280, 720)));
+        assert_eq!(*s.hub.resize_target.lock(), Some((1280, 720)));
+    }
+
+    #[test]
     fn message_lists_values_and_limits() {
         let s = settings(true, 0);
         s.set("audio_bitrate", "64000").unwrap();
