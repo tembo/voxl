@@ -4,6 +4,7 @@
 	"description": "Formatting, linting and type-checking for the web client (the build itself needs no npm packages).",
 	"scripts": {
 		"fmt": "oxfmt .",
+		"test:keyboard": "node --test web/tests/keyboard.test.cjs",
 		"fmt:check": "oxfmt --check .",
 		"lint": "oxlint",
 		"typecheck": "tsc -p web && tsc -p web/tsconfig.worker.json && tsc -p web/tsconfig.worklet.json",
