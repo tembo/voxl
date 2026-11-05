@@ -58,7 +58,9 @@ const st = {
 
 // Firefox throws if getContext('2d') is called twice on one canvas; reuse it.
 // Fall back to default attrs if the ones below are rejected.
-function get2dContext(c: OffscreenCanvas): OffscreenCanvasRenderingContext2D | null {
+function get2dContext(
+	c: OffscreenCanvas
+): OffscreenCanvasRenderingContext2D | null {
 	if (ctx) return ctx;
 	try {
 		return c.getContext('2d', { alpha: false, desynchronized: true });
