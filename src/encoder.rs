@@ -200,12 +200,10 @@ impl Encoder {
                     pic_out.i_pts
                 );
             }
-            // f_crf_avg is the CRF plus what VBV added to the QP, so the rest of the gap
-            // between the frame's QP and it is what the complexity estimate added.
-            let frame_qp = pic_out.i_qpplus1 - 1;
             Ok(Encoded {
                 keyframe: pic_out.b_keyframe != 0,
-                complexity_qp: (frame_qp as f64 - pic_out.prop.f_crf_avg) as f32,
+                qp: (pic_out.i_qpplus1 - 1) as f32,
+                crf_avg: pic_out.prop.f_crf_avg as f32,
             })
         }
     }
@@ -214,10 +212,12 @@ impl Encoder {
 /// What x264 made of one picture.
 pub struct Encoded {
     pub keyframe: bool,
-    /// QP steps x264's rate control moved this frame from the CRF it was given for how
-    /// complex it judged the frame (negative for simple ones). What VBV added to keep
-    /// under the bitrate cap is not included.
-    pub complexity_qp: f32,
+    /// The QP x264 started the frame at, rounded. VBV may have raised rows of the frame
+    /// above it; x264 doesn't report the average.
+    pub qp: f32,
+    /// x264's "average effective CRF": the CRF the frame was encoded with plus what VBV
+    /// added to its average QP, before the frame and within it.
+    pub crf_avg: f32,
 }
 
 impl Drop for Encoder {

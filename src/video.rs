@@ -872,13 +872,15 @@ impl ThreadGovernor {
 /// pixels and the QP lands 7-10 steps above `--crf`, although the real search codes the
 /// move as cheap motion vectors (a few KB a frame). Big moves went blocky, with nothing
 /// saved that the bitrate cap needed. Motion frames get a CRF lowered by what the estimate
-/// added to the last one, so they stay at the configured quality. The lower QPs x264 picks
-/// for small updates (typing) and paint-overs are kept, and VBV still raises the QP when
-/// the link is short.
+/// adds, so they stay at the configured quality. The lower QPs x264 picks for small
+/// updates (typing) and paint-overs are kept, and VBV still raises the QP when the link
+/// is short.
 #[derive(Default)]
 struct MotionQuality {
-    /// QP steps the complexity estimate added to the last motion frame (none below 0).
-    excess: f32,
+    /// QP steps x264's complexity estimate adds to a motion frame (negative for simple
+    /// ones). The estimate is blurred over the last few frames, so the last frame's is a
+    /// good guess at the next one's.
+    complexity: f32,
 }
 
 /// Most QP steps taken off a motion frame's CRF.
@@ -888,13 +890,28 @@ impl MotionQuality {
     /// The CRF to encode a motion frame with, for the configured `crf`.
     fn crf(&self, crf: f32) -> f32 {
         // Whole steps: x264 is reconfigured whenever the CRF changes.
-        (crf - self.excess.round()).max(0.0)
+        let excess = self.complexity.clamp(0.0, MAX_MOTION_EXCESS).round();
+        (crf - excess).max(0.0)
     }
 
-    /// Notes what x264 made of a motion frame. Its complexity estimate is blurred over
-    /// the last few frames, so this one's is a good guess at the next one's.
-    fn observe(&mut self, e: &Encoded) {
-        self.excess = e.complexity_qp.clamp(0.0, MAX_MOTION_EXCESS);
+    /// Notes what x264 made of a motion frame it was given `crf` for.
+    ///
+    /// x264 starts from QP0 = `crf` + complexity. VBV may raise that before the frame
+    /// (to `e.qp`) and row by row within it (to an average x264 doesn't report), never
+    /// below QP0 or below the frame's starting QP, and `e.crf_avg` is `crf` + average -
+    /// QP0. So the complexity lies between `e.qp - e.crf_avg` (no row raised) and
+    /// `e.qp - crf` (nothing raised before the frame), give or take the rounding of
+    /// `e.qp`: one value when VBV stayed out, a range when it didn't. Then the last
+    /// estimate is kept while it fits, else moved to the nearest end, so a frame VBV
+    /// squeezed doesn't throw away what earlier frames showed.
+    fn observe(&mut self, crf: f32, e: &Encoded) {
+        let lo = e.qp - 0.5 - e.crf_avg;
+        let hi = e.qp + 0.5 - crf;
+        self.complexity = if hi - lo < 1.25 {
+            (lo + hi) / 2.0
+        } else {
+            self.complexity.max(lo).min(hi)
+        };
     }
 }
 
@@ -1008,7 +1025,7 @@ fn stripe_worker(
         let res = match r {
             Ok(e) => {
                 if is_motion {
-                    motion.observe(&e);
+                    motion.observe(crf, &e);
                 }
                 (out.len() > HDR).then_some((e.keyframe, out))
             }
@@ -1283,9 +1300,18 @@ mod tests {
         }
     }
 
-    /// Mean QP of the drag frames once x264's rate control has settled, encoded the way
-    /// a stripe worker does (without a bitrate cap), with or without MotionQuality.
-    fn drag_qp(correct: bool, crf: f32) -> f32 {
+    /// One frame of `drag`: the CRF it was given, what x264 made of it and MotionQuality's
+    /// estimate after it.
+    struct DragFrame {
+        crf: f32,
+        e: Encoded,
+        estimate: f32,
+    }
+
+    /// Encodes the drag the way a stripe worker does, under a bitrate cap of `max_kbps`
+    /// (0: none), with or without MotionQuality. Returns the frames after the first ten,
+    /// once x264's rate control has settled.
+    fn drag(correct: bool, crf: f32, max_kbps: u32) -> Vec<DragFrame> {
         let (w, h) = (1280usize, 768usize);
         let mut enc = Encoder::new(&EncoderConfig {
             width: w as u32,
@@ -1294,19 +1320,19 @@ mod tests {
             preset: "ultrafast".into(),
             threads: 1,
             crf,
-            max_kbps: 0,
+            max_kbps,
         })
         .unwrap();
         let (u, v) = (vec![128u8; w * h / 4], vec![128u8; w * h / 4]);
         let mut y = vec![0u8; w * h];
         let mut motion = MotionQuality::default();
         let mut applied = crf;
-        let mut qps = Vec::new();
+        let mut frames = Vec::new();
         for f in 0..40 {
             drag_frame(&mut y, w, h, f);
             let c = if correct { motion.crf(crf) } else { crf };
             if c != applied {
-                enc.set_rate(c, 0);
+                enc.set_rate(c, max_kbps);
                 applied = c;
             }
             let planes = Planes {
@@ -1321,21 +1347,29 @@ mod tests {
                 .encode(&planes, f as i64 * 16, f == 0, None, None, &mut out)
                 .unwrap();
             if f > 0 {
-                motion.observe(&e);
+                motion.observe(c, &e);
             }
             if f >= 10 {
-                // Without VBV the frame's QP is the CRF it got plus the complexity part.
-                qps.push(c + e.complexity_qp);
+                frames.push(DragFrame {
+                    crf: c,
+                    e,
+                    estimate: motion.complexity,
+                });
             }
         }
-        qps.iter().sum::<f32>() / qps.len() as f32
+        frames
+    }
+
+    fn mean(v: impl Iterator<Item = f32>) -> f32 {
+        let (sum, n) = v.fold((0.0, 0), |(s, n), x| (s + x, n + 1));
+        sum / n as f32
     }
 
     #[test]
     fn dragged_window_stays_at_crf() {
         let crf = 24.0;
-        let plain = drag_qp(false, crf);
-        let corrected = drag_qp(true, crf);
+        let plain = mean(drag(false, crf, 0).iter().map(|f| f.e.qp));
+        let corrected = mean(drag(true, crf, 0).iter().map(|f| f.e.qp));
         // The scene has to show the problem for the check below to mean anything.
         assert!(
             plain > crf + 3.0,
@@ -1344,6 +1378,30 @@ mod tests {
         assert!(
             corrected < crf + 1.0,
             "drag frames at QP {corrected:.1} for CRF {crf}"
+        );
+    }
+
+    /// Under a bitrate cap VBV raises rows within a frame, which the frame's starting QP
+    /// doesn't show; the estimate must not take that for a simple frame and drop the
+    /// correction.
+    #[test]
+    fn capped_drag_keeps_its_estimate() {
+        let crf = 24.0;
+        // Without a cap the complexity is exactly what x264 added to the QP.
+        let complexity = mean(drag(false, crf, 0).iter().map(|f| f.e.qp - f.crf));
+        let capped = drag(true, crf, 20_000);
+        let start_qp_says = capped
+            .iter()
+            .map(|f| f.e.qp - f.e.crf_avg)
+            .fold(f32::MAX, f32::min);
+        assert!(
+            start_qp_says < complexity - 4.0,
+            "VBV never raised rows enough to matter (lowest {start_qp_says:.1}, complexity {complexity:.1})"
+        );
+        let lowest = capped.iter().map(|f| f.estimate).fold(f32::MAX, f32::min);
+        assert!(
+            lowest > complexity - 3.0,
+            "estimate fell to {lowest:.1} under the cap, complexity {complexity:.1}"
         );
     }
 }
