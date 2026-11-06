@@ -95,8 +95,8 @@ impl Encoder {
             param.rc.b_mb_tree = 0;
             if cfg.max_kbps > 0 {
                 param.rc.i_vbv_max_bitrate = cfg.max_kbps as i32;
-                // ~2 frames of buffer keeps single-frame spikes bounded.
-                param.rc.i_vbv_buffer_size = (cfg.max_kbps / cfg.fps.max(1) * 5 / 4) as i32;
+                // ~1.25 frames of buffer keeps single-frame spikes bounded.
+                param.rc.i_vbv_buffer_size = vbv_buffer_kbit(cfg.max_kbps, cfg.fps) as i32;
             }
             // sRGB content (BT.709 primaries, sRGB transfer) in BT.601 limited range,
             // matching libyuv ARGBToI420 and the macOS NV12 capture.
@@ -131,7 +131,7 @@ impl Encoder {
         self.set_rate_buf(
             crf,
             max_kbps,
-            max_kbps / self.param.i_fps_num.max(1) * 5 / 4,
+            vbv_buffer_kbit(max_kbps, self.param.i_fps_num),
         );
     }
 
@@ -148,7 +148,7 @@ impl Encoder {
     }
 
     /// Encode one picture. `force_idr` requests a keyframe, `qp` (if set) forces the frame QP.
-    /// Appends Annex-B output to `out` and returns whether it is a keyframe.
+    /// Appends Annex-B output to `out`.
     /// `mb_info` (one byte per macroblock, X264_MBINFO_CONSTANT for unchanged ones) lets
     /// x264 skip analysis of static areas; it is consumed before this returns.
     pub fn encode(
@@ -159,7 +159,7 @@ impl Encoder {
         qp: Option<i32>,
         mb_info: Option<&mut [u8]>,
         out: &mut Vec<u8>,
-    ) -> Result<bool, String> {
+    ) -> Result<Encoded, String> {
         unsafe {
             self.pic.img.plane[0] = p.y.as_ptr() as *mut u8;
             self.pic.img.plane[1] = p.u.as_ptr() as *mut u8;
@@ -200,9 +200,33 @@ impl Encoder {
                     pic_out.i_pts
                 );
             }
-            Ok(pic_out.b_keyframe != 0)
+            Ok(Encoded {
+                keyframe: pic_out.b_keyframe != 0,
+                // Undocumented as an output, but x264 has filled it in for years and
+                // FFmpeg's libx264 wrapper reads it the same way.
+                qp: (pic_out.i_qpplus1 > 0).then(|| (pic_out.i_qpplus1 - 1) as f32),
+                crf_avg: pic_out.prop.f_crf_avg as f32,
+            })
         }
     }
+}
+
+/// A VBV buffer of 1.25 frames at `max_kbps`, rounded up: x264 treats a buffer under
+/// 1.1 frames as a single-frame VBV, which may lower rows of a frame below its starting
+/// QP (video.rs's MotionQuality relies on it not doing that).
+fn vbv_buffer_kbit(max_kbps: u32, fps: u32) -> u32 {
+    (max_kbps * 5).div_ceil(4 * fps.max(1))
+}
+
+/// What x264 made of one picture.
+pub struct Encoded {
+    pub keyframe: bool,
+    /// The QP x264 started the frame at, rounded (None if x264 didn't say). VBV may
+    /// have raised rows of the frame above it; x264 doesn't report the average.
+    pub qp: Option<f32>,
+    /// x264's "average effective CRF": the CRF the frame was encoded with plus what VBV
+    /// added to its average QP, before the frame and within it.
+    pub crf_avg: f32,
 }
 
 impl Drop for Encoder {

@@ -56,6 +56,23 @@ const st = {
 	dropped: 0,
 };
 
+// Firefox throws if getContext('2d') is called twice on one canvas; reuse it.
+// Fall back to default attrs if the ones below are rejected.
+function get2dContext(
+	c: OffscreenCanvas
+): OffscreenCanvasRenderingContext2D | null {
+	if (ctx) return ctx;
+	try {
+		return c.getContext('2d', { alpha: false, desynchronized: true });
+	} catch {
+		try {
+			return c.getContext('2d');
+		} catch {
+			return null;
+		}
+	}
+}
+
 function send(s: string) {
 	if (ws && ws.readyState === WebSocket.OPEN) ws.send(s);
 }
@@ -119,7 +136,7 @@ function onText(s: string) {
 			canvas.width = m.w;
 			canvas.height = m.h;
 		}
-		ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+		ctx = get2dContext(canvas);
 		layout = m.stripes && m.stripes.length ? m.stripes : [[0, m.h]];
 		resetDecoder();
 	}
@@ -359,7 +376,7 @@ self.addEventListener('message', (e: MessageEvent<ToWorker>) => {
 			canvas = m.canvas;
 			url = m.url;
 			presentToMain = m.presentToMain;
-			ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+			ctx = get2dContext(canvas);
 			connect();
 			break;
 		case 'send':
