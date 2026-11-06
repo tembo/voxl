@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -252,14 +252,33 @@ pub struct Hub {
     pub last_clipboard: Mutex<Option<String>>,
     /// Desktop size a client asked for (dynamic resolution), applied by the video thread.
     pub resize_req: Mutex<Option<(u32, u32)>>,
+    /// The size the desktop is changing to: while a change is under way, `width` and
+    /// `height` still say the old size. None once it got there (`resize_done`).
+    pub resize_target: Mutex<Option<(u32, u32)>>,
     /// Largest desktop size (Some when dynamic resolution is on).
     pub resize_max: Mutex<Option<(u32, u32)>>,
+    /// The viewer whose window the desktop follows: the last to resize it other than by
+    /// a periodic recheck (0: none yet).
+    pub resize_owner: AtomicU64,
+    /// Desktop sizes the settings panel offers (with dynamic resolution).
+    pub resize_sizes: Mutex<Vec<(u32, u32)>>,
     /// Server settings sent in every `hello` besides the geometry (audio, files, ...).
     pub hello_extra: Mutex<serde_json::Map<String, serde_json::Value>>,
     /// Screenshot requests, answered by the capture thread with the current screen.
     pub snapshots: Mutex<Vec<tokio::sync::oneshot::Sender<Arc<crate::record::Snapshot>>>>,
     /// When each part of the screen last changed (`/wait`).
     pub activity: crate::wait::Activity,
+    /// The video settings in effect; the settings panel changes them (`settings.rs`).
+    pub video_cfg: Mutex<Option<crate::video::VideoConfig>>,
+    /// `video_cfg` changed: the capture loop picks it up, rebuilding if it must.
+    pub video_dirty: AtomicBool,
+    /// Auto quality's current motion CRF as f32 bits; 0 when the configured CRF holds.
+    pub auto_crf: AtomicU32,
+    /// Auto sound: the highest audio bitrate, which the rate controller lowers on slow
+    /// connections; 0 when the panel picked a fixed one.
+    pub audio_auto: AtomicI32,
+    /// Opus bitrate for desktop audio; the audio thread applies changes.
+    pub audio_bitrate: AtomicI32,
 }
 
 impl Hub {
@@ -277,11 +296,54 @@ impl Hub {
             input: Mutex::new(None),
             last_clipboard: Mutex::new(None),
             resize_req: Mutex::new(None),
+            resize_target: Mutex::new(None),
             resize_max: Mutex::new(None),
+            resize_owner: AtomicU64::new(0),
+            resize_sizes: Mutex::new(Vec::new()),
             hello_extra: Mutex::new(serde_json::Map::new()),
             snapshots: Mutex::new(Vec::new()),
             activity: Default::default(),
+            video_cfg: Mutex::new(None),
+            video_dirty: AtomicBool::new(false),
+            auto_crf: AtomicU32::new(0),
+            audio_auto: AtomicI32::new(0),
+            audio_bitrate: AtomicI32::new(0),
         })
+    }
+
+    /// A new audio bitrate if it differs from `cur` (which it then becomes), for the
+    /// audio thread to give its encoder.
+    pub fn audio_bitrate_update(&self, cur: &mut i32) -> Option<i32> {
+        let want = self.audio_bitrate.load(Ordering::Relaxed);
+        (want > 0 && want != *cur).then(|| {
+            *cur = want;
+            want
+        })
+    }
+
+    /// Asks the video thread to change the desktop to `size`, unless that is the size it
+    /// already has or is changing to.
+    pub fn request_size(&self, size: (u32, u32)) {
+        let mut target = self.resize_target.lock();
+        let now = target.unwrap_or((
+            self.width.load(Ordering::Relaxed),
+            self.height.load(Ordering::Relaxed),
+        ));
+        if size != now {
+            *target = Some(size);
+            *self.resize_req.lock() = Some(size);
+            self.wake();
+        }
+    }
+
+    /// The video thread rebuilt the capture: `width` and `height` are the desktop's
+    /// size again, so later requests compare with them (the host may change its
+    /// resolution itself), unless a newer request is still waiting.
+    pub fn resize_done(&self) {
+        let mut target = self.resize_target.lock();
+        if self.resize_req.lock().is_none() {
+            *target = None;
+        }
     }
 
     pub fn wake(&self) {
@@ -319,6 +381,9 @@ impl Hub {
 
     pub fn remove_client(&self, id: u64) {
         self.clients.lock().retain(|c| c.id != id);
+        let _ = self
+            .resize_owner
+            .compare_exchange(id, 0, Ordering::Relaxed, Ordering::Relaxed);
         self.wake();
     }
 

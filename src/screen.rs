@@ -15,6 +15,20 @@ use x11rb::rust_connection::RustConnection;
 /// Smallest desktop a client may ask for.
 pub const MIN: (u32, u32) = (640, 480);
 
+/// Common desktop sizes for the settings panel's resolution menu.
+const COMMON: &[(u32, u32)] = &[
+    (1280, 720),
+    (1366, 768),
+    (1440, 900),
+    (1600, 900),
+    (1680, 1050),
+    (1920, 1080),
+    (1920, 1200),
+    (2560, 1440),
+    (2560, 1600),
+    (3840, 2160),
+];
+
 /// A size the screen can take: within [MIN, max], width a multiple of 8 and height
 /// even (4:2:0 video), rounding down. Where the screen's maximum is below MIN (an
 /// Xvfb started at 800x450), that side stays at the maximum.
@@ -94,6 +108,19 @@ impl Screen {
 
     pub fn max(&self) -> (u32, u32) {
         self.max
+    }
+
+    /// The sizes the panel's resolution menu offers: common ones that fit. RandR
+    /// takes any size, so these are only suggestions.
+    pub fn sizes(&self) -> Vec<(u32, u32)> {
+        let mut v: Vec<_> = COMMON
+            .iter()
+            .map(|&(w, h)| self.fit(w, h))
+            .chain([self.max])
+            .collect();
+        v.sort_by_key(|s| s.0 as u64 * s.1 as u64);
+        v.dedup();
+        v
     }
 
     pub fn fit(&self, w: u32, h: u32) -> (u32, u32) {

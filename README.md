@@ -134,6 +134,7 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 | `--round-corners`                                              | `0` (off)                          | corner radius in pixels for top-level windows                                                                     |
 | `--round-windows`                                              | none                               | `title:radius,...` rounds windows with that title, docks included                                                 |
 | `--adaptive-threads`                                           | `false`                            | encode on one thread, fanning out only under sustained heavy motion                                               |
+| `--auto-quality`                                               | `true`                             | quality follows the connection, starting from `--crf`; `false` keeps `--crf` fixed                                |
 | `--stripes`                                                    | `1`                                | encode the screen as N independent horizontal streams (experimental)                                              |
 | `--scroll-px-per-notch`                                        | `180`                              | desktop pixels one wheel notch scrolls (calibrates smooth scrolling)                                              |
 | `--file-transfers`                                             | `upload,download`                  | `upload`, `download`, both, or `none`                                                                             |
@@ -145,6 +146,20 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 | `--max-upload-mb`                                              | `0` (no limit)                     | largest accepted upload                                                                                           |
 | `--max-record-seconds`                                         | `300`                              | longest recording (`/record`)                                                                                     |
 | `--convert-threads`, `--coalesce-us`                           | `4`, `0`                           | tuning                                                                                                            |
+
+The toolbar's cog changes many of these while voxl runs. Quality (Auto, or Ultra to
+Low), smoothness, sound, and with `--enable-resize` the resolution and scaling sit up
+top; bitrate, paint-over sharpening, the encoder, the upload limit and the longest
+recording sit under Advanced. A change applies to everyone watching and lasts until voxl
+restarts; the encoder settings and frame rate restart the stream with a brief pause.
+What the flags allow (clipboard directions, file transfers, the upload limit, the longest
+recording) can be narrowed there but never widened, and `--read-only` viewers can't
+change anything.
+
+Auto quality (the default) starts from `--crf` and lets the rate control move it: a step
+sharper each second while the screen moves and the stream has room, and softer at once
+when latency builds, along with the bitrate. Auto sound likewise drops the audio bitrate
+on slow links. `--auto-quality=false` keeps `--crf` fixed.
 
 ### Login
 

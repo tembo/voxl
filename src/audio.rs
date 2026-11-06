@@ -69,6 +69,8 @@ pub fn spawn(device: String, bitrate: i32, hub: Arc<Hub>) {
                 return;
             }
             opus_encoder_ctl(enc, 4002, bitrate as c_int);
+            // The settings panel can change the hub's bitrate while this runs.
+            let mut bitrate = bitrate;
             let name = c"voxl";
             let dev = CString::new(device).unwrap();
             let ss = PaSampleSpec {
@@ -128,6 +130,9 @@ pub fn spawn(device: String, bitrate: i32, hub: Arc<Hub>) {
                     }
                     if pcm.iter().all(|&s| s == 0) {
                         continue;
+                    }
+                    if let Some(b) = hub.audio_bitrate_update(&mut bitrate) {
+                        opus_encoder_ctl(enc, 4002, b as c_int);
                     }
                     let n = opus_encode(
                         enc,

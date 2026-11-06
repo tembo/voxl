@@ -48,6 +48,8 @@ struct Encoder {
     /// Interleaved stereo samples waiting for a whole frame.
     pending: Vec<i16>,
     out: Vec<u8>,
+    /// The bitrate the encoder has; the settings panel can change the hub's.
+    bitrate: i32,
 }
 
 impl Encoder {
@@ -61,6 +63,9 @@ impl Encoder {
             let pcm: Vec<i16> = self.pending.drain(..FRAME * 2).collect();
             if pcm.iter().all(|&s| s == 0) {
                 continue;
+            }
+            if let Some(b) = hub.audio_bitrate_update(&mut self.bitrate) {
+                unsafe { opus_encoder_ctl(self.enc, 4002, b as c_int) };
             }
             let n = unsafe {
                 opus_encode(
@@ -246,6 +251,7 @@ pub fn spawn(device_name: String, bitrate: i32, hub: Arc<Hub>) {
                 enc,
                 pending: Vec::with_capacity(FRAME * 4),
                 out: vec![0u8; 4000],
+                bitrate,
             };
             let want = || {
                 hub.clients
