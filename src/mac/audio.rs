@@ -34,6 +34,7 @@ const FRAME: usize = 480;
 
 struct Encoder {
     enc: *mut c_void,
+    recorder: crate::record_audio::Encoder,
     /// Interleaved stereo samples waiting for a whole frame.
     pending: Vec<i16>,
     out: Vec<u8>,
@@ -48,6 +49,7 @@ impl Encoder {
         }
         while self.pending.len() >= FRAME * 2 {
             let pcm: Vec<i16> = self.pending.drain(..FRAME * 2).collect();
+            self.recorder.push(hub, &pcm);
             if pcm.iter().all(|&s| s == 0) {
                 continue;
             }
@@ -152,14 +154,14 @@ pub fn spawn(_device: String, bitrate: i32, hub: Arc<Hub>) {
             unsafe { opus_encoder_ctl(enc, 4002, bitrate as c_int) };
             let encoder = Arc::new(Mutex::new(Encoder {
                 enc,
+                recorder: crate::record_audio::Encoder::new(bitrate),
                 pending: Vec::with_capacity(FRAME * 4),
                 out: vec![0u8; 4000],
             }));
             let want = || {
-                hub.clients
-                    .lock()
-                    .iter()
-                    .any(|c| c.audio.load(Ordering::Relaxed))
+                hub.clients.lock().iter().any(|c| {
+                    c.audio.load(Ordering::Relaxed) || c.recording_audio.load(Ordering::Relaxed)
+                })
             };
             loop {
                 if !want() {

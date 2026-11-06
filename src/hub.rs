@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 pub enum Out {
     Bin(Bytes),
     Text(String),
+    RecordingAudio(Bytes, Instant),
 }
 
 pub struct Inflight {
@@ -24,6 +25,7 @@ pub struct Client {
     pub tx: mpsc::UnboundedSender<Out>,
     pub video: AtomicBool,
     pub audio: AtomicBool,
+    pub recording_audio: AtomicBool,
     pub inflight: Mutex<VecDeque<Inflight>>,
     /// Smoothed min RTT (ms), from pings.
     pub min_rtt_ms: AtomicU32,
@@ -298,6 +300,7 @@ impl Hub {
             tx,
             video: AtomicBool::new(false),
             audio: AtomicBool::new(false),
+            recording_audio: AtomicBool::new(false),
             inflight: Mutex::new(VecDeque::new()),
             min_rtt_ms: AtomicU32::new(0),
             delivered: Mutex::new(RateEst {
