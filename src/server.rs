@@ -310,6 +310,10 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
     if s.read_only && !READ_ONLY_COMMANDS.contains(&cmd) {
         return;
     }
+    // A viewer that acts on the desktop sizes it (dynamic resolution, `Hub::request_size`).
+    if s.resize && matches!(cmd, "m" | "b" | "s" | "sp" | "k") {
+        s.hub.take_size(c);
+    }
     let input = |ev: InputEvent| {
         if let Some(tx) = s.hub.input.lock().as_ref() {
             let _ = tx.send(ev);
@@ -379,20 +383,15 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
             }
         }
         // sz,w,h: the desktop size this client's window wants (dynamic resolution).
-        // The latest request wins; the video thread clamps it and applies it.
+        // Applied when this viewer owns the size (`Hub::request_size`); the video
+        // thread applies it.
         "sz" if s.resize => {
             if let (Some(w), Some(h), Some(max)) = (
                 num::<u32>(&mut it),
                 num::<u32>(&mut it),
                 *s.hub.resize_max.lock(),
             ) {
-                let want = crate::screen::fit(w, h, max);
-                let current = (
-                    s.hub.width.load(Ordering::Relaxed),
-                    s.hub.height.load(Ordering::Relaxed),
-                );
-                *s.hub.resize_req.lock() = (want != current).then_some(want);
-                s.hub.wake();
+                s.hub.request_size(c, crate::screen::fit(w, h, max));
             }
         }
         "kf" => {
@@ -499,6 +498,110 @@ mod tests {
         assert!(input >= 9, "{input} input events");
         assert_eq!(mic, 1);
         assert!(resized);
+    }
+
+    /// A server with dynamic resolution at 1280x800, and two viewers.
+    fn two_viewers() -> (AppState, Arc<Hub>, Arc<Client>, Arc<Client>) {
+        let hub = Hub::new();
+        hub.width.store(1280, Ordering::Relaxed);
+        hub.height.store(800, Ordering::Relaxed);
+        *hub.resize_max.lock() = Some((2560, 1600));
+        let (input_tx, _input_rx) = std::sync::mpsc::channel();
+        *hub.input.lock() = Some(input_tx);
+        let s = AppState {
+            hub: hub.clone(),
+            audio: false,
+            epoch: Instant::now(),
+            files: Arc::new(crate::files::Files {
+                root: std::env::temp_dir(),
+                upload: false,
+                download: false,
+                default_dir: String::new(),
+                max_upload_bytes: 0,
+            }),
+            mic: None,
+            resize: true,
+            read_only: false,
+            recorder: crate::record::Recorder::new(hub.clone(), Duration::from_secs(1)),
+            index: Bytes::new(),
+            favicon: Bytes::new(),
+            favicon_type: "image/x-icon",
+        };
+        let a = hub.add_client(mpsc::unbounded_channel().0);
+        let b = hub.add_client(mpsc::unbounded_channel().0);
+        (s, hub, a, b)
+    }
+
+    /// What the video thread does with a pending request: the desktop takes that size.
+    fn apply_resize(hub: &Hub) -> Option<(u32, u32)> {
+        let size = hub.resize_req.lock().take()?;
+        hub.width.store(size.0, Ordering::Relaxed);
+        hub.height.store(size.1, Ordering::Relaxed);
+        Some(size)
+    }
+
+    #[test]
+    fn two_viewers_of_different_sizes_settle_on_one_size() {
+        let (s, hub, a, b) = two_viewers();
+        let mut rtts = Default::default();
+        let want = |c: &Arc<Client>| {
+            if c.id == a.id {
+                "sz,1000,800"
+            } else {
+                "sz,1400,900"
+            }
+        };
+        // Every resize sends each viewer a new hello, and each viewer answers with its
+        // own window's size (web/src/client/resize.ts). The viewer whose size the
+        // desktop already has answers first: the order that kept the desktop flipping,
+        // a black frame on every flip.
+        let (mut first, mut second) = (a.clone(), b.clone());
+        let mut resizes = Vec::new();
+        for _ in 0..6 {
+            handle_text(&s, &first, want(&first), &mut rtts);
+            handle_text(&s, &second, want(&second), &mut rtts);
+            if let Some(size) = apply_resize(&hub) {
+                resizes.push(size);
+                (first, second) = if size == (1400, 900) {
+                    (b.clone(), a.clone())
+                } else {
+                    (a.clone(), b.clone())
+                };
+            }
+        }
+        assert_eq!(
+            resizes,
+            vec![(1000, 800)],
+            "the first viewer sizes the desktop, once"
+        );
+    }
+
+    #[test]
+    fn a_second_viewer_watches_until_it_acts_on_the_desktop() {
+        let (s, hub, a, b) = two_viewers();
+        let mut rtts = Default::default();
+        handle_text(&s, &a, "sz,1000,800", &mut rtts);
+        assert_eq!(apply_resize(&hub), Some((1000, 800)));
+        handle_text(&s, &b, "sz,1400,900", &mut rtts);
+        assert_eq!(apply_resize(&hub), None, "a second viewer only watches");
+        // It moves the pointer: the desktop fits the window of whoever is using it.
+        handle_text(&s, &b, "m,10,20", &mut rtts);
+        assert_eq!(apply_resize(&hub), Some((1400, 900)));
+        // Both answer the new hello; the first viewer now only watches.
+        handle_text(&s, &a, "sz,1000,800", &mut rtts);
+        handle_text(&s, &b, "sz,1400,900", &mut rtts);
+        assert_eq!(apply_resize(&hub), None);
+    }
+
+    #[test]
+    fn when_the_viewer_that_sizes_the_desktop_leaves_the_next_one_does() {
+        let (s, hub, a, b) = two_viewers();
+        let mut rtts = Default::default();
+        handle_text(&s, &a, "sz,1000,800", &mut rtts);
+        handle_text(&s, &b, "sz,1400,900", &mut rtts);
+        assert_eq!(apply_resize(&hub), Some((1000, 800)));
+        hub.remove_client(a.id);
+        assert_eq!(apply_resize(&hub), Some((1400, 900)));
     }
 
     #[test]

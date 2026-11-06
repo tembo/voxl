@@ -33,6 +33,9 @@ pub struct Client {
     /// Has received a keyframe since (re)starting video.
     pub started: AtomicBool,
     pub delay: Mutex<DelayEst>,
+    /// The desktop size this viewer's window last asked for (dynamic resolution),
+    /// applied when this viewer owns the size (`Hub::request_size`).
+    pub want_size: Mutex<Option<(u32, u32)>>,
 }
 
 /// Send->ack delay tracking: `base` is the (slowly expiring) minimum, the excess over
@@ -252,6 +255,8 @@ pub struct Hub {
     pub last_clipboard: Mutex<Option<String>>,
     /// Desktop size a client asked for (dynamic resolution), applied by the video thread.
     pub resize_req: Mutex<Option<(u32, u32)>>,
+    /// The viewer whose window sizes the desktop (dynamic resolution); see `request_size`.
+    pub size_owner: Mutex<Option<u64>>,
     /// Largest desktop size (Some when dynamic resolution is on).
     pub resize_max: Mutex<Option<(u32, u32)>>,
     /// Server settings sent in every `hello` besides the geometry (audio, files, ...).
@@ -277,6 +282,7 @@ impl Hub {
             input: Mutex::new(None),
             last_clipboard: Mutex::new(None),
             resize_req: Mutex::new(None),
+            size_owner: Mutex::new(None),
             resize_max: Mutex::new(None),
             hello_extra: Mutex::new(serde_json::Map::new()),
             snapshots: Mutex::new(Vec::new()),
@@ -312,13 +318,78 @@ impl Hub {
                 base_at: Instant::now(),
                 queue_ms: 0.0,
             }),
+            want_size: Mutex::new(None),
         });
         self.clients.lock().push(c.clone());
         c
     }
 
     pub fn remove_client(&self, id: u64) {
-        self.clients.lock().retain(|c| c.id != id);
+        let next = {
+            let mut clients = self.clients.lock();
+            clients.retain(|c| c.id != id);
+            clients
+                .iter()
+                .find(|c| c.want_size.lock().is_some())
+                .cloned()
+        };
+        // The owner left: the next viewer that asked for a size takes it over.
+        let mut owner = self.size_owner.lock();
+        if *owner == Some(id) {
+            *owner = None;
+            if let Some(c) = next {
+                *owner = Some(c.id);
+                drop(owner);
+                if let Some(want) = *c.want_size.lock() {
+                    self.apply_size(want);
+                }
+            }
+        }
+        self.wake();
+    }
+
+    /// Dynamic resolution with several viewers: one viewer sizes the desktop and the
+    /// others watch it scaled. Every resize restarts the stream and sends each viewer
+    /// a new `hello`, and each viewer answers a `hello` with its own size. So two
+    /// windows of different sizes resized the desktop back and forth, every round a
+    /// black frame, for as long as both were open. The first viewer to ask owns the
+    /// size; a viewer that acts on the desktop takes it over (`take_size`); when the
+    /// owner leaves, the next viewer that asked takes it (`remove_client`).
+    pub fn request_size(&self, client: &Client, want: (u32, u32)) {
+        *client.want_size.lock() = Some(want);
+        let mut owner = self.size_owner.lock();
+        match *owner {
+            Some(id) if id != client.id => {}
+            _ => {
+                *owner = Some(client.id);
+                drop(owner);
+                self.apply_size(want);
+            }
+        }
+    }
+
+    /// A viewer acted on the desktop (pointer, button, scroll, key): the desktop
+    /// fits the window of whoever is using it.
+    pub fn take_size(&self, client: &Client) {
+        let mut owner = self.size_owner.lock();
+        if *owner == Some(client.id) {
+            return;
+        }
+        *owner = Some(client.id);
+        drop(owner);
+        if let Some(want) = *client.want_size.lock() {
+            self.apply_size(want);
+        }
+    }
+
+    /// Ask the video thread for `want`, or cancel a pending request when the desktop
+    /// already has that size.
+    fn apply_size(&self, want: (u32, u32)) {
+        let current = (
+            self.width.load(Ordering::Relaxed),
+            self.height.load(Ordering::Relaxed),
+        );
+        *self.resize_req.lock() = (want != current).then_some(want);
         self.wake();
     }
 
