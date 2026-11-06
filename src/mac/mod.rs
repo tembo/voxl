@@ -46,6 +46,8 @@ struct Settings {
     display: u32,
     /// Fixed pixels per point (--capture-scale), or None for automatic.
     scale: Option<f64>,
+    explicit_scale: bool,
+    resize_scale: Option<f64>,
     max_pixels: f64,
     fps: u32,
 }
@@ -53,6 +55,8 @@ struct Settings {
 static SETTINGS: Mutex<Settings> = Mutex::new(Settings {
     display: 0,
     scale: None,
+    explicit_scale: false,
+    resize_scale: None,
     max_pixels: 2560.0 * 1600.0,
     fps: 60,
 });
@@ -67,6 +71,10 @@ pub fn init(a: &HashMap<String, String>) {
             .get("capture-scale")
             .and_then(|v| v.parse().ok())
             .filter(|&v: &f64| v > 0.0);
+        s.explicit_scale = s.scale.is_some();
+        s.resize_scale = a
+            .get("resize-scale")
+            .and_then(|v| v.rsplit('-').next()?.trim().parse().ok());
         if let Some(px) = a.get("max-capture-pixels").and_then(|v| v.parse().ok()) {
             s.max_pixels = px;
         }
@@ -157,6 +165,62 @@ pub fn display() -> u32 {
     SETTINGS.lock().display
 }
 
+pub struct DisplayRequest {
+    pub id: u32,
+    pub sender: std::sync::mpsc::Sender<input::InputEvent>,
+    pub ready: std::sync::mpsc::Receiver<()>,
+}
+
+pub fn request_display(hub: &crate::hub::Hub, id: u32, client: u64) -> Result<bool, String> {
+    if !active_displays().contains(&id) {
+        return Err("display is no longer connected".into());
+    }
+    if id == display() {
+        return Ok(false);
+    }
+    let mut pending = hub.display_req.lock();
+    let request = hub
+        .pause_display_input(id, client)
+        .ok_or("display switch already in progress")?;
+    *pending = Some(request);
+    hub.wake();
+    Ok(true)
+}
+
+pub fn select_display(id: u32) -> Result<(), String> {
+    if !active_displays().contains(&id) {
+        return Err("display is no longer connected".into());
+    }
+    let bounds = unsafe { CGDisplayBounds(id) };
+    let mut s = SETTINGS.lock();
+    s.display = id;
+    if !s.explicit_scale {
+        s.scale = Some(auto_scale(
+            bounds.size.width,
+            bounds.size.height,
+            native_scale(id),
+            s.max_pixels,
+        ));
+    }
+    Ok(())
+}
+
+pub fn display_info() -> serde_json::Value {
+    let displays: Vec<_> = active_displays()
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| {
+            let suffix = if unsafe { CGDisplayIsMain(id) } != 0 {
+                " · Main"
+            } else {
+                ""
+            };
+            serde_json::json!({ "id": id, "name": format!("Display {}{suffix}", i + 1) })
+        })
+        .collect();
+    serde_json::json!({ "selected": display(), "available": displays })
+}
+
 pub fn fps() -> u32 {
     SETTINGS.lock().fps
 }
@@ -201,6 +265,11 @@ fn native_scale(display: u32) -> f64 {
 /// Desktop pixels per point as streamed.
 pub fn capture_scale() -> f64 {
     scale()
+}
+
+pub fn resize_scale() -> f64 {
+    let s = SETTINGS.lock();
+    s.resize_scale.or(s.scale).unwrap_or(1.0)
 }
 
 /// Streamed size of `display`.

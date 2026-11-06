@@ -235,6 +235,11 @@ pub struct Stats {
 }
 
 pub struct Hub {
+    #[cfg(target_os = "macos")]
+    pub display_req: Mutex<Option<crate::mac::DisplayRequest>>,
+    /// Connections older than this may no longer inject input after a display switch.
+    #[cfg(target_os = "macos")]
+    pub input_floor: AtomicU64,
     pub clients: Mutex<Vec<Arc<Client>>>,
     pub next_id: AtomicU64,
     pub stats: Stats,
@@ -265,6 +270,10 @@ pub struct Hub {
 impl Hub {
     pub fn new() -> Arc<Self> {
         Arc::new(Hub {
+            #[cfg(target_os = "macos")]
+            display_req: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            input_floor: AtomicU64::new(0),
             clients: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),
             stats: Stats::default(),
@@ -357,5 +366,31 @@ impl Hub {
         for c in self.clients.lock().iter() {
             c.send(m());
         }
+    }
+
+    /// Share the admission lock with input senders, so the barrier cannot overtake input.
+    #[cfg(target_os = "macos")]
+    pub fn pause_display_input(&self, id: u32, client: u64) -> Option<crate::mac::DisplayRequest> {
+        let mut input = self.input.lock();
+        if client < self.input_floor.load(Ordering::Relaxed) {
+            return None;
+        }
+        let sender = input.take()?;
+        let (done, ready) = std::sync::mpsc::channel();
+        if sender
+            .send(crate::input::InputEvent::DisplayBarrier(done))
+            .is_err()
+        {
+            *input = Some(sender);
+            return None;
+        }
+        self.input_floor
+            .store(self.next_id.load(Ordering::Relaxed), Ordering::Relaxed);
+        // Retire their subscriptions too: an old client ignoring close must not
+        // stall flow control for the replacement connections.
+        for client in self.clients.lock().drain(..) {
+            client.send(Out::Text("{\"t\":\"close\"}".into()));
+        }
+        Some(crate::mac::DisplayRequest { id, sender, ready })
     }
 }
