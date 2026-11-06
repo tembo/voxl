@@ -51,6 +51,7 @@ extern "C" {
     pub fn CFDataGetBytePtr(d: CFDataRef) -> *const u8;
     pub fn CFDataGetLength(d: CFDataRef) -> isize;
     pub fn CFStringGetCString(s: CFStringRef, buf: *mut c_char, size: isize, enc: u32) -> bool;
+    pub fn CFStringCreateWithCString(alloc: CFTypeRef, s: *const c_char, enc: u32) -> CFStringRef;
     pub fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> bool;
 }
 pub const kCFNumberSInt64Type: isize = 4;
@@ -81,6 +82,7 @@ pub unsafe fn cf_string(s: CFStringRef) -> String {
 extern "C" {
     pub fn CGMainDisplayID() -> u32;
     pub fn CGGetActiveDisplayList(max: u32, ids: *mut u32, count: *mut u32) -> i32;
+    pub fn CGGetOnlineDisplayList(max: u32, ids: *mut u32, count: *mut u32) -> i32;
     pub fn CGDisplayIsMain(id: u32) -> u32;
     pub fn CGDisplayBounds(id: u32) -> CGRect;
     pub fn CGDisplayPixelsWide(id: u32) -> usize;
@@ -375,3 +377,10 @@ extern "C" {
     pub fn AudioQueueStart(queue: AudioQueueRef, start: *const c_void) -> OSStatus;
     pub fn AudioQueueDispose(queue: AudioQueueRef, immediate: bool) -> OSStatus;
 }
+
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    pub fn IOPMAssertionDeclareUserActivity(name: CFStringRef, kind: u32, id: *mut u32) -> i32;
+}
+/// IOPMUserActiveType: activity on this Mac (wakes its displays), not a remote session's.
+pub const kIOPMUserActiveLocal: u32 = 0;

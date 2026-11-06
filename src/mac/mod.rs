@@ -146,6 +146,11 @@ pub fn active_displays() -> Vec<u32> {
     let mut ids = [0u32; 16];
     let mut n = 0u32;
     unsafe { CGGetActiveDisplayList(16, ids.as_mut_ptr(), &mut n) };
+    // Asleep, displays aren't active; started then (by a supervisor, say), voxl would
+    // fall back to the main display. The online list still has them.
+    if n == 0 {
+        unsafe { CGGetOnlineDisplayList(16, ids.as_mut_ptr(), &mut n) };
+    }
     let mut v = ids[..n as usize].to_vec();
     // Main display first, so index 0 is the main one.
     let main = unsafe { CGMainDisplayID() };
@@ -216,4 +221,45 @@ fn prompt_accessibility() {
         let opts = CFDictionary::from_slices(&[&*key], &[CFBoolean::new(true)]);
         AXIsProcessTrustedWithOptions(&*opts as *const _ as *const std::ffi::c_void);
     }
+}
+
+/// Whether any display is awake (the active list is empty while they all sleep).
+pub fn any_display_active() -> bool {
+    let mut ids = [0u32; 16];
+    let mut n = 0u32;
+    unsafe { CGGetActiveDisplayList(16, ids.as_mut_ptr(), &mut n) };
+    n > 0
+}
+
+/// Sets the geometry input is mapped through, as a capture would, and returns the
+/// streamed size: for a voxl that starts while the displays sleep, so clicks and the
+/// hello are right before the first frame.
+pub fn note_geometry() -> (u32, u32) {
+    let display = display();
+    let (width, height) = capture_size(display);
+    *GEOMETRY.lock() = Some(Geometry {
+        display,
+        bounds: unsafe { CGDisplayBounds(display) },
+        width,
+    });
+    (width, height)
+}
+
+/// Declares user activity, as a key press would: wakes the displays (to the lock screen
+/// if the Mac is locked) and restarts their sleep timers.
+pub fn wake_display() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    // Reusing the assertion id renews one assertion instead of piling up new ones.
+    static ID: AtomicU32 = AtomicU32::new(0);
+    let mut id = ID.load(Ordering::Relaxed);
+    unsafe {
+        let name = CFStringCreateWithCString(
+            std::ptr::null(),
+            c"voxl: a viewer is watching".as_ptr(),
+            kCFStringEncodingUTF8,
+        );
+        IOPMAssertionDeclareUserActivity(name, kIOPMUserActiveLocal, &mut id);
+        CFRelease(name);
+    }
+    ID.store(id, Ordering::Relaxed);
 }
