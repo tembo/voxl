@@ -1,5 +1,7 @@
 // Toolbar (top right on hover; bottom right and always visible on touch devices):
 // on-screen keyboard, files, microphone and fullscreen buttons.
+import { cmd } from '../protocol';
+import type { Hello } from '../protocol';
 import type { App } from './app';
 import { el } from './app';
 
@@ -7,6 +9,12 @@ export function setupToolbar(app: App, onFullscreenChange: () => void) {
 	const { tools, kbd } = app;
 	const kbBtn = el<HTMLButtonElement>('kb-btn');
 	const fsBtn = el<HTMLButtonElement>('fs-btn');
+	const displays = el<HTMLSelectElement>('display-select');
+	displays.addEventListener('change', () => {
+		app.send(cmd.releaseAll);
+		app.send(cmd.display(Number(displays.value)));
+		displays.disabled = true;
+	});
 	let hideTimer: ReturnType<typeof setTimeout> | undefined;
 	function show(ms: number) {
 		tools.classList.add('show');
@@ -27,7 +35,7 @@ export function setupToolbar(app: App, onFullscreenChange: () => void) {
 				show(2500);
 		});
 	// Clicks on the toolbar must not reach the desktop surface underneath.
-	for (const b of tools.querySelectorAll('button'))
+	for (const b of tools.querySelectorAll('button, select'))
 		b.addEventListener('pointerdown', (e) => e.stopPropagation());
 
 	kbBtn.addEventListener('click', () => {
@@ -58,4 +66,13 @@ export function setupToolbar(app: App, onFullscreenChange: () => void) {
 		fsBtn.classList.toggle('on', !!document.fullscreenElement);
 		onFullscreenChange();
 	});
+	return (info: Hello['displays']) => {
+		displays.hidden = !info || info.available.length < 2 || app.readOnly;
+		displays.disabled = false;
+		displays.replaceChildren();
+		for (const display of info?.available || []) {
+			displays.add(new Option(display.name, String(display.id)));
+		}
+		if (info) displays.value = String(info.selected);
+	};
 }

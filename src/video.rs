@@ -97,6 +97,18 @@ pub fn spawn(
             }
             drop(cap);
             let _ = encode.join();
+            #[cfg(target_os = "macos")]
+            let display_request = hub.display_req.lock().take();
+            #[cfg(target_os = "macos")]
+            if let Some(request) = display_request {
+                // A resize for the old monitor must not be applied to the new one.
+                hub.resize_req.lock().take();
+                p = switch_display(request, &cfg, &hub, &mut screen).unwrap_or_else(|e| {
+                    log::error!("display switch failed: {e}");
+                    std::process::exit(1);
+                });
+                continue;
+            }
             let req = hub.resize_req.lock().take();
             if let (Some(s), Some((w, h))) = (screen.as_mut(), req) {
                 if let Err(e) = s.resize(w, h) {
@@ -113,6 +125,39 @@ pub fn spawn(
         })
         .unwrap();
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn switch_display(
+    request: crate::mac::DisplayRequest,
+    cfg: &VideoConfig,
+    hub: &Arc<Hub>,
+    screen: &mut Option<crate::screen::Screen>,
+) -> Result<Pipeline, String> {
+    let previous = crate::mac::display();
+    let dynamic = screen.is_some();
+    let mut open = |id| {
+        screen.take(); // Restore the old monitor's mode before selecting another.
+        crate::mac::select_display(id)?;
+        *screen = if dynamic {
+            Some(crate::screen::Screen::open(None)?)
+        } else {
+            None
+        };
+        *hub.resize_max.lock() = screen.as_ref().map(|s| s.max());
+        build(cfg, hub)
+    };
+    let attempt = request
+        .ready
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|e| e.to_string())
+        .and_then(|_| open(request.id));
+    let pipeline = attempt.or_else(|e| {
+        log::warn!("display switch: {e}; restoring the previous display");
+        open(previous)
+    })?;
+    *hub.input.lock() = Some(request.sender);
+    Ok(pipeline)
 }
 
 fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
@@ -171,6 +216,14 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
         .name("encode".into())
         .spawn(move || encode_loop(stripes, job_rx, ret_tx, hub2, crf, po_crf))
         .unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        let mut extra = hub.hello_extra.lock();
+        extra.insert("displays".into(), crate::mac::display_info());
+        if let Some(resize) = extra.get_mut("resize") {
+            resize["scale"] = crate::mac::resize_scale().into();
+        }
+    }
     // New geometry (and a keyframe) for clients already connected; no-op at startup.
     hub.restart_clients();
     Ok(Pipeline {
@@ -485,6 +538,10 @@ fn capture_loop(
     let debug_marker = std::env::var("VOXL_DEBUG_MARKER").is_ok();
 
     loop {
+        #[cfg(target_os = "macos")]
+        if hub.display_req.lock().is_some() {
+            return Ok(());
+        }
         if hub.resize_req.lock().is_some() || cap.needs_rebuild() {
             return Ok(());
         }

@@ -25,7 +25,10 @@ import { createVideo } from './video';
 const READ_ONLY_COMMANDS = new Set(['a', 'v', 'au', 'kf', 'po']);
 
 function blocksInput(app: App, command: string): boolean {
-	return app.readOnly && !READ_ONLY_COMMANDS.has(command.split(',')[0]);
+	return (
+		(app.readOnly || !app.desk.w) &&
+		!READ_ONLY_COMMANDS.has(command.split(',')[0])
+	);
 }
 
 function main() {
@@ -63,7 +66,7 @@ function main() {
 		},
 		sendBin: (type, bytes) => {
 			// The server drops every binary message from read-only viewers.
-			if (app.readOnly) return;
+			if (app.readOnly || !app.desk.w) return;
 			const msg = new Uint8Array(bytes.byteLength + 1);
 			msg[0] = type;
 			msg.set(bytes, 1);
@@ -94,7 +97,7 @@ function main() {
 	};
 	setupPointer(app, onInteract);
 	setupKeyboard(app, clipboard, onInteract);
-	setupToolbar(app, video.layout);
+	const updateDisplays = setupToolbar(app, video.layout);
 	const files = createFiles(app);
 	const mic = createMic(app);
 	const resize = createResize(app);
@@ -141,11 +144,13 @@ function main() {
 				video.layout();
 				files.setup(m.files);
 				mic.setup(!!m.mic && !app.readOnly);
+				updateDisplays(m.displays);
 				resize.setup(m.resize);
 				statusEl.style.display = 'none';
 				break;
 			case 'status':
 				if (m.s === 'closed') {
+					app.desk.w = 0;
 					mic.stop();
 					statusEl.style.display = '';
 					statusEl.textContent = 'Reconnecting…';
