@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub struct VideoConfig {
     pub display: Option<String>,
+    #[cfg(target_os = "macos")]
+    pub enable_resize: bool,
     pub fps: u32,
     pub preset: String,
     pub threads: u32,
@@ -135,12 +137,18 @@ fn switch_display(
     screen: &mut Option<crate::screen::Screen>,
 ) -> Result<Pipeline, String> {
     let previous = crate::mac::display();
-    let dynamic = screen.is_some();
     let mut open = |id| {
-        screen.take(); // Restore the old monitor's mode before selecting another.
+        if let Some(old) = screen.as_mut() {
+            old.restore()?;
+        }
+        screen.take();
         crate::mac::select_display(id)?;
-        *screen = if dynamic {
-            Some(crate::screen::Screen::open(None)?)
+        *screen = if cfg.enable_resize {
+            crate::screen::Screen::open(None)
+                .inspect_err(|e| {
+                    log::warn!("dynamic resolution unavailable: {e}");
+                })
+                .ok()
         } else {
             None
         };
@@ -218,10 +226,16 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
         .unwrap();
     #[cfg(target_os = "macos")]
     {
+        let resizing = hub.resize_max.lock().is_some();
         let mut extra = hub.hello_extra.lock();
         extra.insert("displays".into(), crate::mac::display_info());
-        if let Some(resize) = extra.get_mut("resize") {
-            resize["scale"] = crate::mac::resize_scale().into();
+        if resizing {
+            extra.insert(
+                "resize".into(),
+                serde_json::json!({ "scale": crate::mac::resize_scale() }),
+            );
+        } else {
+            extra.remove("resize");
         }
     }
     // New geometry (and a keyframe) for clients already connected; no-op at startup.

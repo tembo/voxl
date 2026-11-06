@@ -35,6 +35,8 @@ struct Mode {
 
 pub struct Screen {
     display: u32,
+    original: Mode,
+    resized: bool,
     modes: Vec<Mode>,
     max: (u32, u32),
     current: (u32, u32),
@@ -46,6 +48,7 @@ impl Screen {
     pub fn open(_display: Option<&str>) -> Result<Self, String> {
         let display = super::display();
         let mut modes: Vec<Mode> = Vec::new();
+        let original;
         unsafe {
             let cur = CGDisplayCopyDisplayMode(display);
             if cur.is_null() {
@@ -54,7 +57,11 @@ impl Screen {
             let hidpi = CGDisplayModeGetPixelWidth(cur) > CGDisplayModeGetWidth(cur);
             let current = (CGDisplayModeGetWidth(cur), CGDisplayModeGetHeight(cur));
             let rate = CGDisplayModeGetRefreshRate(cur);
-            CGDisplayModeRelease(cur);
+            original = Mode {
+                mode: cur,
+                points: current,
+                size: super::size_for(current.0 as f64, current.1 as f64),
+            };
             let key = kCGDisplayShowDuplicateLowResolutionModes;
             let opts = objc2_core_foundation::CFDictionary::from_slices(
                 &[&*(key as *const objc2_core_foundation::CFString)],
@@ -110,6 +117,8 @@ impl Screen {
         );
         Ok(Screen {
             display,
+            original,
+            resized: false,
             modes,
             max,
             current: super::capture_size(display),
@@ -135,30 +144,8 @@ impl Screen {
             .iter()
             .find(|m| m.size == want)
             .ok_or("no such mode")?;
-        unsafe {
-            let mut cfg: CGDisplayConfigRef = std::ptr::null_mut();
-            if CGBeginDisplayConfiguration(&mut cfg) != 0 {
-                return Err("CGBeginDisplayConfiguration failed".into());
-            }
-            let e = CGConfigureDisplayWithDisplayMode(cfg, self.display, m.mode, std::ptr::null());
-            if e != 0 {
-                CGCancelDisplayConfiguration(cfg);
-                return Err(format!("CGConfigureDisplayWithDisplayMode: {e}"));
-            }
-            let e = CGCompleteDisplayConfiguration(cfg, kCGConfigureForAppOnly);
-            if e != 0 {
-                return Err(format!("CGCompleteDisplayConfiguration: {e}"));
-            }
-        }
-        // Capture restarts right after; let the new geometry settle first.
-        let t = Instant::now();
-        while t.elapsed() < Duration::from_secs(2) {
-            let b = unsafe { CGDisplayBounds(self.display) };
-            if (b.size.width as usize, b.size.height as usize) == m.points {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        set_mode(self.display, m)?;
+        self.resized = true;
         self.current = want;
         log::info!(
             "display set to {}x{} points ({}x{} streamed)",
@@ -169,12 +156,47 @@ impl Screen {
         );
         Ok(())
     }
+
+    pub fn restore(&mut self) -> Result<(), String> {
+        if self.resized {
+            set_mode(self.display, &self.original)?;
+            self.current = self.original.size;
+            self.resized = false;
+        }
+        Ok(())
+    }
 }
 
-impl Drop for Screen {
-    fn drop(&mut self) {
-        for m in &self.modes {
-            unsafe { CGDisplayModeRelease(m.mode) };
+fn set_mode(display: u32, m: &Mode) -> Result<(), String> {
+    unsafe {
+        let mut cfg: CGDisplayConfigRef = std::ptr::null_mut();
+        if CGBeginDisplayConfiguration(&mut cfg) != 0 {
+            return Err("CGBeginDisplayConfiguration failed".into());
         }
+        let e = CGConfigureDisplayWithDisplayMode(cfg, display, m.mode, std::ptr::null());
+        if e != 0 {
+            CGCancelDisplayConfiguration(cfg);
+            return Err(format!("CGConfigureDisplayWithDisplayMode: {e}"));
+        }
+        let e = CGCompleteDisplayConfiguration(cfg, kCGConfigureForAppOnly);
+        if e != 0 {
+            return Err(format!("CGCompleteDisplayConfiguration: {e}"));
+        }
+    }
+    // Capture restarts right after; let the new geometry settle first.
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(2) {
+        let b = unsafe { CGDisplayBounds(display) };
+        if (b.size.width as usize, b.size.height as usize) == m.points {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+impl Drop for Mode {
+    fn drop(&mut self) {
+        unsafe { CGDisplayModeRelease(self.mode) };
     }
 }

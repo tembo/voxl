@@ -22,7 +22,7 @@ pub struct AppState {
     pub epoch: Instant,
     pub files: Arc<crate::files::Files>,
     pub mic: Option<std::sync::mpsc::Sender<crate::mic::MicMsg>>,
-    /// Clients may resize the desktop to their window (--enable-resize).
+    /// Resizing was enabled; hub.resize_max tracks the current display's capability.
     pub resize: bool,
     /// Viewers only watch: input, clipboard writes and the microphone are refused (--read-only).
     pub read_only: bool,
