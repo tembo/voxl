@@ -37,6 +37,14 @@ impl Geometry {
     pub fn scale(&self) -> f64 {
         self.width as f64 / self.bounds.size.width.max(1.0)
     }
+
+    pub fn point(&self, x: i32, y: i32) -> CGPoint {
+        let k = 1.0 / self.scale();
+        CGPoint {
+            x: self.bounds.origin.x + (x as f64 + 0.5) * k,
+            y: self.bounds.origin.y + (y as f64 + 0.5) * k,
+        }
+    }
 }
 
 /// Set by the capturer whenever it (re)starts; read by input to map coordinates.
@@ -46,6 +54,7 @@ struct Settings {
     display: u32,
     /// Fixed pixels per point (--capture-scale), or None for automatic.
     scale: Option<f64>,
+    explicit_scale: bool,
     max_pixels: f64,
     fps: u32,
 }
@@ -53,6 +62,7 @@ struct Settings {
 static SETTINGS: Mutex<Settings> = Mutex::new(Settings {
     display: 0,
     scale: None,
+    explicit_scale: false,
     max_pixels: 2560.0 * 1600.0,
     fps: 60,
 });
@@ -67,6 +77,7 @@ pub fn init(a: &HashMap<String, String>) {
             .get("capture-scale")
             .and_then(|v| v.parse().ok())
             .filter(|&v: &f64| v > 0.0);
+        s.explicit_scale = s.scale.is_some();
         if let Some(px) = a.get("max-capture-pixels").and_then(|v| v.parse().ok()) {
             s.max_pixels = px;
         }
@@ -157,6 +168,42 @@ pub fn display() -> u32 {
     SETTINGS.lock().display
 }
 
+pub fn displays() -> Vec<crate::displays::Display> {
+    active_displays()
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| {
+            let bounds = unsafe { CGDisplayBounds(id) };
+            crate::displays::Display {
+                id,
+                name: format!("Display {}", i + 1),
+                width: bounds.size.width as u32,
+                height: bounds.size.height as u32,
+                main: unsafe { CGDisplayIsMain(id) } != 0,
+            }
+        })
+        .collect()
+}
+
+/// Change only voxl's capture target, never the Mac's display arrangement or mode.
+pub fn select_display(id: u32) -> Result<(), String> {
+    if !active_displays().contains(&id) {
+        return Err(format!("display {id} is no longer connected"));
+    }
+    let bounds = unsafe { CGDisplayBounds(id) };
+    let mut s = SETTINGS.lock();
+    s.display = id;
+    if !s.explicit_scale {
+        s.scale = Some(auto_scale(
+            bounds.size.width,
+            bounds.size.height,
+            native_scale(id),
+            s.max_pixels,
+        ));
+    }
+    Ok(())
+}
+
 pub fn fps() -> u32 {
     SETTINGS.lock().fps
 }
@@ -215,5 +262,43 @@ fn prompt_accessibility() {
         let key = CFString::from_static_str("AXTrustedCheckOptionPrompt");
         let opts = CFDictionary::from_slices(&[&*key], &[CFBoolean::new(true)]);
         AXIsProcessTrustedWithOptions(&*opts as *const _ as *const std::ffi::c_void);
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    fn input_uses_the_selected_displays_origin_and_capture_scale() {
+        let left = Geometry {
+            display: 10,
+            bounds: CGRect {
+                origin: CGPoint {
+                    x: -1920.0,
+                    y: -200.0,
+                },
+                size: CGSize {
+                    width: 1920.0,
+                    height: 1080.0,
+                },
+            },
+            width: 1920,
+        };
+        let point = left.point(9, 19);
+        assert_eq!((point.x, point.y), (-1910.5, -180.5));
+        let retina = Geometry {
+            display: 20,
+            bounds: CGRect {
+                origin: CGPoint { x: 2560.0, y: 0.0 },
+                size: CGSize {
+                    width: 1504.0,
+                    height: 846.0,
+                },
+            },
+            width: 3008,
+        };
+        let point = retina.point(100, 200);
+        assert_eq!((point.x, point.y), (2610.25, 100.25));
     }
 }

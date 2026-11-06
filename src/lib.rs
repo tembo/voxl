@@ -14,6 +14,7 @@ mod convert;
 mod corners;
 #[cfg(target_os = "linux")]
 mod desktop;
+mod displays;
 mod encoder;
 mod files;
 mod help;

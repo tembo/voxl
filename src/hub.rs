@@ -21,6 +21,8 @@ pub struct Inflight {
 
 pub struct Client {
     pub id: u64,
+    /// Last display geometry acknowledged by this viewer (0 before any switch).
+    pub display_generation: AtomicU64,
     pub tx: mpsc::UnboundedSender<Out>,
     pub video: AtomicBool,
     pub audio: AtomicBool,
@@ -235,6 +237,7 @@ pub struct Stats {
 }
 
 pub struct Hub {
+    pub displays: Mutex<crate::displays::Displays>,
     pub clients: Mutex<Vec<Arc<Client>>>,
     pub next_id: AtomicU64,
     pub stats: Stats,
@@ -265,6 +268,7 @@ pub struct Hub {
 impl Hub {
     pub fn new() -> Arc<Self> {
         Arc::new(Hub {
+            displays: Mutex::new(crate::displays::Displays::default()),
             clients: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),
             stats: Stats::default(),
@@ -295,6 +299,7 @@ impl Hub {
     pub fn add_client(&self, tx: mpsc::UnboundedSender<Out>) -> Arc<Client> {
         let c = Arc::new(Client {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
+            display_generation: AtomicU64::new(0),
             tx,
             video: AtomicBool::new(false),
             audio: AtomicBool::new(false),
@@ -334,6 +339,9 @@ impl Hub {
     /// The `hello` message: current geometry plus the server's settings.
     pub fn hello(&self) -> String {
         let mut m = self.hello_extra.lock().clone();
+        if let Some(displays) = self.displays.lock().info() {
+            m.insert("displays".into(), displays);
+        }
         m.insert("t".into(), "hello".into());
         m.insert("w".into(), self.width.load(Ordering::Relaxed).into());
         m.insert("h".into(), self.height.load(Ordering::Relaxed).into());
@@ -357,5 +365,11 @@ impl Hub {
         for c in self.clients.lock().iter() {
             c.send(m());
         }
+    }
+
+    pub fn input_ready(&self, client: &Client) -> bool {
+        self.displays
+            .lock()
+            .allows_input(client.display_generation.load(Ordering::Relaxed))
     }
 }

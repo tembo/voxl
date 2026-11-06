@@ -7,6 +7,7 @@ import { el } from './app';
 import { createAudio } from './audio';
 import { createClipboard } from './clipboard';
 import { createCursor } from './cursor';
+import { createDisplays } from './displays';
 import { createFiles } from './files';
 import { setupKeyboard } from './keyboard';
 import { createMic } from './mic';
@@ -22,10 +23,13 @@ import { createVideo } from './video';
  * (READ_ONLY_COMMANDS in server.rs), so a page that ignores the hello flag cannot
  * drive the desktop either; this keeps it from sending what would be dropped.
  */
-const READ_ONLY_COMMANDS = new Set(['a', 'v', 'au', 'kf', 'po']);
+const READ_ONLY_COMMANDS = new Set(['a', 'v', 'au', 'kf', 'po', 'da']);
 
 function blocksInput(app: App, command: string): boolean {
-	return app.readOnly && !READ_ONLY_COMMANDS.has(command.split(',')[0]);
+	return (
+		(app.readOnly || app.switchingDisplay) &&
+		!READ_ONLY_COMMANDS.has(command.split(',')[0])
+	);
 }
 
 function main() {
@@ -63,7 +67,7 @@ function main() {
 		},
 		sendBin: (type, bytes) => {
 			// The server drops every binary message from read-only viewers.
-			if (app.readOnly) return;
+			if (app.readOnly || app.switchingDisplay) return;
 			const msg = new Uint8Array(bytes.byteLength + 1);
 			msg[0] = type;
 			msg.set(bytes, 1);
@@ -75,12 +79,14 @@ function main() {
 		isMac: /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent),
 		remoteMac: false,
 		readOnly: false,
+		switchingDisplay: false,
 		inIframe: window !== window.top,
 		desk: { w: 0, h: 0 },
 		view: { scale: 1 },
 	};
 
 	const cursor = createCursor(app);
+	const displays = createDisplays(app, statusEl);
 	const useVideo =
 		params.get('present') !== 'canvas' &&
 		typeof MediaStreamTrackGenerator !== 'undefined';
@@ -142,10 +148,18 @@ function main() {
 				files.setup(m.files);
 				mic.setup(!!m.mic && !app.readOnly);
 				resize.setup(m.resize);
-				statusEl.style.display = 'none';
+				displays.setup(m.displays);
+				if (m.displays) app.send(cmd.displayReady(m.displays.generation));
+				break;
+			case 'display-switching':
+				displays.switching();
+				break;
+			case 'display-error':
+				displays.error(m.message);
 				break;
 			case 'status':
 				if (m.s === 'closed') {
+					displays.disconnected();
 					mic.stop();
 					statusEl.style.display = '';
 					statusEl.textContent = 'Reconnecting…';

@@ -45,11 +45,28 @@ export interface Hello {
 	readOnly?: boolean;
 	/** Dynamic resolution: desktop pixels per CSS pixel of the viewer's window. */
 	resize?: { scale: number };
+	/** macOS: one shared capture target for every viewer. */
+	displays?: DisplayConfig;
+}
+
+export interface DisplayConfig {
+	available: {
+		id: number;
+		name: string;
+		width: number;
+		height: number;
+		main: boolean;
+	}[];
+	selected: number;
+	generation: number;
+	switching: boolean;
 }
 
 /** JSON text messages from the server. */
 export type ServerMessage =
 	| Hello
+	| { t: 'display-switching' }
+	| { t: 'display-error'; message: string }
 	| { t: 'ping'; s: number }
 	| { t: 'clip'; d: string }
 	| { t: 'mic'; on: boolean }
@@ -70,6 +87,10 @@ export const cmd = {
 	mic: (on: boolean) => `mi,${on ? 1 : 0}`,
 	/** Ask for a desktop of this size (dynamic resolution). */
 	resize: (w: number, h: number) => `sz,${w},${h}`,
+	/** Select a Mac display; all viewers follow the new capture target. */
+	display: (id: number) => `ds,${id}`,
+	/** Accept input only after the viewer has applied this display geometry. */
+	displayReady: (generation: number) => `da,${generation}`,
 	keyframe: 'kf',
 	pong: (sent: number) => `po,${sent}`,
 } as const;

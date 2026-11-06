@@ -34,6 +34,8 @@ pub enum InputEvent {
     /// Remote clipboard update, ordered with the key events around it.
     Clipboard(super::desktop::ClipContent),
     ReleaseAll,
+    /// Flush old coordinates and release held input before a display change.
+    DisplayBarrier(mpsc::Sender<()>),
     /// Release everything before exit.
     Shutdown,
 }
@@ -189,11 +191,7 @@ impl Injector {
         let Some(g) = *super::GEOMETRY.lock() else {
             return CGPoint::default();
         };
-        let k = 1.0 / g.scale();
-        CGPoint {
-            x: g.bounds.origin.x + (x as f64 + 0.5) * k,
-            y: g.bounds.origin.y + (y as f64 + 0.5) * k,
-        }
+        g.point(x, y)
     }
 
     fn mouse(&self, ty: u32, button: u32) {
@@ -334,6 +332,10 @@ impl Injector {
                 }
             }
             InputEvent::ReleaseAll | InputEvent::Shutdown => self.release_all(),
+            InputEvent::DisplayBarrier(done) => {
+                self.release_all();
+                let _ = done.send(());
+            }
         }
     }
 

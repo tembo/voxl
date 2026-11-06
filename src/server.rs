@@ -257,7 +257,7 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
             Message::Text(t) => handle_text(&s, &client, t.as_str(), &mut rtts),
             // Every binary message from a viewer acts on the desktop (clipboard images,
             // microphone audio), so a read-only viewer's are all dropped.
-            Message::Binary(_) if s.read_only => {}
+            Message::Binary(_) if s.read_only || !s.hub.input_ready(&client) => {}
             // 0x11: clipboard image (PNG) pasted on the client.
             Message::Binary(b) if b.first() == Some(&0x11) && b.len() > 1 => {
                 if let Some(tx) = s.hub.input.lock().as_ref() {
@@ -300,7 +300,7 @@ fn num<T: std::str::FromStr>(it: &mut std::str::Split<'_, char>) -> Option<T> {
 /// Commands a --read-only viewer may send: acks, video and audio on/off, keyframe
 /// requests and ping replies. Everything else acts on the desktop (input, clipboard,
 /// microphone, resizing) and is dropped. The web client keeps the same list.
-const READ_ONLY_COMMANDS: &[&str] = &["a", "v", "au", "kf", "po"];
+const READ_ONLY_COMMANDS: &[&str] = &["a", "v", "au", "kf", "po", "da"];
 
 fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collections::VecDeque<u32>) {
     let (cmd, rest) = t.split_once(',').unwrap_or((t, ""));
@@ -310,6 +310,9 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
     if s.read_only && !READ_ONLY_COMMANDS.contains(&cmd) {
         return;
     }
+    if !READ_ONLY_COMMANDS.contains(&cmd) && !s.hub.input_ready(c) {
+        return;
+    }
     let input = |ev: InputEvent| {
         if let Some(tx) = s.hub.input.lock().as_ref() {
             let _ = tx.send(ev);
@@ -317,6 +320,33 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
     };
     let mut it = rest.split(',');
     match cmd {
+        "da" => {
+            if let Ok(generation) = rest.parse::<u64>() {
+                if s.hub.displays.lock().allows_input(generation) {
+                    c.display_generation.store(generation, Ordering::Relaxed);
+                }
+            }
+        }
+        "ds" => {
+            let result = rest
+                .parse::<u32>()
+                .map_err(|_| "Invalid display.")
+                .and_then(|id| s.hub.displays.lock().request(id));
+            match result {
+                Ok(true) => {
+                    s.hub
+                        .broadcast(|| Out::Text("{\"t\":\"display-switching\"}".into()));
+                    s.hub.wake();
+                }
+                Ok(false) => c.send(Out::Text(s.hub.hello())),
+                Err(message) => c.send(Out::Text(
+                    serde_json::json!({
+                        "t": "display-error", "message": message,
+                    })
+                    .to_string(),
+                )),
+            }
+        }
         "a" => {
             if let Some(id) = num::<u32>(&mut it) {
                 c.on_ack(id);
@@ -440,9 +470,13 @@ mod tests {
         "po,1",
     ];
 
-    /// Sends every command to a server that has input, a microphone and resizing wired
-    /// up, and returns (input events, microphone messages, a resize was asked for).
-    fn drive(read_only: bool) -> (usize, usize, bool) {
+    fn fixture(
+        read_only: bool,
+    ) -> (
+        AppState,
+        std::sync::mpsc::Receiver<InputEvent>,
+        std::sync::mpsc::Receiver<crate::mic::MicMsg>,
+    ) {
         let hub = Hub::new();
         hub.width.store(1280, Ordering::Relaxed);
         hub.height.store(800, Ordering::Relaxed);
@@ -469,6 +503,13 @@ mod tests {
             favicon: Bytes::new(),
             favicon_type: "image/x-icon",
         };
+        (s, input_rx, mic_rx)
+    }
+
+    /// Sends every command to a server with input, microphone and resizing wired up.
+    fn drive(read_only: bool) -> (usize, usize, bool) {
+        let (s, input_rx, mic_rx) = fixture(read_only);
+        let hub = &s.hub;
         let (tx, _rx) = mpsc::unbounded_channel();
         let client = hub.add_client(tx);
         let mut rtts = Default::default();
@@ -499,6 +540,60 @@ mod tests {
         assert!(input >= 9, "{input} input events");
         assert_eq!(mic, 1);
         assert!(resized);
+    }
+
+    fn available_displays() -> Vec<crate::displays::Display> {
+        [10, 20]
+            .into_iter()
+            .map(|id| crate::displays::Display {
+                id,
+                name: format!("Display {id}"),
+                width: 1920,
+                height: 1080,
+                main: id == 10,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn display_selection_obeys_read_only_and_each_viewers_geometry_acknowledgement() {
+        for read_only in [true, false] {
+            let (s, input, _) = fixture(read_only);
+            s.hub.displays.lock().publish(available_displays(), 10);
+            let (tx, mut messages) = mpsc::unbounded_channel();
+            let client = s.hub.add_client(tx);
+            let mut rtts = Default::default();
+            handle_text(&s, &client, "ds,999", &mut rtts);
+            assert_eq!(s.hub.displays.lock().pending(), None);
+            handle_text(&s, &client, "ds,20", &mut rtts);
+            if read_only {
+                assert_eq!(s.hub.displays.lock().pending(), None);
+                assert!(messages.try_recv().is_err());
+                continue;
+            }
+            assert_eq!(s.hub.displays.lock().pending(), Some(20));
+            handle_text(&s, &client, "m,100,200", &mut rtts);
+            handle_text(&s, &client, "da,1", &mut rtts);
+            assert_eq!(client.display_generation.load(Ordering::Relaxed), 0);
+            assert!(input.try_recv().is_err());
+            // The second viewer is still looking at the old, same-sized display.
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let other = s.hub.add_client(tx);
+            s.hub.displays.lock().publish(available_displays(), 20);
+            handle_text(&s, &client, "m,100,200", &mut rtts);
+            assert!(input.try_recv().is_err());
+            handle_text(&s, &client, "da,1", &mut rtts);
+            handle_text(&s, &client, "m,100,200", &mut rtts);
+            assert!(matches!(
+                input.try_recv(),
+                Ok(InputEvent::Move { x: 100, y: 200 })
+            ));
+            handle_text(&s, &other, "m,100,200", &mut rtts);
+            assert!(
+                input.try_recv().is_err(),
+                "one viewer must not acknowledge for another"
+            );
+        }
     }
 
     #[test]

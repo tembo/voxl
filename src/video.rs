@@ -97,6 +97,18 @@ pub fn spawn(
             }
             drop(cap);
             let _ = encode.join();
+            #[cfg(target_os = "macos")]
+            let display_switch = hub.displays.lock().pending().is_some();
+            #[cfg(target_os = "macos")]
+            if display_switch {
+                // A resize requested for the old display must not resize the new one.
+                hub.resize_req.lock().take();
+                p = rebuild_display(&cfg, &hub, &mut screen).unwrap_or_else(|e| {
+                    log::error!("display restart failed: {e}");
+                    std::process::exit(1);
+                });
+                continue;
+            }
             let req = hub.resize_req.lock().take();
             if let (Some(s), Some((w, h))) = (screen.as_mut(), req) {
                 if let Err(e) = s.resize(w, h) {
@@ -113,6 +125,65 @@ pub fn spawn(
         })
         .unwrap();
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn rebuild_display(
+    cfg: &VideoConfig,
+    hub: &Arc<Hub>,
+    screen: &mut Option<crate::screen::Screen>,
+) -> Result<Pipeline, String> {
+    let target = hub
+        .displays
+        .lock()
+        .pending()
+        .ok_or("no requested display")?;
+    let previous = crate::mac::display();
+    // A barrier on the input queue lets all old coordinates run on the old geometry.
+    let input = hub.input.lock().clone();
+    let drained = input.is_none_or(|tx| {
+        let (done, wait) = mpsc::channel();
+        tx.send(crate::input::InputEvent::DisplayBarrier(done))
+            .is_ok()
+            && wait.recv_timeout(Duration::from_secs(2)).is_ok()
+    });
+    let dynamic = screen.is_some();
+    let mut tried = Vec::new();
+    let mut last_error = String::new();
+    let main = crate::mac::active_displays()
+        .first()
+        .copied()
+        .unwrap_or(previous);
+    for id in [if drained { target } else { previous }, previous, main] {
+        if tried.contains(&id) {
+            continue;
+        }
+        tried.push(id);
+        // Restore the old display's mode before selecting another display.
+        screen.take();
+        if let Err(e) = crate::mac::select_display(id) {
+            last_error = e;
+            continue;
+        }
+        if dynamic {
+            *screen = crate::screen::Screen::open(None).ok();
+        }
+        *hub.resize_max.lock() = screen.as_ref().map(|s| s.max());
+        match build(cfg, hub) {
+            Ok(pipeline) => {
+                if id != target || !drained {
+                    log::warn!("display switch restored {id}: {last_error}");
+                    hub.broadcast(|| Out::Text(serde_json::json!({
+                        "t": "display-error",
+                        "message": "Could not switch displays. An available display has been restored.",
+                    }).to_string()));
+                }
+                return Ok(pipeline);
+            }
+            Err(e) => last_error = e,
+        }
+    }
+    Err(last_error)
 }
 
 fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
@@ -171,6 +242,15 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
         .name("encode".into())
         .spawn(move || encode_loop(stripes, job_rx, ret_tx, hub2, crf, po_crf))
         .unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        hub.displays
+            .lock()
+            .publish(crate::mac::displays(), crate::mac::display());
+        if let Some(resize) = hub.hello_extra.lock().get_mut("resize") {
+            resize["scale"] = crate::mac::capture_scale().into();
+        }
+    }
     // New geometry (and a keyframe) for clients already connected; no-op at startup.
     hub.restart_clients();
     Ok(Pipeline {
@@ -485,7 +565,10 @@ fn capture_loop(
     let debug_marker = std::env::var("VOXL_DEBUG_MARKER").is_ok();
 
     loop {
-        if hub.resize_req.lock().is_some() || cap.needs_rebuild() {
+        if hub.resize_req.lock().is_some()
+            || hub.displays.lock().pending().is_some()
+            || cap.needs_rebuild()
+        {
             return Ok(());
         }
         cap.pump()?;

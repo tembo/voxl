@@ -27,7 +27,7 @@ export function setupToolbar(app: App, onFullscreenChange: () => void) {
 				show(2500);
 		});
 	// Clicks on the toolbar must not reach the desktop surface underneath.
-	for (const b of tools.querySelectorAll('button'))
+	for (const b of tools.querySelectorAll('button, select'))
 		b.addEventListener('pointerdown', (e) => e.stopPropagation());
 
 	kbBtn.addEventListener('click', () => {
