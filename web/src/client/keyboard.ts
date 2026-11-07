@@ -114,6 +114,8 @@ export function setupKeyboard(
 		send(cmd.key(ks, false));
 	}
 	function releaseAll() {
+		if (pendingPaste) clearTimeout(pendingPaste.timer);
+		pendingPaste = null;
 		down.clear();
 		send(cmd.releaseAll);
 	}
@@ -125,7 +127,58 @@ export function setupKeyboard(
 		press(p.code, p.ks);
 	}
 
+	// A viewer can gain focus while a modifier is already held. Some native
+	// browsers also supply only ctrlKey/metaKey on the character event. Recover
+	// that state for shortcuts without inventing a permanently held physical key.
+	const modifierGroups = [
+		{ flag: 'ctrlKey', prefix: 'Control', code: 'ControlLeft' },
+		{ flag: 'metaKey', prefix: 'Meta', code: 'MetaLeft' },
+		{ flag: 'shiftKey', prefix: 'Shift', code: 'ShiftLeft' },
+		{ flag: 'altKey', prefix: 'Alt', code: 'AltLeft' },
+	] as const;
+	function reconcileModifiers(e: KeyboardEvent, infer: boolean) {
+		const altGraph = e.getModifierState('AltGraph');
+		const shortcut = (e.ctrlKey || e.metaKey) && !altGraph;
+		const named = NAMED[e.key] !== undefined;
+		for (const group of modifierGroups) {
+			const synthetic = `inferred:${group.code}`;
+			const matches = (code: string) =>
+				code.startsWith(group.prefix) ||
+				(group.prefix === 'Meta' && code.startsWith('OS'));
+			// AltGraph often reports Ctrl+Alt, but those flags are not a shortcut.
+			const active =
+				e[group.flag] &&
+				!(altGraph && (group.prefix === 'Control' || group.prefix === 'Alt'));
+			if (!active) {
+				for (const code of down.keys())
+					if (matches(code) || code === synthetic) release(code);
+				continue;
+			}
+			if (matches(e.code)) {
+				release(synthetic);
+				continue;
+			}
+			// Printable shift/Option/dead-key results already carry the selected
+			// character in e.key. Infer those modifiers only for shortcuts/navigation.
+			if (
+				!infer ||
+				(!shortcut &&
+					!named &&
+					(group.prefix === 'Shift' || group.prefix === 'Alt'))
+			)
+				continue;
+			if ([...down.keys()].some(matches) || down.has(synthetic)) continue;
+			const ks = modifierKeysym(group.code) ?? BY_CODE[group.code];
+			if (ks !== undefined) press(synthetic, ks);
+		}
+	}
+	function releaseInferredModifiers() {
+		for (const code of down.keys())
+			if (code.startsWith('inferred:')) release(code);
+	}
+
 	function onKeyDown(e: KeyboardEvent) {
+		reconcileModifiers(e, !e.isComposing);
 		if (e.isComposing) return;
 		onInteract();
 		const ks = keysymOf(e);
@@ -149,6 +202,9 @@ export function setupKeyboard(
 		e.preventDefault();
 		if (pendingPaste && pendingPaste.code === e.code) flushPaste();
 		release(e.code);
+		reconcileModifiers(e, false);
+		if (!/^(Shift|Control|Alt|Meta|OS)/.test(e.code))
+			releaseInferredModifiers();
 		// macOS swallows keyups of keys released while Cmd is held.
 		if (isMac && (e.code === 'MetaLeft' || e.code === 'MetaRight')) {
 			for (const code of down.keys())
