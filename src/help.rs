@@ -82,6 +82,8 @@ Desktop (this Mac's screen):
   --resize-scale                display pixels per CSS pixel (default: the
                                 capture scale)
   --read-only                   viewers only watch (default false)
+  --show-cursor                 include the host cursor in the video stream
+                                (default: true with --read-only, else false)
   --scroll-px-per-notch         pixels one wheel notch scrolls (default 180)
 ";
 
