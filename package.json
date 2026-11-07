@@ -10,7 +10,7 @@
 		"check": "npm run fmt:check && npm run lint && npm run typecheck"
 	},
 	"devDependencies": {
-		"oxfmt": "0.59.0",
+		"oxfmt": "0.76.0",
 		"oxlint": "1.80.0",
 		"typescript": "5.8.2"
 	}
