@@ -9,6 +9,8 @@ mod access;
 mod audio;
 #[cfg(target_os = "linux")]
 mod capture;
+#[cfg(target_os = "linux")]
+mod capture_x11;
 mod convert;
 #[cfg(target_os = "linux")]
 mod corners;
@@ -31,6 +33,8 @@ mod screen;
 mod server;
 mod video;
 mod wait;
+#[cfg(target_os = "linux")]
+mod wayland;
 #[cfg(windows)]
 mod win;
 
@@ -141,7 +145,32 @@ async fn serve(a: HashMap<String, String>) {
     let ncpu = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4) as u32;
+    #[cfg(target_os = "linux")]
+    let wayland = match a
+        .get("capture-backend")
+        .map(String::as_str)
+        .unwrap_or("x11")
+    {
+        "x11" => None,
+        "wayland" => Some(wayland::Config {
+            display: a.get("wayland-display").cloned(),
+            output: a.get("wayland-output").cloned(),
+        }),
+        other => {
+            log::error!("unknown capture backend: {other} (expected x11 or wayland)");
+            std::process::exit(1);
+        }
+    };
+    #[cfg(target_os = "linux")]
+    let wayland_on = wayland.is_some();
+    #[cfg(not(target_os = "linux"))]
+    let wayland_on = false;
+    if wayland_on {
+        log::info!("experimental Wayland capture: read-only, embedded cursor; input and clipboard unavailable");
+    }
     let vcfg = video::VideoConfig {
+        #[cfg(target_os = "linux")]
+        wayland,
         display: display.clone(),
         fps: range_max(a.get("framerate"), 60.0) as u32,
         preset: a
@@ -186,7 +215,7 @@ async fn serve(a: HashMap<String, String>) {
     // --read-only: the viewer watches the desktop, it does not drive it. Only the
     // commands watching needs are accepted (see server::READ_ONLY_COMMANDS), uploads
     // are refused, and the page hides the controls that would send anything else.
-    let read_only = truthy(a.get("read-only"), false);
+    let read_only = truthy(a.get("read-only"), false) || wayland_on;
     // --enable-resize (as in selkies): clients resize the desktop to their window. Not
     // for read-only viewers: a new size changes the desktop for everyone.
     let enable_resize = truthy(a.get("enable-resize"), false);
@@ -234,7 +263,7 @@ async fn serve(a: HashMap<String, String>) {
                 .collect()
         })
         .unwrap_or_default();
-    if radius > 0 || !named.is_empty() {
+    if !wayland_on && (radius > 0 || !named.is_empty()) {
         #[cfg(target_os = "linux")]
         if let Err(e) = corners::spawn(display.clone(), radius, named) {
             log::warn!("rounded corners unavailable: {e}");
@@ -242,17 +271,19 @@ async fn serve(a: HashMap<String, String>) {
         #[cfg(not(target_os = "linux"))]
         log::info!("--round-corners/--round-windows only apply to X11 desktops");
     }
-    let clipboard = match desktop::spawn(display.clone(), hub.clone(), clip_mode) {
-        Ok(h) => Some(h),
-        Err(e) => {
-            log::error!("cursor/clipboard init failed: {e}");
-            None
+    if !wayland_on {
+        let clipboard = match desktop::spawn(display.clone(), hub.clone(), clip_mode) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                log::error!("cursor/clipboard init failed: {e}");
+                None
+            }
+        };
+        let px_per_notch = range_max(a.get("scroll-px-per-notch"), 180.0);
+        match input::spawn(display.clone(), clipboard, px_per_notch) {
+            Ok(tx) => *hub.input.lock() = Some(tx),
+            Err(e) => log::error!("input init failed: {e}"),
         }
-    };
-    let px_per_notch = range_max(a.get("scroll-px-per-notch"), 180.0);
-    match input::spawn(display.clone(), clipboard, px_per_notch) {
-        Ok(tx) => *hub.input.lock() = Some(tx),
-        Err(e) => log::error!("input init failed: {e}"),
     }
     if audio_on {
         let dev = a
