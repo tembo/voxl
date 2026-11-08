@@ -231,11 +231,11 @@ starts it) for Screen Recording and Accessibility permissions. For the microphon
 install a loopback device (`brew install blackhole-2ch`) and pick it as the input in the
 apps that should hear you.
 
-| macOS flag             | Default                     |                                                                                        |
-| ---------------------- | --------------------------- | -------------------------------------------------------------------------------------- |
-| `--display`            | main display                | display to stream: an index (0 is the main display) or a display ID; logged at startup |
-| `--capture-scale`      | native, within the budget   | streamed pixels per point                                                              |
-| `--max-capture-pixels` | `4096000` (2560x1600)       | pixel budget for the automatic scale: x264's cost grows with area                      |
+| macOS flag             | Default                             |                                                                                        |
+| ---------------------- | ----------------------------------- | -------------------------------------------------------------------------------------- |
+| `--display`            | main display                        | display to stream: an index (0 is the main display) or a display ID; logged at startup |
+| `--capture-scale`      | native, within the budget           | streamed pixels per point                                                              |
+| `--max-capture-pixels` | `4096000` (2560x1600)               | pixel budget for the automatic scale: x264's cost grows with area                      |
 | `--microphone-device`  | first loopback device found         | output device (name or prefix) to play the browser microphone into                     |
 | `--resize-scale`       | the capture scale                   | so a viewer's window maps to the same number of points on the Mac                      |
 | `--show-cursor`        | `false` (`true` with `--read-only`) | include the host cursor in the video stream (for viewers/observers)                    |
