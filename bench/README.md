@@ -10,10 +10,15 @@ cc -O2 -o loadgen loadgen.c -lX11 -lXext      # 60 Hz animation with a frame/tim
 cc -O2 -o rootlat rootlat.c -lX11             # marker latency on the root window
 env/xvfb.sh & sleep 1; env/openbox.sh &       # 2560x1600 @ 144 DPI, like production
 env/voxl.sh                                   # voxl on :6902 (VOXL_BIN to override)
-SELKIES_BIN=/path/to/selkies env/selkies.sh & # selkies on :6912
+env/selkies.sh                                # selkies (own Xvfb) :3, port 6912 (SELKIES_IMAGE to override)
+BENCH_DISPLAY=:3 env/openbox.sh &
 KASMVNC=/path/to/kasmvncserver XKB_DIR=/path/to/xkb env/kasmvnc.sh &  # KasmVNC (own X server) :5, port 6922
 sleep 1; BENCH_DISPLAY=:5 env/openbox.sh &
 ```
+
+`env/selkies.sh` runs selkies and the XLibre Xvfb from selkies' base image, since
+selkies reads the screen in place only from its own X server; `docker logs selkies-bench`
+is its log. CBR from 30 Mbps, with congestion control down to 2 Mbps.
 
 `KASMVNC` is the monorepo's `nix/packages/kasmvnc` build; `XKB_DIR` is
 `xkeyboard_config`'s `share/X11/xkb`. `env/kasmvnc.sh` passes the flags Tembo's

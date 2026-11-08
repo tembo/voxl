@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # suite.sh : streaming servers across configs, workloads and links on the benchmark displays.
 # Appends JSON lines to $OUT. Start the servers under test first:
-#   selkies: env/xvfb.sh, env/openbox.sh, env/selkies.sh (display :2, port 6912)
+#   selkies: env/selkies.sh, BENCH_DISPLAY=:3 env/openbox.sh (its own Xvfb, display :3, port 6912)
 #   voxl:    env/xvfb.sh, env/openbox.sh, env/voxl.sh    (display :2, port 6902)
 #   kasmvnc: env/kasmvnc.sh, BENCH_DISPLAY=:5 env/openbox.sh (display :5, port 6922)
 # Configs: py_picom py_nopicom (selkies), voxl voxl_picom, kasm kasm_picom.
@@ -34,7 +34,7 @@ for cfg in ${CONFIGS:-py_picom py_nopicom voxl}; do
   case $cfg in
     kasm*) cli=kasmvnc; port=6922; BD=${KASM_DISPLAY:-:5} ;;
     voxl*) cli=voxl; port=6902; BD=${BD_X:-:2} ;;
-    *) cli=selkies; port=6912; BD=${BD_X:-:2} ;;
+    *) cli=selkies; port=6912; BD=${SELKIES_DISPLAY:-:3} ;;
   esac
   export BD BENCH_DISPLAY=$BD
   env/picom-stop.sh

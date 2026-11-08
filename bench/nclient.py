@@ -42,7 +42,7 @@ async def main():
         if mode == 'voxl':
             await ws.send('v,1')
         else:
-            await ws.send('SETTINGS,' + json.dumps({"is_manual_resolution_mode": False, "initialClientWidth": 2560, "initialClientHeight": 1600, "scaling_dpi": 96, "keyboardLayout": "us", "useCssScaling": True, "displayId": "primary"}))
+            await ws.send('SETTINGS,' + json.dumps({"is_manual_resolution_mode": False, "initialClientWidth": 2560, "initialClientHeight": 1600, "scaling_dpi": 144, "keyboardLayout": "us", "useCssScaling": True, "displayId": "primary"}))
             await ws.send('cr')
         t0 = time.time(); sec0 = None
         while time.time() - t0 < secs + 4:
@@ -59,7 +59,7 @@ async def main():
                 ctx = ctxs[si]
             else:
                 if msg[0] != 4: continue
-                fid = int.from_bytes(msg[2:4], 'big'); payload = msg[10:]
+                fid = int.from_bytes(msg[2:4], 'big'); payload = msg[12:]  # past the 12-byte header
             nbytes += len(msg)
             trecv = time.time()
             if mode == 'voxl' and os.environ.get('NETLAT'): netlat.append((int(trecv*1000) & 0xffffffff) - int.from_bytes(msg[6:10], 'big'))
