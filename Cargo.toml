@@ -59,6 +59,24 @@ getrandom = "0.3"
 zip = { version = "7", default-features = false, features = [
 	"deflate-flate2-zlib-rs",
 ] }
+# HTTPS (src/tls.rs), on ring so no extra C toolchain is needed.
+tokio-rustls = { version = "0.26", default-features = false, features = [
+	"logging",
+	"tls12",
+	"ring",
+] }
+rcgen = { version = "0.13", default-features = false, features = [
+	"crypto",
+	"pem",
+	"ring",
+] }
+hyper-util = { version = "0.1", features = [
+	"server-auto",
+	"service",
+	"tokio",
+	"http1",
+	"http2",
+] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["fs", "poll", "time"] }
