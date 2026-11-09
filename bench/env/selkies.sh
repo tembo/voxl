@@ -27,3 +27,4 @@ docker run -d --name selkies-bench "${U[@]}" --network host --ipc host -v /tmp/.
   --printing-enabled=false --enable-sharing=false --enable-clipboard=true --ui-show-sidebar=false \
   --enable-metrics-http=false "$@" >/dev/null
 for i in $(seq 1 100); do ss -ltn | grep -q ":6912 " && break; sleep 0.2; done
+ss -ltn | grep -q ":6912 " || { echo "selkies did not start: docker logs selkies-bench" >&2; exit 1; }
