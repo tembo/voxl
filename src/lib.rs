@@ -29,6 +29,7 @@ mod record;
 #[cfg(target_os = "linux")]
 mod screen;
 mod server;
+mod settings;
 mod video;
 mod wait;
 #[cfg(windows)]
@@ -170,6 +171,8 @@ async fn serve(a: HashMap<String, String>) {
         // threads cost ~3x the CPU on desktop content, so this saves 20-55% CPU, but
         // small updates encode a few ms slower on one thread.
         adaptive_threads: truthy(a.get("adaptive-threads"), false),
+        // On: quality follows the connection, starting from --crf (see RateCtl).
+        auto_quality: truthy(a.get("auto-quality"), true),
         coalesce: std::time::Duration::from_micros(range_max(a.get("coalesce-us"), 0.0) as u64),
     };
     let clip = a
@@ -180,6 +183,8 @@ async fn serve(a: HashMap<String, String>) {
         to_server: matches!(clip, "true" | "in"),
         to_client: matches!(clip, "true" | "out"),
     };
+    // The settings panel can turn either direction off, never on (settings.rs).
+    let (clip_in, clip_out) = (clip_mode.to_server, clip_mode.to_client);
     let audio_on = truthy(a.get("audio-enabled"), true);
 
     let hub = hub::Hub::new();
@@ -260,6 +265,11 @@ async fn serve(a: HashMap<String, String>) {
             .cloned()
             .unwrap_or_else(|| "output.monitor".into());
         let br = range_max(a.get("audio-bitrate"), 128000.0) as i32;
+        hub.audio_bitrate
+            .store(br, std::sync::atomic::Ordering::Relaxed);
+        // Auto sound by default: up to --audio-bitrate, less when the link is slow.
+        hub.audio_auto
+            .store(br, std::sync::atomic::Ordering::Relaxed);
         audio::spawn(dev, br, hub.clone());
     }
 
@@ -287,6 +297,7 @@ async fn serve(a: HashMap<String, String>) {
             .trim_matches('/')
             .to_string(),
         max_upload_bytes: (range_max(a.get("max-upload-mb"), 0.0) * 1048576.0) as u64,
+        live: Default::default(),
     });
     log::info!("file transfer: {transfers} under {}", files.root.display());
     // --microphone-enabled (as in selkies): browser microphone -> a FIFO that a
@@ -336,6 +347,20 @@ async fn serve(a: HashMap<String, String>) {
             log::error!("{e}");
             std::process::exit(1);
         });
+    // GET /screenshot, /record; --max-record-seconds caps a recording's length.
+    let recorder = record::Recorder::new(
+        hub.clone(),
+        std::time::Duration::from_secs_f64(range_max(a.get("max-record-seconds"), 300.0)),
+    );
+    // The toolbar's settings panel: flags set where each setting starts.
+    let settings = settings::Settings::new(
+        hub.clone(),
+        files.clone(),
+        recorder.clone(),
+        clip_in,
+        clip_out,
+        audio_on,
+    );
     let state = server::AppState {
         hub: hub.clone(),
         audio: audio_on,
@@ -344,11 +369,8 @@ async fn serve(a: HashMap<String, String>) {
         mic,
         resize: resize_on,
         read_only,
-        // GET /screenshot, /record; --max-record-seconds caps a recording's length.
-        recorder: record::Recorder::new(
-            hub.clone(),
-            std::time::Duration::from_secs_f64(range_max(a.get("max-record-seconds"), 300.0)),
-        ),
+        recorder,
+        settings,
         // --title: the browser tab's title.
         index: server::index_html(
             a.get("title")

@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,6 +24,18 @@ pub struct Files {
     pub default_dir: String,
     /// 0 = unlimited.
     pub max_upload_bytes: u64,
+    /// Narrower rules set from the settings panel while voxl runs.
+    pub live: Live,
+}
+
+/// What the settings panel narrowed: it can turn transfers off and lower the upload
+/// limit, never allow more than the flags did.
+#[derive(Default)]
+pub struct Live {
+    pub upload_off: AtomicBool,
+    pub download_off: AtomicBool,
+    /// 0 = no limit beyond `max_upload_bytes`.
+    pub max_upload_bytes: AtomicU64,
 }
 
 /// Uploads must carry this header. Browsers only send custom headers cross-origin
@@ -42,6 +54,25 @@ fn err(code: StatusCode, msg: &str) -> Response {
 }
 
 impl Files {
+    pub fn can_upload(&self) -> bool {
+        self.upload && !self.live.upload_off.load(Ordering::Relaxed)
+    }
+
+    pub fn can_download(&self) -> bool {
+        self.download && !self.live.download_off.load(Ordering::Relaxed)
+    }
+
+    /// Largest upload in bytes, 0 for no limit.
+    pub fn upload_limit(&self) -> u64 {
+        match (
+            self.max_upload_bytes,
+            self.live.max_upload_bytes.load(Ordering::Relaxed),
+        ) {
+            (0, l) | (l, 0) => l,
+            (a, b) => a.min(b),
+        }
+    }
+
     /// Resolves a client path ("Downloads/report.pdf") under the root. Absolute paths and
     /// `..` are rejected; symlinks are followed only if they stay inside the root.
     // The error is the HTTP response to send, as is usual with axum.
@@ -75,7 +106,7 @@ impl Files {
 }
 
 pub async fn list(State(f): State<Arc<Files>>, Query(q): Q) -> Response {
-    if !f.download && !f.upload {
+    if !f.can_download() && !f.can_upload() {
         return err(StatusCode::FORBIDDEN, "file transfer is disabled");
     }
     let rel = q.get("path").map(String::as_str).unwrap_or("");
@@ -135,7 +166,7 @@ pub async fn list(State(f): State<Arc<Files>>, Query(q): Q) -> Response {
 }
 
 pub async fn download(State(f): State<Arc<Files>>, Query(q): Q) -> Response {
-    if !f.download {
+    if !f.can_download() {
         return err(StatusCode::FORBIDDEN, "downloads are disabled");
     }
     let path = match f.resolve(q.get("path").map(String::as_str).unwrap_or(""), true) {
@@ -404,7 +435,7 @@ pub async fn upload(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    if !f.upload {
+    if !f.can_upload() {
         return err(StatusCode::FORBIDDEN, "uploads are disabled");
     }
     if !headers.contains_key(UPLOAD_HEADER) {
@@ -480,12 +511,13 @@ pub async fn upload(
         }
     };
     let mut written: u64 = 0;
+    let limit = f.upload_limit();
     let mut stream = body.into_data_stream();
     let result: Result<(), Response> = async {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|_| err(StatusCode::BAD_REQUEST, "upload interrupted"))?;
             written += chunk.len() as u64;
-            if f.max_upload_bytes > 0 && written > f.max_upload_bytes {
+            if limit > 0 && written > limit {
                 return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "file is too large"));
             }
             out.write_all(&chunk).await.map_err(|e| {

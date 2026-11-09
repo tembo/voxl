@@ -120,6 +120,11 @@ impl Screen {
         self.max
     }
 
+    /// The sizes the panel's resolution menu offers: the display's own modes.
+    pub fn sizes(&self) -> Vec<(u32, u32)> {
+        SIZES.lock().clone()
+    }
+
     pub fn fit(&self, w: u32, h: u32) -> (u32, u32) {
         fit(w, h, self.max)
     }
