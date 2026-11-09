@@ -439,6 +439,8 @@ async fn serve(a: HashMap<String, String>) {
         #[cfg(windows)]
         let _ = tokio::signal::ctrl_c().await;
         log::info!("shutting down");
+        #[cfg(target_os = "macos")]
+        screen::restore_rotation();
         if let Some(tx) = shutdown_hub.input.lock().as_ref() {
             let _ = tx.send(input::InputEvent::Shutdown);
         }
