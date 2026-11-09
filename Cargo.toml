@@ -64,6 +64,9 @@ zip = { version = "7", default-features = false, features = [
 nix = { version = "0.31", features = ["fs", "poll", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+memmap2 = "0.9"
 x11rb = { version = "0.13", features = [
 	"shm",
 	"damage",

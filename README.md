@@ -323,10 +323,13 @@ localhost:
 
 Phones and tablets get touch input and an on-screen keyboard.
 
-**Wayland?** Not yet; on Linux voxl streams X11 displays, Xvfb included. The virtual
-desktops voxl is built for run on Xvfb (E2B's and Daytona's do too), and X11 lets voxl
-capture them without a permission prompt, with damage events that keep a still screen at
-no CPU and power `/wait`. Wayland support is being worked on.
+**Wayland?** Experimental capture is available with `--capture-backend=wayland`.
+It requires `ext-image-copy-capture-v1` and XRGB/ARGB shared-memory buffers, as
+provided by recent labwc/wlroots. This prototype is read-only, embeds the cursor,
+and supports video, screenshots, recordings and `/wait`; remote input, clipboard,
+portal/PipeWire capture and a wlr-screencopy fallback are not implemented. X11 remains
+the default, including its direct Xvfb framebuffer path. See the
+[Wayland prototype and benchmark instructions](bench/wayland/README.md).
 
 **Does it use the GPU?** Not yet. voxl encodes H.264 on the CPU with x264: 1.3–1.7 cores
 for a busy 2560x1600 desktop, X server included (see the CPU table above). Hardware
