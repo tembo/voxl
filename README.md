@@ -339,7 +339,9 @@ localhost:
 | Safari 16.4+ and any browser on iPhone or iPad (sound needs Safari 26) | Yes   |
 | Firefox for Android                                                    | No    |
 
-Phones and tablets get touch input and an on-screen keyboard.
+Phones and tablets get touch input (tap to click, drag, long press to right click, pinch
+to zoom, two fingers to move around a zoomed-in view and scroll) and an on-screen
+keyboard.
 
 **Wayland?** Not yet; on Linux voxl streams X11 displays, Xvfb included. The virtual
 desktops voxl is built for run on Xvfb (E2B's and Daytona's do too), and X11 lets voxl

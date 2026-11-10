@@ -20,7 +20,7 @@ export interface App {
 	inIframe: boolean;
 	/** Desktop size in pixels; 0 until the server says hello. */
 	desk: { w: number; h: number };
-	/** On-screen CSS pixels per desktop pixel. */
+	/** On-screen CSS pixels per desktop pixel, before any pinch zoom (zoom.ts). */
 	view: { scale: number };
 }
 
