@@ -140,6 +140,8 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 | `--read-only`                                                  | `false`                            | viewers only watch: input, clipboard writes, the microphone, uploads and resizing (`--enable-resize`) are refused |
 | `--allowed-hosts`                                              | none                               | host names to answer for besides IP addresses and `localhost` (`.example.com` covers subdomains, `*` any)         |
 | `--allowed-origins`                                            | none                               | other sites whose pages may connect, such as a page that embeds voxl's client (`*` any site)                      |
+| `--tls`                                                        | `false`                            | serve HTTPS with a self-signed certificate, made on first start and reused (see [HTTPS](#https))                  |
+| `--tls-cert`, `--tls-key`                                      | none                               | serve HTTPS with this PEM certificate chain and key                                                               |
 | `--files-root`                                                 | `$HOME`                            | folder the Files panel can see; nothing outside it is reachable                                                   |
 | `--upload-dir`                                                 | `Downloads`                        | folder (under the root) the panel opens and uploads into; created on first upload                                 |
 | `--max-upload-mb`                                              | `0` (no limit)                     | largest accepted upload                                                                                           |
@@ -276,6 +278,20 @@ The other flags work as on Linux; `--microphone-fifo` and the rounded-corner fla
 apply. Dynamic resolution picks the largest display mode that fits the viewer's window,
 and Windows restores the original mode when voxl exits.
 
+### HTTPS
+
+`--tls-cert` and `--tls-key` serve HTTPS with a PEM certificate chain and key you
+provide. `--tls` on its own makes a self-signed certificate on first start and reuses it
+after that, so each browser asks to trust it only once. It's kept in `VOXL_TLS_DIR` if
+set, otherwise `%LOCALAPPDATA%\voxl` on Windows or `~/.config/voxl` elsewhere, and names
+`localhost`, the machine's host name, the `--addr` address and the `--allowed-hosts`
+names; delete it to make a new one. Over HTTPS, open `https://`: a browser that asks for
+`http://` on the same port gets an invalid response.
+
+```sh
+voxl --addr=0.0.0.0 --tls
+```
+
 ## FAQ
 
 **Why a WebSocket and not WebRTC?** One WebSocket goes wherever a web page does: through
@@ -304,12 +320,14 @@ goes through the ID and relay servers, and the self-hosted one comes with RustDe
 Server Pro.
 
 **Why doesn't the stream load at `http://<ip>:6901`?** Browsers only allow WebCodecs on
-HTTPS pages and on localhost. To watch from another machine, put voxl behind a TLS proxy
-(Caddy, Cloudflare Tunnel, `tailscale serve`) and name its host with `--allowed-hosts`,
-or forward the port over SSH and open `localhost`.
+HTTPS pages and on localhost. To watch from another machine, start voxl with `--tls`
+(see [HTTPS](#https)), put it behind a TLS proxy (Caddy, Cloudflare Tunnel,
+`tailscale serve`) and name its host with `--allowed-hosts`, or forward the port over
+SSH and open `localhost`.
 
-**Is it safe to expose?** voxl asks for a password by default but serves plain HTTP, so
-put it behind TLS away from localhost. See [SECURITY.md](SECURITY.md).
+**Is it safe to expose?** voxl asks for a password by default but serves plain HTTP
+unless `--tls` or `--tls-cert` is given, so serve it over HTTPS away from localhost. See
+[SECURITY.md](SECURITY.md).
 
 **Which browsers and devices work?** Any browser with WebCodecs, on an HTTPS page or
 localhost:
