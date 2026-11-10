@@ -45,7 +45,8 @@ export interface Hello {
 	readOnly?: boolean;
 	/** Dynamic resolution: desktop pixels per CSS pixel of the viewer's window. */
 	resize?: { scale: number };
-	/** macOS: one shared display, selected by its CoreGraphics ID. */
+	/** One shared display the viewers pick together: a CoreGraphics ID on macOS, a
+	 * display index on Windows. */
 	displays?: { selected: number; available: { id: number; name: string }[] };
 }
 

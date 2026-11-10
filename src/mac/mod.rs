@@ -184,10 +184,10 @@ pub fn request_display(hub: &crate::hub::Hub, id: u32, client: u64) -> Result<bo
         return Ok(false);
     }
     let mut pending = hub.display_req.lock();
-    let request = hub
-        .pause_display_input(id, client)
+    let (sender, ready) = hub
+        .pause_display_input(client)
         .ok_or("display switch already in progress")?;
-    *pending = Some(request);
+    *pending = Some(DisplayRequest { id, sender, ready });
     hub.wake();
     Ok(true)
 }
