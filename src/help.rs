@@ -15,6 +15,10 @@ Server:
   --allowed-hosts               host names to answer for besides IP addresses and
                                 localhost (.example.com covers subdomains, * any)
   --allowed-origins             other sites whose pages may connect (* any)
+  --tls                         serve HTTPS with a self-signed certificate, made once
+                                and kept (VOXL_TLS_DIR, else %LOCALAPPDATA%\\voxl or
+                                ~/.config/voxl)
+  --tls-cert, --tls-key         serve HTTPS with this PEM certificate chain and key
 
 Login:
   --enable-basic-auth           ask for a password (default true)
@@ -82,6 +86,8 @@ Desktop (this Mac's screen):
   --resize-scale                display pixels per CSS pixel (default: the
                                 capture scale)
   --read-only                   viewers only watch (default false)
+  --show-cursor                 include the host cursor in the video stream
+                                (default: true with --read-only, else false)
   --scroll-px-per-notch         pixels one wheel notch scrolls (default 180)
 ";
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# cpusuite2.sh : server CPU (X server + streamer) for noVNC and Neko with one native
-# client connected, per workload, as cpusuite.sh. noVNC = x11vnc + websockify + Xvfb;
-# Neko = the neko server (in its container) + Xvfb.
+# cpusuite2.sh : server CPU (X server + streamer) for noVNC, Neko and Sunshine with one
+# native client connected, per workload, as cpusuite.sh. noVNC = x11vnc + websockify + Xvfb;
+# Neko = the neko server (in its container) + Xvfb; Sunshine = sunshine + Xvfb
+# (SERVERS=sunshine sunshine_tuned, see suite3.sh).
 cd "$(dirname "$(readlink -f "$0")")"
 OUT=${OUT:-/tmp/cpusuite2.jsonl}
 BD=${BENCH_DISPLAY:-:2}
@@ -21,6 +22,10 @@ for srv in ${SERVERS:-novnc neko neko_tuned}; do
       if [ $srv = neko ]; then env/neko.sh >/dev/null; else env/neko-tuned.sh >/dev/null; fi
       sleep 5
       pids="$(docker inspect -f '{{.State.Pid}}' neko-bench) $(pid_of "Xvfb $BD ")"; cli="/tmp/rtcpy.sh nkclient.py 127.0.0.1:6942" ;;
+    sunshine|sunshine_tuned)
+      if [ $srv = sunshine ]; then SUNSHINE_OPTS= env/sunshine.sh >/dev/null; cli="./py.sh mlclient.py localhost"
+      else SUNSHINE_OPTS='sw_preset=ultrafast min_threads=4' env/sunshine.sh >/dev/null; cli="env ML_BITRATE=30000 ./py.sh mlclient.py localhost"; fi
+      pids="$(cat "${SUNSHINE_DIR:-/tmp/voxl-bench-sunshine}/pid") $(pid_of "Xvfb $BD ")" ;;
   esac
   for wl in ${WORKLOADS:-idle anim1080 scroll animfull}; do
     case $wl in

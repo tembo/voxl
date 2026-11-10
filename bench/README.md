@@ -1,6 +1,6 @@
 # Benchmarks
 
-Tools used to compare voxl with selkies and KasmVNC. Everything runs on a separate Xvfb display
+Tools used to compare voxl with selkies, KasmVNC, Neko, noVNC and Sunshine. Everything runs on a separate Xvfb display
 (`:2` by default, `BENCH_DISPLAY` to change it), so a live desktop isn't disturbed.
 
 ## Setup
@@ -10,10 +10,15 @@ cc -O2 -o loadgen loadgen.c -lX11 -lXext      # 60 Hz animation with a frame/tim
 cc -O2 -o rootlat rootlat.c -lX11             # marker latency on the root window
 env/xvfb.sh & sleep 1; env/openbox.sh &       # 2560x1600 @ 144 DPI, like production
 env/voxl.sh                                   # voxl on :6902 (VOXL_BIN to override)
-SELKIES_BIN=/path/to/selkies env/selkies.sh & # selkies on :6912
+env/selkies.sh                                # selkies (own Xvfb) :3, port 6912 (SELKIES_IMAGE to override)
+BENCH_DISPLAY=:3 env/openbox.sh &
 KASMVNC=/path/to/kasmvncserver XKB_DIR=/path/to/xkb env/kasmvnc.sh &  # KasmVNC (own X server) :5, port 6922
 sleep 1; BENCH_DISPLAY=:5 env/openbox.sh &
 ```
+
+`env/selkies.sh` runs selkies and the XLibre Xvfb from selkies' base image, since
+selkies reads the screen in place only from its own X server; `docker logs selkies-bench`
+is its log. CBR from 30 Mbps, with congestion control down to 2 Mbps.
 
 `KASMVNC` is the monorepo's `nix/packages/kasmvnc` build; `XKB_DIR` is
 `xkeyboard_config`'s `share/X11/xkb`. `env/kasmvnc.sh` passes the flags Tembo's
@@ -40,6 +45,15 @@ sleep 1; BENCH_DISPLAY=:5 env/openbox.sh &
   `WEBSOCKIFY`), `env/neko.sh` (Neko's official image against the benchmark display;
   `NEKO_SHAPE=mbps/rtt` shapes its UDP media with `tc netem` in its own container
   network) or `env/neko-tuned.sh` (60 FPS x264).
+- `mlclient.py host secs [x y]`: native Moonlight client for Sunshine. Streams with
+  moonlight-embedded built by `moonlight/` (`nix-build moonlight`; its patch makes
+  `-platform fake` hand each frame over as it arrives), decodes with FFmpeg and reads the
+  marker. `MOONLIGHT` (the binary), `ML_HOME` (its pairing keys), `ML_BITRATE`. Same JSON.
+- `suite3.sh`: Sunshine through the same workloads and links (`CONFIGS`: `sunshine`,
+  `sunshine_tuned`; `REPS`), restarting it per run with `env/sunshine.sh` (`SUNSHINE`:
+  the binary; `SUNSHINE_SHAPE=mbps/rtt` runs it in its own container network shaped
+  with `tc netem`, like Neko). Pair once as `env/sunshine.sh` describes. `cpusuite2.sh`
+  measures its CPU with `SERVERS="sunshine sunshine_tuned"`.
 - `daytona_bench.py up|run|down`: a Daytona sandbox (default size, 2560x1600 desktop
   with x11vnc + noVNC) with the workloads in it, measured with `kclient.py` through
   Daytona's signed preview proxy (`KC_URL`, `KC_HEADERS`; `KC_CONNECT` to go through

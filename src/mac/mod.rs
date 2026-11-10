@@ -48,6 +48,7 @@ struct Settings {
     scale: Option<f64>,
     max_pixels: f64,
     fps: u32,
+    show_cursor: bool,
 }
 
 static SETTINGS: Mutex<Settings> = Mutex::new(Settings {
@@ -55,14 +56,18 @@ static SETTINGS: Mutex<Settings> = Mutex::new(Settings {
     scale: None,
     max_pixels: 2560.0 * 1600.0,
     fps: 60,
+    show_cursor: false,
 });
 
 /// Reads the macOS options and checks the privacy permissions voxl needs.
 pub fn init(a: &HashMap<String, String>) {
     let display = pick_display(a.get("display").map(|s| s.as_str()));
+    let read_only = crate::truthy(a.get("read-only"), false);
+    let show_cursor = crate::truthy(a.get("show-cursor"), read_only);
     {
         let mut s = SETTINGS.lock();
         s.display = display;
+        s.show_cursor = show_cursor;
         s.scale = a
             .get("capture-scale")
             .and_then(|v| v.parse().ok())
@@ -161,6 +166,10 @@ pub fn fps() -> u32 {
     SETTINGS.lock().fps
 }
 
+pub fn show_cursor() -> bool {
+    SETTINGS.lock().show_cursor
+}
+
 /// Pixels per point for a `w`x`h`-point desktop whose panel has `native` pixels per
 /// point: native, reduced so a frame stays within --max-capture-pixels (x264's cost
 /// grows with area).
@@ -215,5 +224,30 @@ fn prompt_accessibility() {
         let key = CFString::from_static_str("AXTrustedCheckOptionPrompt");
         let opts = CFDictionary::from_slices(&[&*key], &[CFBoolean::new(true)]);
         AXIsProcessTrustedWithOptions(&*opts as *const _ as *const std::ffi::c_void);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn show_cursor_default_and_flags() {
+        let mut a = HashMap::new();
+        init(&a);
+        assert!(!show_cursor());
+
+        a.insert("show-cursor".into(), "true".into());
+        init(&a);
+        assert!(show_cursor());
+
+        a.clear();
+        a.insert("read-only".into(), "true".into());
+        init(&a);
+        assert!(show_cursor());
+
+        a.insert("show-cursor".into(), "false".into());
+        init(&a);
+        assert!(!show_cursor());
     }
 }

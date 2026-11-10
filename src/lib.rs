@@ -29,6 +29,7 @@ mod record;
 #[cfg(target_os = "linux")]
 mod screen;
 mod server;
+mod tls;
 mod video;
 mod wait;
 #[cfg(windows)]
@@ -72,7 +73,7 @@ fn range_max(v: Option<&String>, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-fn truthy(v: Option<&String>, default: bool) -> bool {
+pub(crate) fn truthy(v: Option<&String>, default: bool) -> bool {
     v.map(|s| matches!(s.as_str(), "true" | "1" | "yes" | "on"))
         .unwrap_or(default)
 }
@@ -377,15 +378,44 @@ async fn serve(a: HashMap<String, String>) {
     // Added last, so it runs first: a request for the wrong host or from another site's
     // page is turned away before the login is asked for.
     let app = app.layer(axum::middleware::from_fn_with_state(access, access::check));
+    // HTTPS (see tls.rs). A self-signed certificate names this machine, the bound address
+    // and the --allowed-hosts names.
+    let tls = {
+        let mut names = vec!["localhost".to_string(), "127.0.0.1".into(), "::1".into()];
+        for v in ["COMPUTERNAME", "HOSTNAME"] {
+            if let Ok(h) = std::env::var(v) {
+                names.push(h.to_ascii_lowercase());
+            }
+        }
+        if !matches!(
+            addr.as_str(),
+            "0.0.0.0" | "::" | "127.0.0.1" | "::1" | "localhost"
+        ) {
+            names.push(addr.clone());
+        }
+        for h in a.get("allowed-hosts").map_or("", |s| s.as_str()).split(',') {
+            let h = h.trim();
+            if !h.is_empty() && h != "*" {
+                names.push(
+                    h.strip_prefix('.')
+                        .map_or(h.to_string(), |d| format!("*.{d}")),
+                );
+            }
+        }
+        names.sort();
+        names.dedup();
+        tls::from_args(&a, names)
+    };
+    let scheme = if tls.is_some() { "https" } else { "http" };
     let listener = tokio::net::TcpListener::bind((addr.as_str(), port))
         .await
         .expect("bind");
-    log::info!("listening on http://{addr}:{port}");
+    log::info!("listening on {scheme}://{addr}:{port}");
     // Where to point a browser on this machine.
     let page = match addr.as_str() {
-        "0.0.0.0" | "::" => format!("http://localhost:{port}/"),
-        a if a.contains(':') => format!("http://[{a}]:{port}/"),
-        a => format!("http://{a}:{port}/"),
+        "0.0.0.0" | "::" => format!("{scheme}://localhost:{port}/"),
+        a if a.contains(':') => format!("{scheme}://[{a}]:{port}/"),
+        a => format!("{scheme}://{a}:{port}/"),
     };
     match &login {
         Some((l, true)) => log::info!(
@@ -397,10 +427,6 @@ async fn serve(a: HashMap<String, String>) {
         ),
         None => log::info!("login off (--enable-basic-auth=false): anyone who reaches {page} can use this desktop"),
     }
-    use axum::serve::ListenerExt;
-    let listener = listener.tap_io(|tcp| {
-        let _ = tcp.set_nodelay(true);
-    });
     let shutdown_hub = hub.clone();
     tokio::spawn(async move {
         #[cfg(unix)]
@@ -418,6 +444,13 @@ async fn serve(a: HashMap<String, String>) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         std::process::exit(0);
+    });
+    if let Some(config) = tls {
+        return tls::serve(listener, app, config).await;
+    }
+    use axum::serve::ListenerExt;
+    let listener = listener.tap_io(|tcp| {
+        let _ = tcp.set_nodelay(true);
     });
     axum::serve(listener, app).await.unwrap();
 }
