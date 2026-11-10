@@ -84,14 +84,14 @@ pub fn spawn(device: String, bitrate: i32, hub: Arc<Hub>) {
                 minreq: u32::MAX,
                 fragsize: frag,
             };
+            let mut recorder = crate::record_audio::Encoder::new(bitrate);
             let mut pcm = vec![0i16; FRAME * 2];
             let mut out = vec![0u8; 4000];
             loop {
                 let want = || {
-                    hub.clients
-                        .lock()
-                        .iter()
-                        .any(|c| c.audio.load(Ordering::Relaxed))
+                    hub.clients.lock().iter().any(|c| {
+                        c.audio.load(Ordering::Relaxed) || c.recording_audio.load(Ordering::Relaxed)
+                    })
                 };
                 if !want() {
                     std::thread::sleep(Duration::from_millis(200));
@@ -126,6 +126,7 @@ pub fn spawn(device: String, bitrate: i32, hub: Arc<Hub>) {
                     if checked % 50 == 0 && !want() {
                         break;
                     }
+                    recorder.push(&hub, &pcm);
                     if pcm.iter().all(|&s| s == 0) {
                         continue;
                     }

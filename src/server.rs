@@ -226,6 +226,7 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
             let msg = match m {
                 Out::Bin(b) => Message::Binary(b),
                 Out::Text(t) => Message::Text(t.into()),
+                Out::RecordingAudio(_, _) => continue,
             };
             if sink.send(msg).await.is_err() {
                 break;
