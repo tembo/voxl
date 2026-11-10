@@ -108,6 +108,8 @@
 				display: none;
 				pointer-events: none;
 				background-size: 100% 100%;
+				/* trackpad.ts scales it around the hotspot to undo pinch zoom. */
+				transform-origin: var(--hx) var(--hy);
 			}
 			#tp-pointer.dot {
 				width: 12px;

@@ -1,7 +1,7 @@
 // Mouse, wheel/trackpad and touch input on the desktop surface.
 import { cmd } from '../protocol';
 import type { App } from './app';
-import type { createCursor } from './cursor';
+import type { Cursor } from './cursor';
 import { createTouch } from './touch';
 import { createTrackpad } from './trackpad';
 import type { Zoom } from './zoom';
@@ -11,7 +11,7 @@ const BUTTONS = [1, 2, 3, 8, 9];
 
 export function setupPointer(
 	app: App,
-	cursor: ReturnType<typeof createCursor>,
+	cursor: Cursor,
 	zoom: Zoom,
 	onInteract: () => void
 ) {
@@ -67,6 +67,7 @@ export function setupPointer(
 		queueScroll,
 		deskPerPx,
 		cursor,
+		zoom,
 	});
 	// Each gesture stays with the mode it started in, even if trackpad mode is toggled.
 	const touching = new Set<number>();

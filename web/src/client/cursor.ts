@@ -18,6 +18,8 @@ export interface CursorImage {
 	hy: number;
 }
 
+export type Cursor = ReturnType<typeof createCursor>;
+
 export function createCursor(app: App) {
 	let msg: ArrayBuffer | null = null;
 	let image: CursorImage | null = null;
