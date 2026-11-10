@@ -591,10 +591,191 @@
 				line-height: 20px;
 				letter-spacing: -0.1px;
 			}
+			/* Other viewers' pointers, in their colors, over the desktop. */
+			#peers {
+				position: absolute;
+				inset: 0;
+				z-index: 1;
+				pointer-events: none;
+				overflow: hidden;
+			}
+			.peer {
+				position: absolute;
+				display: none;
+				transition:
+					left 0.05s linear,
+					top 0.05s linear;
+			}
+			.peer.on {
+				display: block;
+			}
+			.peer svg {
+				display: block;
+				filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+			}
+			.peer span {
+				position: absolute;
+				left: 12px;
+				top: 16px;
+				padding: 2px 6px;
+				border-radius: 6px;
+				background: var(--c);
+				color: #fff;
+				font: 600 11px/14px var(--font);
+				white-space: nowrap;
+				box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+			}
+
+			/* People here: a toolbar button once someone else joins, with the list and
+			   short notices dropping down beneath the toolbar. */
+			#users-btn {
+				display: none !important;
+				position: relative;
+			}
+			#tools.users #users-btn {
+				display: inline-grid !important;
+			}
+			#users-count {
+				position: absolute;
+				right: 1px;
+				bottom: 1px;
+				min-width: 12px;
+				height: 12px;
+				padding: 0 2px;
+				box-sizing: border-box;
+				border-radius: 999px;
+				background: var(--fill-primary);
+				color: #fff;
+				font: 700 9px/12px var(--font);
+				text-align: center;
+				font-variant-numeric: tabular-nums;
+			}
+			#users-btn.ask #users-count {
+				background: var(--accent);
+			}
+			#tools.users-open {
+				opacity: 1;
+				pointer-events: auto;
+			}
+			#users {
+				position: fixed;
+				top: 48px;
+				right: 8px;
+				z-index: 3;
+				display: none;
+				flex-direction: column;
+				gap: 6px;
+				align-items: flex-end;
+				width: min(280px, calc(100vw - 16px));
+				color: var(--text-default);
+				font: 520 13px/16px var(--font);
+				letter-spacing: -0.2px;
+			}
+			#users.show {
+				display: flex;
+			}
+			#tools.touch ~ #users {
+				top: auto;
+				bottom: 64px;
+				flex-direction: column-reverse;
+			}
+			#users-note,
+			#users-panel {
+				box-sizing: border-box;
+				background: color-mix(in srgb, var(--surface-raised) 90%, transparent);
+				border: 1.5px solid var(--border-default);
+				border-radius: 12px;
+				box-shadow:
+					0 20px 25px -5px rgba(0, 0, 0, 0.1),
+					0 8px 10px -6px rgba(0, 0, 0, 0.1);
+				backdrop-filter: blur(30px);
+				-webkit-backdrop-filter: blur(30px);
+				animation: enter 0.15s cubic-bezier(0.23, 1, 0.32, 1);
+			}
+			#users-note[hidden],
+			#users-panel[hidden] {
+				display: none;
+			}
+			#users-note {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+				max-width: 100%;
+				padding: 6px 6px 6px 12px;
+				color: var(--text-strong);
+			}
+			#users-note > span {
+				flex: 1;
+				padding: 4px 0;
+			}
+			#users-panel {
+				width: 100%;
+				padding: 4px;
+			}
+			#users-status {
+				padding: 6px 6px 4px;
+				color: var(--text-weak);
+			}
+			.u-dot {
+				display: inline-grid;
+				place-items: center;
+				flex: none;
+				width: 20px;
+				height: 20px;
+				border-radius: 999px;
+				color: #fff;
+				font: 700 10px/1 var(--font);
+				font-variant-numeric: tabular-nums;
+			}
+			.u-row {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				min-height: 32px;
+				padding: 0 4px;
+				border-radius: 8px;
+			}
+			.u-name {
+				flex: 1;
+				min-width: 0;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+			.u-badge {
+				color: var(--text-weak);
+				font-size: 12px;
+				white-space: nowrap;
+			}
+			.u-badge.req {
+				color: var(--accent);
+			}
+			.u-foot {
+				padding: 6px 4px 2px;
+			}
+			.btn:not(.primary) {
+				color: var(--text-strong);
+				background: var(--fill-tertiary);
+			}
+			.btn:not(.primary):hover {
+				background: var(--fill-tertiary-hover);
+			}
+			@media (prefers-reduced-motion: reduce) {
+				.peer {
+					transition: none;
+				}
+				#users-note,
+				#users-panel {
+					animation: none;
+				}
+			}
 		</style>
 	</head>
 	<body>
-		<div id="surface" tabindex="0"><canvas id="screen"></canvas></div>
+		<div id="surface" tabindex="0">
+			<canvas id="screen"></canvas>
+			<div id="peers"></div>
+		</div>
 		<textarea
 			id="kbd"
 			autocomplete="off"
@@ -604,6 +785,22 @@
 			tabindex="-1"
 			aria-hidden="true"></textarea>
 		<div id="tools">
+			<button
+				id="users-btn"
+				class="ib"
+				type="button"
+				title="People here"
+				aria-label="People here"
+				aria-expanded="false">
+				<svg class="i" viewBox="0 0 24 24" fill="none">
+					<path
+						d="M16 19C16 16.7909 13.3137 15 10 15C6.68629 15 4 16.7909 4 19M20 19C20 17.3431 18.6569 15.9546 16.8 15.4M10 12C12.2091 12 14 10.2091 14 8C14 5.79086 12.2091 4 10 4C7.79086 4 6 5.79086 6 8C6 10.2091 7.79086 12 10 12ZM16 4.1C17.7252 4.54404 19 6.11256 19 8C19 9.88744 17.7252 11.456 16 11.9"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round" /></svg
+				><span id="users-count"></span>
+			</button>
 			<button
 				id="kb-btn"
 				class="ib"
@@ -678,6 +875,13 @@
 						stroke-linejoin="round" />
 				</svg>
 			</button>
+		</div>
+		<div id="users">
+			<div id="users-note" role="status" aria-live="polite" hidden></div>
+			<div id="users-panel" role="dialog" aria-label="People here" hidden>
+				<div id="users-status"></div>
+				<div id="users-list"></div>
+			</div>
 		</div>
 		<div id="files" role="dialog" aria-label="Files">
 			<header>

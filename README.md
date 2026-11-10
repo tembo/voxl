@@ -173,6 +173,17 @@ To let a page on another site connect, name that site with `--allowed-origins`.
 Programs that aren't browsers (curl, scripts, agents) send no `Origin` and connect as
 usual. A refused request gets a 403 that names the flag to add.
 
+### Several viewers
+
+Anyone with the link can watch at once; they all see the same stream. Only one viewer
+is in control: the first to connect. The others' clicks, keys, scrolling, clipboard and
+resizing are refused, but their pointers still show up for everyone, each in its own
+color and labeled with the viewer's number. Once someone else joins, a people button in
+the toolbar lists who is here. The viewer in control can hand control to anyone there,
+and the others can ask for it. When the viewer in control leaves, control passes to
+whoever asked first, or else to the viewer connected longest. With `--read-only` nobody
+is in control.
+
 ### For agents and scripts
 
 Screenshots and recordings (start voxl with `VOXL_PASSWORD` set, and send it along):

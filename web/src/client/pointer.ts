@@ -88,6 +88,13 @@ export function setupPointer(app: App, zoom: Zoom, onInteract: () => void) {
 		if (e.pointerType === 'touch') touch.cancel(e);
 		else send(cmd.releaseAll);
 	});
+	// Other viewers stop drawing this viewer's pointer once it leaves the desktop.
+	surface.addEventListener('pointerleave', (e) => {
+		if (e.pointerType !== 'touch') {
+			lastMove = '';
+			send(cmd.pointerGone);
+		}
+	});
 	surface.addEventListener('contextmenu', (e) => e.preventDefault());
 	surface.addEventListener(
 		'wheel',

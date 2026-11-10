@@ -53,7 +53,25 @@ export type ServerMessage =
 	| { t: 'ping'; s: number }
 	| { t: 'clip'; d: string }
 	| { t: 'mic'; on: boolean }
+	| Users
+	| PeerPointer
 	| { t: 'close' };
+
+/** Who is connected, who is in control (null: nobody, as with --read-only) and who asked. */
+export interface Users {
+	t: 'users';
+	you: number;
+	control: number | null;
+	users: { id: number; req: boolean }[];
+}
+
+/** Another viewer's pointer on the desktop; no x and y once it has left. */
+export interface PeerPointer {
+	t: 'pc';
+	id: number;
+	x?: number;
+	y?: number;
+}
 
 /** Text commands to the server. */
 export const cmd = {
@@ -71,6 +89,12 @@ export const cmd = {
 	/** Ask for a desktop of this size (dynamic resolution). */
 	resize: (w: number, h: number) => `sz,${w},${h}`,
 	keyframe: 'kf',
+	/** This viewer's pointer left the desktop. */
+	pointerGone: 'ph',
+	/** Ask the viewer in control for control, or take the request back. */
+	requestControl: (on: boolean) => `cr,${on ? 1 : 0}`,
+	/** Hand control to another viewer (only the viewer in control may). */
+	giveControl: (id: number) => `cg,${id}`,
 	pong: (sent: number) => `po,${sent}`,
 } as const;
 
