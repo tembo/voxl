@@ -8,8 +8,9 @@
 //! which only comes with the change after. While someone wants frames, a watcher takes
 //! the screen with a one-shot capture when idle frames stop for `STALL`, or when no
 //! frame came for `BACKSTOP`. The stream then also sends the held-back frame, marked
-//! all dirty. For both, the damage is the 16x16 blocks that differ from the last frame:
-//! exactly between stream frames, within `SHOT_TOLERANCE` against a one-shot capture.
+//! all dirty. For both, the damage is the 16x16 blocks that differ: a stream frame from
+//! the last stream frame exactly, and a one-shot capture (or a stream frame replacing
+//! one on screen) from the frame shown, within `SHOT_TOLERANCE`.
 
 use super::ffi::*;
 use super::stream::{self, OutputType};
@@ -55,6 +56,10 @@ impl Frame {
     fn retain(pb: CVPixelBufferRef) -> Self {
         unsafe { CVPixelBufferRetain(pb) };
         Frame { pb, locked: false }
+    }
+    /// Another reference to the same pixels.
+    fn share(&self) -> Self {
+        Frame::retain(self.pb)
     }
     fn lock(&mut self) {
         if !self.locked {
@@ -141,6 +146,9 @@ pub struct Capturer {
     next: Option<Frame>,
     /// The newest frame (`next`, else `current`) is a one-shot capture.
     shown_shot: bool,
+    /// The last stream frame, which the next one is compared with exactly. A one-shot
+    /// capture never replaces it, so a change it hides within the tolerance still shows.
+    stream_base: Option<Frame>,
     pub damaged: bool,
     /// When the first damage since the last take arrived.
     pub damaged_at: Option<Instant>,
@@ -311,6 +319,7 @@ impl Capturer {
             current: None,
             next: None,
             shown_shot: false,
+            stream_base: None,
             damaged: true,
             damaged_at: None,
             acc: None,
@@ -354,44 +363,53 @@ impl Capturer {
                 inc.shot,
             )
         };
+        let (w, h) = (self.width, self.height);
+        let mut changed = Vec::new();
         match frame {
-            Some(mut f) if diff => {
-                // Stream frames are identical where nothing changed; a one-shot capture
-                // differs a little from them everywhere.
-                let tol = if shot || self.shown_shot {
-                    SHOT_TOLERANCE
-                } else {
-                    0
-                };
-                let changed = match self.next.as_mut().or(self.current.as_mut()) {
-                    Some(base) => changed_blocks(base, &mut f, self.width, self.height, tol),
-                    None => vec![(0, 0, self.width, self.height)],
-                };
-                if self.debug {
-                    let what = if shot {
-                        "one-shot capture"
-                    } else {
-                        "frame after one-shot capture"
-                    };
-                    log::info!("{what} (tolerance {tol}) changed {changed:?}");
+            Some(mut f) if shot => {
+                // A one-shot capture differs a little from stream frames everywhere:
+                // compare it with what viewers see, within the tolerance.
+                match self.next.as_mut().or(self.current.as_mut()) {
+                    Some(shown) => changed = changed_blocks(shown, &mut f, w, h, SHOT_TOLERANCE),
+                    None => changed.push((0, 0, w, h)),
                 }
-                let found = !changed.is_empty();
-                if found {
-                    rects.extend(changed);
-                    self.shared.inc.lock().backstop = BACKSTOP;
-                }
-                // Keep every stream frame, changed or not, so the next one is compared
-                // with a stream frame, exactly.
-                if found || !shot {
+                if !changed.is_empty() {
                     self.next = Some(f);
-                    self.shown_shot = shot;
+                    self.shown_shot = true;
                 }
             }
-            Some(f) => {
+            Some(mut f) => {
+                if diff {
+                    // Stream frames are identical where nothing changed.
+                    match self.stream_base.as_mut() {
+                        Some(base) => changed = changed_blocks(base, &mut f, w, h, 0),
+                        None => changed.push((0, 0, w, h)),
+                    }
+                }
+                // Repaint where a one-shot capture on screen shows something else, such
+                // as a change that has since gone.
+                if self.shown_shot {
+                    if let Some(shown) = self.next.as_mut().or(self.current.as_mut()) {
+                        changed.extend(changed_blocks(shown, &mut f, w, h, SHOT_TOLERANCE));
+                    }
+                }
+                self.stream_base = Some(f.share());
                 self.next = Some(f);
                 self.shown_shot = false;
             }
             None => {}
+        }
+        if self.debug && (diff || !changed.is_empty()) {
+            let what = if shot {
+                "one-shot capture"
+            } else {
+                "frame after one-shot capture"
+            };
+            log::info!("{what} changed {changed:?}");
+        }
+        if !changed.is_empty() {
+            rects.extend(changed);
+            self.shared.inc.lock().backstop = BACKSTOP;
         }
         for (x0, y0, x1, y1) in rects {
             DAMAGE_EVENTS.fetch_add(1, Ordering::Relaxed);
