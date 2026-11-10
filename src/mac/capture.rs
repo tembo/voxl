@@ -8,7 +8,8 @@
 //! which only comes with the change after. While someone wants frames, a watcher takes
 //! the screen with a one-shot capture when idle frames stop for `STALL`, or when no
 //! frame came for `BACKSTOP`. The stream then also sends the held-back frame, marked
-//! all dirty; for both, the damage is what they show differently.
+//! all dirty. For both, the damage is the 16x16 blocks that differ from the last frame:
+//! exactly between stream frames, within `SHOT_TOLERANCE` against a one-shot capture.
 
 use super::ffi::*;
 use super::stream::{self, OutputType};
@@ -82,6 +83,8 @@ struct Incoming {
     /// `frame` (a one-shot capture, or a frame right after one) comes without its real
     /// changed areas: compare it with the previous one instead.
     diff: bool,
+    /// `frame` is a one-shot capture.
+    shot: bool,
     /// Until then, complete frames follow a one-shot capture (see `KICK`).
     kicked_until: Option<Instant>,
     /// The latest idle frame since the last complete frame or one-shot capture.
@@ -136,6 +139,8 @@ pub struct Capturer {
     current: Option<Frame>,
     /// Newest frame, adopted at the next grab.
     next: Option<Frame>,
+    /// The newest frame (`next`, else `current`) is a one-shot capture.
+    shown_shot: bool,
     pub damaged: bool,
     /// When the first damage since the last take arrived.
     pub damaged_at: Option<Instant>,
@@ -174,6 +179,7 @@ impl Capturer {
                 frame: None,
                 rects: Vec::new(),
                 diff: false,
+                shot: false,
                 kicked_until: None,
                 idle_at: None,
                 fresh_at: Instant::now(),
@@ -249,6 +255,7 @@ impl Capturer {
             {
                 let mut inc = sh.inc.lock();
                 inc.frame = Some(Frame::retain(pb));
+                inc.shot = false;
                 if inc.kicked_until.is_some_and(|t| Instant::now() < t) {
                     inc.diff = true;
                 } else {
@@ -303,6 +310,7 @@ impl Capturer {
             wake_r,
             current: None,
             next: None,
+            shown_shot: false,
             damaged: true,
             damaged_at: None,
             acc: None,
@@ -336,27 +344,53 @@ impl Capturer {
     pub fn pump(&mut self) -> Result<(), String> {
         let mut drain = [0u8; 64];
         while matches!(read(&self.wake_r, &mut drain), Ok(n) if n > 0) {}
-        let (frame, mut rects, diff) = {
+        let (frame, mut rects, diff, shot) = {
             let mut inc = self.shared.inc.lock();
             let diff = std::mem::take(&mut inc.diff);
-            (inc.frame.take(), std::mem::take(&mut inc.rects), diff)
+            (
+                inc.frame.take(),
+                std::mem::take(&mut inc.rects),
+                diff,
+                inc.shot,
+            )
         };
         match frame {
             Some(mut f) if diff => {
+                // Stream frames are identical where nothing changed; a one-shot capture
+                // differs a little from them everywhere.
+                let tol = if shot || self.shown_shot {
+                    SHOT_TOLERANCE
+                } else {
+                    0
+                };
                 let changed = match self.next.as_mut().or(self.current.as_mut()) {
-                    Some(base) => changed_bands(base, &mut f, self.width, self.height),
+                    Some(base) => changed_blocks(base, &mut f, self.width, self.height, tol),
                     None => vec![(0, 0, self.width, self.height)],
                 };
                 if self.debug {
-                    log::info!("frame after one-shot capture changed {changed:?}");
+                    let what = if shot {
+                        "one-shot capture"
+                    } else {
+                        "frame after one-shot capture"
+                    };
+                    log::info!("{what} (tolerance {tol}) changed {changed:?}");
                 }
-                if !changed.is_empty() {
+                let found = !changed.is_empty();
+                if found {
                     rects.extend(changed);
-                    self.next = Some(f);
                     self.shared.inc.lock().backstop = BACKSTOP;
                 }
+                // Keep every stream frame, changed or not, so the next one is compared
+                // with a stream frame, exactly.
+                if found || !shot {
+                    self.next = Some(f);
+                    self.shown_shot = shot;
+                }
             }
-            Some(f) => self.next = Some(f),
+            Some(f) => {
+                self.next = Some(f);
+                self.shown_shot = false;
+            }
             None => {}
         }
         for (x0, y0, x1, y1) in rects {
@@ -577,6 +611,7 @@ fn watch(
                         {
                             inc.frame = Some(Frame::retain(pb));
                             inc.diff = true;
+                            inc.shot = true;
                         }
                         inc.shooting = false;
                         inc.shots += 1;
@@ -595,16 +630,14 @@ fn watch(
 /// count as changes.
 const SHOT_TOLERANCE: u8 = 32;
 
-/// Whether two rows differ by more than `SHOT_TOLERANCE` anywhere.
-fn row_changed(a: &[u8], b: &[u8]) -> bool {
-    a != b
-        && a.iter()
-            .zip(b)
-            .any(|(x, y)| x.abs_diff(*y) > SHOT_TOLERANCE)
-}
-
-/// Full-width 16-row bands (x0, y0, x1, y1) where two NV12 frames differ.
-fn changed_bands(a: &mut Frame, b: &mut Frame, w: u32, h: u32) -> Vec<(u32, u32, u32, u32)> {
+/// 16x16 blocks where two NV12 frames differ by more than `tol`, as (x0, y0, x1, y1).
+fn changed_blocks(
+    a: &mut Frame,
+    b: &mut Frame,
+    w: u32,
+    h: u32,
+    tol: u8,
+) -> Vec<(u32, u32, u32, u32)> {
     a.lock();
     b.lock();
     let size = |pb| unsafe {
@@ -613,27 +646,118 @@ fn changed_bands(a: &mut Frame, b: &mut Frame, w: u32, h: u32) -> Vec<(u32, u32,
     if !size(a.pb) || !size(b.pb) {
         return vec![(0, 0, w, h)];
     }
-    let row = |pb: CVPixelBufferRef, plane: usize, y: u32| unsafe {
-        let base = CVPixelBufferGetBaseAddressOfPlane(pb, plane);
-        let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, plane);
+    let pbs = [a.pb, b.pb];
+    diff_blocks(w, h, tol, |i, plane, y| unsafe {
+        let base = CVPixelBufferGetBaseAddressOfPlane(pbs[i], plane);
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(pbs[i], plane);
         // Luma is one byte per pixel; chroma one CbCr pair per two pixels.
         let len = if plane == 0 { w } else { w.div_ceil(2) * 2 };
         std::slice::from_raw_parts(base.add(y as usize * stride), len as usize)
-    };
+    })
+}
+
+/// 16x16 blocks where two NV12 frames differ by more than `tol`, merged into runs along
+/// each 16-row band and then down, as (x0, y0, x1, y1). `row(frame, plane, y)` is row y of
+/// plane 0 (luma) or 1 (chroma) of frame 0 or 1. The rectangles drive the encoder's
+/// macroblock map and `/wait` regions, so they keep the changed columns too.
+fn diff_blocks<'a>(
+    w: u32,
+    h: u32,
+    tol: u8,
+    row: impl Fn(usize, usize, u32) -> &'a [u8],
+) -> Vec<(u32, u32, u32, u32)> {
+    let cols = w.div_ceil(16) as usize;
+    let mut dirty = vec![false; cols];
     let mut out: Vec<(u32, u32, u32, u32)> = Vec::new();
+    // Runs ending at the current band, which a run in it can extend.
+    let (mut above, mut here) = (Vec::<usize>::new(), Vec::new());
     for y0 in (0..h).step_by(16) {
         let y1 = (y0 + 16).min(h);
-        let differs = (y0..y1).any(|y| {
-            row_changed(row(a.pb, 0, y), row(b.pb, 0, y))
-                || (y % 2 == 0 && row_changed(row(a.pb, 1, y / 2), row(b.pb, 1, y / 2)))
-        });
-        if !differs {
-            continue;
+        dirty.fill(false);
+        for y in y0..y1 {
+            // Chroma rows cover two luma rows; their bytes line up with luma columns.
+            let planes: &[(usize, u32)] = if y % 2 == 0 {
+                &[(0, y), (1, y / 2)]
+            } else {
+                &[(0, y)]
+            };
+            for &(plane, py) in planes {
+                let (ra, rb) = (row(0, plane, py), row(1, plane, py));
+                if ra == rb {
+                    continue;
+                }
+                for (d, (ca, cb)) in dirty.iter_mut().zip(ra.chunks(16).zip(rb.chunks(16))) {
+                    *d = *d || (ca != cb && ca.iter().zip(cb).any(|(x, y)| x.abs_diff(*y) > tol));
+                }
+            }
+            if dirty.iter().all(|&d| d) {
+                break;
+            }
         }
-        match out.last_mut() {
-            Some(last) if last.3 == y0 => last.3 = y1,
-            _ => out.push((0, y0, w, y1)),
+        here.clear();
+        let mut c = 0;
+        while c < cols {
+            if !dirty[c] {
+                c += 1;
+                continue;
+            }
+            let c0 = c;
+            while c < cols && dirty[c] {
+                c += 1;
+            }
+            let (x0, x1) = (c0 as u32 * 16, (c as u32 * 16).min(w));
+            let i = match above.iter().find(|&&i| out[i].0 == x0 && out[i].2 == x1) {
+                Some(&i) => {
+                    out[i].3 = y1;
+                    i
+                }
+                None => {
+                    out.push((x0, y0, x1, y1));
+                    out.len() - 1
+                }
+            };
+            here.push(i);
         }
+        std::mem::swap(&mut above, &mut here);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two 64x48 NV12 frames with flat luma and chroma; `edit` changes the second.
+    fn diff(tol: u8, edit: impl Fn(&mut [Vec<u8>; 2])) -> Vec<(u32, u32, u32, u32)> {
+        let (w, h) = (64u32, 48u32);
+        let a = [
+            vec![100u8; (w * h) as usize],
+            vec![128u8; (w * h / 2) as usize],
+        ];
+        let mut b = a.clone();
+        edit(&mut b);
+        let frames = [a, b];
+        diff_blocks(w, h, tol, |i, plane, y| {
+            let s = &frames[i][plane];
+            &s[(y * w) as usize..((y + 1) * w) as usize]
+        })
+    }
+
+    #[test]
+    fn changed_blocks_keep_their_columns() {
+        // One pixel at the left edge changes only the leftmost block of its band.
+        assert_eq!(diff(0, |b| b[0][20 * 64] = 120), vec![(0, 16, 16, 32)]);
+        // Neighbouring blocks merge along the band, and down when they line up.
+        let r = diff(0, |b| {
+            for y in 0..48 {
+                b[0][y * 64 + 20] = 0;
+                b[0][y * 64 + 40] = 0;
+            }
+        });
+        assert_eq!(r, vec![(16, 0, 48, 48)]);
+        // Chroma changes count; differences within the tolerance don't.
+        assert_eq!(diff(0, |b| b[1][5 * 64 + 63] = 0), vec![(48, 0, 64, 16)]);
+        assert_eq!(diff(32, |b| b[0][0] = 120), vec![]);
+        assert_eq!(diff(0, |b| b[0][0] = 101), vec![(0, 0, 16, 16)]);
+    }
 }
