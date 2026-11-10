@@ -92,6 +92,9 @@ nix-shell
 cargo build --release
 ```
 
+On Linux, `--no-default-features` leaves out PulseAudio, and with it desktop audio: a
+voxl that can be linked statically (musl) and runs without PulseAudio's libraries.
+
 Or install it from [crates.io](https://crates.io/crates/voxl-server) with the same
 libraries on your system (the crate is `voxl-server`, the binary is `voxl`):
 
