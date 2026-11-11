@@ -297,14 +297,24 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     }
 }
 
+/// How long nobody must have watched before a display voxl rotated is put back. Long
+/// enough that a viewer who leaves for a moment (a phone switching apps, a dropped
+/// connection) finds the desktop as it left it: turning the display there and back
+/// takes several seconds.
+#[cfg(any(target_os = "macos", test))]
+const IDLE_BEFORE_RESTORE: Duration = Duration::from_secs(120);
+
 /// A display voxl rotated goes back to its own angle and mode once nobody has watched
-/// for a few seconds: a viewer that is closed or loses its connection cannot ask for
-/// that itself. The wait keeps a reconnecting viewer from turning the display twice.
+/// for a while: a viewer that is closed or loses its connection cannot ask for that
+/// itself.
 #[cfg(target_os = "macos")]
 fn restore_display_when_idle(hub: Arc<Hub>) {
+    let Some(left) = idle_since(&hub) else {
+        return;
+    };
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        if !hub.clients.lock().is_empty() {
+        tokio::time::sleep(IDLE_BEFORE_RESTORE).await;
+        if idle_since(&hub) != Some(left) {
             return;
         }
         if let Some(size) = crate::screen::home() {
@@ -313,6 +323,16 @@ fn restore_display_when_idle(hub: Arc<Hub>) {
             hub.wake();
         }
     });
+}
+
+/// Identifies the stretch without viewers that is running now: the same value for as
+/// long as nobody connects. None while somebody is watching.
+#[cfg(any(target_os = "macos", test))]
+fn idle_since(hub: &Hub) -> Option<u64> {
+    let clients = hub.clients.lock();
+    clients
+        .is_empty()
+        .then(|| hub.next_id.load(Ordering::Relaxed))
 }
 
 fn num<T: std::str::FromStr>(it: &mut std::str::Split<'_, char>) -> Option<T> {
@@ -441,6 +461,26 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A viewer that comes back and leaves again starts the wait over, so the display
+    /// is not put back moments after the second visit.
+    #[test]
+    fn a_new_viewer_restarts_the_wait_before_the_display_is_put_back() {
+        let hub = Hub::new();
+        let visit = |hub: &Hub| {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let client = hub.add_client(tx);
+            assert_eq!(idle_since(hub), None, "somebody is watching");
+            hub.remove_client(client.id);
+        };
+        visit(&hub);
+        let first = idle_since(&hub);
+        assert!(first.is_some());
+        assert_eq!(idle_since(&hub), first, "still the same wait");
+        visit(&hub);
+        assert_ne!(idle_since(&hub), first);
+        assert!(IDLE_BEFORE_RESTORE >= Duration::from_secs(60));
+    }
 
     /// Every command the web client sends (web/src/protocol.ts), with arguments.
     const ALL: &[&str] = &[
