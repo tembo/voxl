@@ -56,15 +56,18 @@ fn load(cert: &Path, key: &Path) -> Arc<rustls::ServerConfig> {
 /// Where voxl keeps the certificate it makes: %LOCALAPPDATA%\voxl on Windows,
 /// $XDG_CONFIG_HOME/voxl or ~/.config/voxl elsewhere, or VOXL_TLS_DIR.
 fn tls_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("VOXL_TLS_DIR") {
+    // A variable set to nothing counts as unset (as the XDG spec says for
+    // XDG_CONFIG_HOME), rather than putting the certificate in the working directory.
+    let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
+    if let Some(d) = var("VOXL_TLS_DIR") {
         return d.into();
     }
     #[cfg(windows)]
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let base = var("LOCALAPPDATA").map(PathBuf::from);
     #[cfg(not(windows))]
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    let base = var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+        .or_else(|| var("HOME").map(|h| PathBuf::from(h).join(".config")));
     base.unwrap_or_else(|| PathBuf::from(".")).join("voxl")
 }
 
