@@ -291,6 +291,28 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     }
     s.hub.remove_client(client.id);
     log::info!("client {} disconnected", client.id);
+    #[cfg(target_os = "macos")]
+    if s.resize {
+        restore_display_when_idle(s.hub.clone());
+    }
+}
+
+/// A display voxl rotated goes back to its own angle and mode once nobody has watched
+/// for a few seconds: a viewer that is closed or loses its connection cannot ask for
+/// that itself. The wait keeps a reconnecting viewer from turning the display twice.
+#[cfg(target_os = "macos")]
+fn restore_display_when_idle(hub: Arc<Hub>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        if !hub.clients.lock().is_empty() {
+            return;
+        }
+        if let Some(size) = crate::screen::home() {
+            log::info!("nobody is watching: putting the display back");
+            *hub.resize_req.lock() = Some(size);
+            hub.wake();
+        }
+    });
 }
 
 fn num<T: std::str::FromStr>(it: &mut std::str::Split<'_, char>) -> Option<T> {

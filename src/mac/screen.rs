@@ -24,12 +24,22 @@ static ROTATE_ASKED: AtomicBool = AtomicBool::new(false);
 /// Portrait requests rotate the display: asked for, and the display can turn.
 static ROTATES: AtomicBool = AtomicBool::new(false);
 
-/// The display voxl rotated and the angle it had before, to turn it back at exit.
-static ORIGINAL: Mutex<Option<(u32, i32)>> = Mutex::new(None);
+/// A display as voxl first saw it, to put it back: the angle, the mode (in points),
+/// and whether voxl rotated it since. Rotating makes the mode of the moment the saved
+/// one, so macOS no longer restores the user's mode by itself.
+#[derive(Clone, Copy)]
+struct Start {
+    angle: i32,
+    points: (usize, usize),
+    rotated: bool,
+}
 
-/// The display and its mode (in points) when voxl started. Rotating makes the mode
-/// of the moment the saved one, so macOS no longer restores this one by itself.
-static INITIAL: Mutex<Option<(u32, (usize, usize))>> = Mutex::new(None);
+static STARTS: Mutex<Vec<(u32, Start)>> = Mutex::new(Vec::new());
+
+fn start(display: u32) -> Option<Start> {
+    let starts = STARTS.lock();
+    starts.iter().find(|s| s.0 == display).map(|s| s.1)
+}
 
 pub fn set_rotate(on: bool) {
     ROTATE_ASKED.store(on, Ordering::Relaxed);
@@ -64,28 +74,59 @@ fn pick(sizes: &[(u32, u32)], w: u32, h: u32, rotates: bool) -> Option<(u32, u32
     })
 }
 
-/// Turns the display back to the angle and the mode it had before voxl rotated it.
+/// The angle for a portrait or a landscape desktop on a display that started at
+/// `start` degrees: the display's own angle when that has the wanted orientation, else
+/// a quarter turn from it. A display found on its side goes to 0 for landscape, never
+/// to 180, where the desktop would be upside down.
+fn angle_for(start: i32, portrait: bool) -> i32 {
+    match (portrait, start % 180 != 0) {
+        (true, true) | (false, false) => start,
+        (true, false) => (start + 90) % 360,
+        (false, true) => 0,
+    }
+}
+
+/// The size to ask for so that the display goes back to its own angle and mode, once
+/// nobody is watching. None when voxl left the display as it was, or does not rotate.
+pub fn home() -> Option<(u32, u32)> {
+    if !ROTATES.load(Ordering::Relaxed) {
+        return None;
+    }
+    let display = super::display();
+    let start = start(display)?;
+    let b = unsafe { CGDisplayBounds(display) };
+    let now = (b.size.width as usize, b.size.height as usize);
+    if unsafe { CGDisplayRotation(display) } as i32 == start.angle && now == start.points {
+        return None;
+    }
+    Some(super::size_for(
+        start.points.0 as f64,
+        start.points.1 as f64,
+    ))
+}
+
+/// Turns every display voxl rotated back to the angle and the mode it started with.
 pub fn restore_rotation() {
-    let Some((display, degrees)) = ORIGINAL.lock().take() else {
-        return;
-    };
-    let restore = || -> Result<(), String> {
-        if unsafe { CGDisplayRotation(display) } as i32 != degrees {
-            turn(display, degrees)?;
+    let starts = std::mem::take(&mut *STARTS.lock());
+    for (display, start) in starts {
+        if !start.rotated {
+            continue;
         }
-        let Some((_, points)) = INITIAL.lock().filter(|i| i.0 == display) else {
-            return Ok(());
+        let restore = || -> Result<(), String> {
+            if unsafe { CGDisplayRotation(display) } as i32 != start.angle {
+                turn(display, start.angle)?;
+            }
+            let screen = Screen::open_on(display)?;
+            let m = screen
+                .modes
+                .iter()
+                .find(|m| m.points == start.points)
+                .ok_or("its mode is gone")?;
+            apply(display, m.mode, kCGConfigurePermanently)
         };
-        let screen = Screen::open(None)?;
-        let m = screen
-            .modes
-            .iter()
-            .find(|m| m.points == points)
-            .ok_or("its mode is gone")?;
-        apply(display, m.mode, kCGConfigurePermanently)
-    };
-    if let Err(e) = restore() {
-        log::warn!("could not turn the display back: {e}");
+        if let Err(e) = restore() {
+            log::warn!("could not turn display {display} back: {e}");
+        }
     }
 }
 
@@ -94,12 +135,11 @@ fn portrait(display: u32) -> bool {
     b.size.height > b.size.width
 }
 
-/// Rotates the display to `degrees`, a quarter turn from where it is, and waits for it.
+/// Rotates the display to `degrees` and waits for it.
 fn turn(display: u32, degrees: i32) -> Result<(), String> {
-    let was = portrait(display);
     rotation::set(display, degrees)?;
     let t = Instant::now();
-    while portrait(display) == was {
+    while unsafe { CGDisplayRotation(display) } as i32 != degrees {
         if t.elapsed() > Duration::from_secs(3) {
             return Err("the display did not rotate".into());
         }
@@ -193,7 +233,10 @@ unsafe impl Send for Screen {}
 
 impl Screen {
     pub fn open(_display: Option<&str>) -> Result<Self, String> {
-        let display = super::display();
+        Self::open_on(super::display())
+    }
+
+    fn open_on(display: u32) -> Result<Self, String> {
         let mut modes: Vec<Mode> = Vec::new();
         unsafe {
             let cur = CGDisplayCopyDisplayMode(display);
@@ -203,7 +246,18 @@ impl Screen {
             let hidpi = CGDisplayModeGetPixelWidth(cur) > CGDisplayModeGetWidth(cur);
             let current = (CGDisplayModeGetWidth(cur), CGDisplayModeGetHeight(cur));
             let rate = CGDisplayModeGetRefreshRate(cur);
-            INITIAL.lock().get_or_insert((display, current));
+            let mut starts = STARTS.lock();
+            if !starts.iter().any(|s| s.0 == display) {
+                starts.push((
+                    display,
+                    Start {
+                        angle: CGDisplayRotation(display) as i32,
+                        points: current,
+                        rotated: false,
+                    },
+                ));
+            }
+            drop(starts);
             CGDisplayModeRelease(cur);
             let key = kCGDisplayShowDuplicateLowResolutionModes;
             let opts = objc2_core_foundation::CFDictionary::from_slices(
@@ -282,7 +336,7 @@ impl Screen {
     pub fn resize(&mut self, w: u32, h: u32) -> Result<(), String> {
         let want = self.fit(w, h);
         if ROTATES.load(Ordering::Relaxed) && (want.1 > want.0) != self.portrait() {
-            self.rotate()?;
+            self.rotate(want.1 > want.0)?;
         }
         self.current = super::capture_size(self.display);
         if want == self.current {
@@ -320,18 +374,16 @@ impl Screen {
         portrait(self.display)
     }
 
-    /// Turns the display a quarter turn (or back), then reads its modes again: they
-    /// are portrait ones on a display on its side.
-    fn rotate(&mut self) -> Result<(), String> {
-        let now = unsafe { CGDisplayRotation(self.display) } as i32;
-        let original = ORIGINAL.lock().get_or_insert((self.display, now)).1;
-        let target = if now == original {
-            (original + 90) % 360
-        } else {
-            original
-        };
-        turn(self.display, target)?;
-        *self = Screen::open(None)?;
+    /// Turns the display to the angle for a portrait or a landscape desktop, then
+    /// reads its modes again: they are portrait ones on a display on its side.
+    fn rotate(&mut self, portrait: bool) -> Result<(), String> {
+        let display = self.display;
+        let start = start(display).ok_or("unknown display")?;
+        turn(display, angle_for(start.angle, portrait))?;
+        if let Some(s) = STARTS.lock().iter_mut().find(|s| s.0 == display) {
+            s.1.rotated = true;
+        }
+        *self = Screen::open_on(display)?;
         Ok(())
     }
 }
@@ -346,7 +398,21 @@ impl Drop for Screen {
 
 #[cfg(test)]
 mod tests {
-    use super::pick;
+    use super::{angle_for, pick};
+
+    #[test]
+    fn the_display_never_ends_upside_down() {
+        // A landscape display turns a quarter for portrait, and back.
+        assert_eq!(angle_for(0, true), 90);
+        assert_eq!(angle_for(0, false), 0);
+        assert_eq!(angle_for(180, true), 270);
+        assert_eq!(angle_for(180, false), 180);
+        // A display found on its side stays so for portrait, and goes upright for landscape.
+        assert_eq!(angle_for(90, true), 90);
+        assert_eq!(angle_for(90, false), 0);
+        assert_eq!(angle_for(270, true), 270);
+        assert_eq!(angle_for(270, false), 0);
+    }
 
     const LANDSCAPE: [(u32, u32); 3] = [(864, 486), (1128, 634), (1920, 1080)];
     const PORTRAIT: [(u32, u32); 3] = [(486, 864), (634, 1128), (1080, 1920)];
