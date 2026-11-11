@@ -138,10 +138,12 @@ fn switch_display(
 ) -> Result<Pipeline, String> {
     let previous = crate::mac::display();
     let mut open = |id| {
-        if let Some(old) = screen.as_mut() {
-            old.restore()?;
+        // Best effort: an app-only mode change is undone by macOS when voxl exits.
+        if let Some(mut old) = screen.take() {
+            if let Err(e) = old.restore() {
+                log::warn!("could not restore the previous display mode: {e}");
+            }
         }
-        screen.take();
         crate::mac::select_display(id)?;
         *screen = if cfg.enable_resize {
             crate::screen::Screen::open(None)
