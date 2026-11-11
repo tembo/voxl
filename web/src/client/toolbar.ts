@@ -14,6 +14,8 @@ export function setupToolbar(app: App, onFullscreenChange: () => void) {
 		app.send(cmd.releaseAll);
 		app.send(cmd.display(Number(displays.value)));
 		displays.disabled = true;
+		// Keys go to the desktop again; touch devices skip this to keep the soft keyboard closed.
+		if (!tools.classList.contains('touch')) kbd.focus({ preventScroll: true });
 	});
 	let hideTimer: ReturnType<typeof setTimeout> | undefined;
 	function show(ms: number) {
