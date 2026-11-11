@@ -85,6 +85,8 @@ Desktop (this Mac's screen):
                                 (default false)
   --resize-scale                display pixels per CSS pixel (default: the
                                 capture scale)
+  --rotate-display              with --enable-resize, an upright window turns
+                                the display on its side (default false)
   --read-only                   viewers only watch (default false)
   --show-cursor                 include the host cursor in the video stream
                                 (default: true with --read-only, else false)

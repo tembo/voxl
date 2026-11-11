@@ -64,6 +64,7 @@ pub fn init(a: &HashMap<String, String>) {
     let display = pick_display(a.get("display").map(|s| s.as_str()));
     let read_only = crate::truthy(a.get("read-only"), false);
     let show_cursor = crate::truthy(a.get("show-cursor"), read_only);
+    screen::set_rotate(crate::truthy(a.get("rotate-display"), false));
     {
         let mut s = SETTINGS.lock();
         s.display = display;

@@ -83,6 +83,7 @@ extern "C" {
     pub fn CGGetActiveDisplayList(max: u32, ids: *mut u32, count: *mut u32) -> i32;
     pub fn CGDisplayIsMain(id: u32) -> u32;
     pub fn CGDisplayBounds(id: u32) -> CGRect;
+    pub fn CGDisplayRotation(id: u32) -> f64;
     pub fn CGDisplayPixelsWide(id: u32) -> usize;
     pub fn CGDisplayPixelsHigh(id: u32) -> usize;
     pub fn CGDisplayCopyDisplayMode(id: u32) -> CGDisplayModeRef;
@@ -154,6 +155,7 @@ extern "C" {
 pub const kCGEventSourceStateHIDSystemState: i32 = 1;
 pub const kCGHIDEventTap: u32 = 0;
 pub const kCGConfigureForAppOnly: u32 = 0;
+pub const kCGConfigurePermanently: u32 = 2;
 
 pub const kCGEventLeftMouseDown: u32 = 1;
 pub const kCGEventLeftMouseUp: u32 = 2;
