@@ -74,6 +74,27 @@ fn pick(sizes: &[(u32, u32)], w: u32, h: u32, rotates: bool) -> Option<(u32, u32
     })
 }
 
+/// Whether a mode of `points`, streamed at `size`, is one the desktop may take. Modes
+/// past the pixel budget would cost more to encode than the current one, which always
+/// stays available. So does the mode the display started with (`home`, in either
+/// orientation), or it could not be put back.
+fn selectable(
+    size: (u32, u32),
+    points: (usize, usize),
+    current: (usize, usize),
+    home: Option<(usize, usize)>,
+    max_pixels: f64,
+) -> bool {
+    let (long, short) = long_short(size);
+    if long < MIN.0 || short < MIN.1 {
+        return false;
+    }
+    let sides = |p: (usize, usize)| (p.0.max(p.1), p.0.min(p.1));
+    size.0 as f64 * size.1 as f64 <= max_pixels * 1.02
+        || points == current
+        || home.is_some_and(|home| sides(home) == sides(points))
+}
+
 /// The angle for a portrait or a landscape desktop on a display that started at
 /// `start` degrees: the display's own angle when that has the wanted orientation, else
 /// a quarter turn from it. A display found on its side goes to 0 for landscape, never
@@ -107,7 +128,8 @@ pub fn home() -> Option<(u32, u32)> {
 
 /// Turns every display voxl rotated back to the angle and the mode it started with.
 pub fn restore_rotation() {
-    let starts = std::mem::take(&mut *STARTS.lock());
+    // A copy: reading a display's modes looks its start up to keep that mode listed.
+    let starts = STARTS.lock().clone();
     for (display, start) in starts {
         if !start.rotated {
             continue;
@@ -257,6 +279,7 @@ impl Screen {
                     },
                 ));
             }
+            let home = starts.iter().find(|s| s.0 == display).map(|s| s.1.points);
             drop(starts);
             CGDisplayModeRelease(cur);
             let key = kCGDisplayShowDuplicateLowResolutionModes;
@@ -279,15 +302,8 @@ impl Screen {
                 {
                     continue;
                 }
-                // Modes past the pixel budget would cost more to encode than the
-                // current one (which always stays available).
                 let size = super::size_for(w as f64, h as f64);
-                let area = size.0 as f64 * size.1 as f64;
-                let (long, short) = long_short(size);
-                if long < MIN.0
-                    || short < MIN.1
-                    || (area > super::max_pixels() * 1.02 && (w, h) != current)
-                {
+                if !selectable(size, (w, h), current, home, super::max_pixels()) {
                     continue;
                 }
                 CFRetain(m as CFTypeRef);
@@ -398,7 +414,66 @@ impl Drop for Screen {
 
 #[cfg(test)]
 mod tests {
-    use super::{angle_for, pick};
+    use super::{angle_for, pick, selectable};
+
+    /// --capture-scale=2 puts a 2560x1600-point display past the default pixel budget.
+    #[test]
+    fn the_mode_the_display_started_with_can_always_be_put_back() {
+        let budget = 4_096_000.0;
+        let home = Some((2560, 1600));
+        // At startup it is the current mode.
+        assert!(selectable(
+            (5120, 3200),
+            (2560, 1600),
+            (2560, 1600),
+            home,
+            budget
+        ));
+        // After a resize it no longer is, and after a rotation its sides are swapped.
+        assert!(selectable(
+            (5120, 3200),
+            (2560, 1600),
+            (1280, 800),
+            home,
+            budget
+        ));
+        assert!(selectable(
+            (3200, 5120),
+            (1600, 2560),
+            (800, 1280),
+            home,
+            budget
+        ));
+        // Other modes past the budget stay out, as do modes too small to use.
+        assert!(!selectable(
+            (4096, 2560),
+            (2048, 1280),
+            (1280, 800),
+            home,
+            budget
+        ));
+        assert!(!selectable(
+            (5120, 3200),
+            (2560, 1600),
+            (1280, 800),
+            None,
+            budget
+        ));
+        assert!(selectable(
+            (2560, 1600),
+            (1280, 800),
+            (2560, 1600),
+            home,
+            budget
+        ));
+        assert!(!selectable(
+            (600, 400),
+            (300, 200),
+            (2560, 1600),
+            home,
+            budget
+        ));
+    }
 
     #[test]
     fn the_display_never_ends_upside_down() {
