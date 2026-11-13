@@ -590,6 +590,8 @@ fn capture_loop(
             pool[i] = Some(b);
         }
         let clients = hub.video_clients();
+        #[cfg(target_os = "macos")]
+        cap.want_frames(!clients.is_empty() || hub.activity.waiting());
         if clients.is_empty() {
             if had_clients {
                 rc = RateCtl::new(cfg.max_kbps as f64, cfg.min_kbps as f64);
