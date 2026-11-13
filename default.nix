@@ -12,7 +12,7 @@
 }:
 rustPlatform.buildRustPackage {
   pname = "voxl";
-  version = "0.3.4";
+  version = "0.3.5";
 
   src = lib.fileset.toSource {
     root = ./.;
