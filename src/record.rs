@@ -191,8 +191,9 @@ async fn collect(
                         data: b.slice(16..),
                     });
                 }
-                // A new size restarts the stream; an MP4 track keeps one size, so stop.
-                Some(Out::Text(t)) if !frames.is_empty() && t.contains("\"hello\"") => break,
+                // A capture restart or closed subscription ends this recording.
+                Some(Out::Text(t)) if !frames.is_empty()
+                    && (t.contains("\"hello\"") || t.contains("\"close\"")) => break,
                 _ => {}
             },
         }

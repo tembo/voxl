@@ -151,13 +151,27 @@
 				backdrop-filter: blur(30px);
 				-webkit-backdrop-filter: blur(30px);
 			}
-			#tools.show {
+			#tools.show,
+			#tools:focus-within {
 				opacity: 1;
 				pointer-events: auto;
 			}
 			#tools.touch {
 				top: auto;
 				bottom: 12px;
+			}
+			#display-select {
+				max-width: 170px;
+				height: 28px;
+				padding: 0 6px;
+				border: 0;
+				border-radius: 8px;
+				background: var(--surface-raised);
+				color: var(--icon-title);
+				font: 500 13px var(--font);
+			}
+			#tools.touch #display-select {
+				height: 40px;
 			}
 			.ib {
 				width: 28px;
@@ -604,6 +618,11 @@
 			tabindex="-1"
 			aria-hidden="true"></textarea>
 		<div id="tools">
+			<select
+				id="display-select"
+				aria-label="Switch display for all viewers"
+				title="Switch display for all viewers"
+				hidden></select>
 			<button
 				id="kb-btn"
 				class="ib"

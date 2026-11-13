@@ -221,6 +221,11 @@ ScreenCaptureKit and DXGI report them), so waiting needs no screenshots or polli
 voxl also streams a Mac's own screen, with every feature of the Linux version
 (ScreenCaptureKit capture, CGEvent input, NSPasteboard clipboard, system audio).
 
+With multiple displays, the toolbar's Display picker changes the captured monitor.
+All viewers follow the selection and reconnect automatically; read-only viewers
+cannot change it. `--display` still selects the initial monitor. The list refreshes
+when capture rebuilds; restart voxl to discover newly attached displays.
+
 ```sh
 brew install x264 opus pkgconf esbuild
 cargo build --release
