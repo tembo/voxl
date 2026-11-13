@@ -14,6 +14,7 @@ import { setupPointer } from './pointer';
 import { createResize } from './resize';
 import { setupToolbar } from './toolbar';
 import { createVideo } from './video';
+import { createZoom } from './zoom';
 
 /**
  * Commands a read-only viewer sends: acks, video and audio on/off, keyframe requests
@@ -81,10 +82,14 @@ function main() {
 	};
 
 	const cursor = createCursor(app);
+	const zoom = createZoom(app);
 	const useVideo =
 		params.get('present') !== 'canvas' &&
 		typeof MediaStreamTrackGenerator !== 'undefined';
-	const video = createVideo(app, canvas, useVideo, cursor.apply);
+	const video = createVideo(app, canvas, useVideo, () => {
+		cursor.apply();
+		zoom.fit();
+	});
 	const clipboard = createClipboard(app);
 	const audio = createAudio(app);
 	// Browsers only allow audio and clipboard writes after a user gesture.
@@ -92,7 +97,7 @@ function main() {
 		audio.start();
 		clipboard.flush();
 	};
-	setupPointer(app, onInteract);
+	setupPointer(app, zoom, onInteract);
 	setupKeyboard(app, clipboard, onInteract);
 	setupToolbar(app, video.layout);
 	const files = createFiles(app);

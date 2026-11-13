@@ -2,11 +2,12 @@
 import { cmd } from '../protocol';
 import type { App } from './app';
 import { createTouch } from './touch';
+import type { Zoom } from './zoom';
 
 /** DOM button -> X button (left, middle, right, back, forward). */
 const BUTTONS = [1, 2, 3, 8, 9];
 
-export function setupPointer(app: App, onInteract: () => void) {
+export function setupPointer(app: App, zoom: Zoom, onInteract: () => void) {
 	const { surface, send } = app;
 
 	function toDesk(p: { clientX: number; clientY: number }): [number, number] {
@@ -53,6 +54,7 @@ export function setupPointer(app: App, onInteract: () => void) {
 		moveTo: (x, y) => move({ clientX: x, clientY: y }, true),
 		queueScroll,
 		deskPerPx,
+		zoom,
 	});
 
 	surface.addEventListener('pointermove', (e) => {

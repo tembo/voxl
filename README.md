@@ -140,6 +140,8 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 | `--read-only`                                                  | `false`                            | viewers only watch: input, clipboard writes, the microphone, uploads and resizing (`--enable-resize`) are refused |
 | `--allowed-hosts`                                              | none                               | host names to answer for besides IP addresses and `localhost` (`.example.com` covers subdomains, `*` any)         |
 | `--allowed-origins`                                            | none                               | other sites whose pages may connect, such as a page that embeds voxl's client (`*` any site)                      |
+| `--tls`                                                        | `false`                            | serve HTTPS with a self-signed certificate, made on first start and reused (see [HTTPS](#https))                  |
+| `--tls-cert`, `--tls-key`                                      | none                               | serve HTTPS with this PEM certificate chain and key                                                               |
 | `--files-root`                                                 | `$HOME`                            | folder the Files panel can see; nothing outside it is reachable                                                   |
 | `--upload-dir`                                                 | `Downloads`                        | folder (under the root) the panel opens and uploads into; created on first upload                                 |
 | `--max-upload-mb`                                              | `0` (no limit)                     | largest accepted upload                                                                                           |
@@ -231,13 +233,14 @@ starts it) for Screen Recording and Accessibility permissions. For the microphon
 install a loopback device (`brew install blackhole-2ch`) and pick it as the input in the
 apps that should hear you.
 
-| macOS flag             | Default                     |                                                                                        |
-| ---------------------- | --------------------------- | -------------------------------------------------------------------------------------- |
-| `--display`            | main display                | display to stream: an index (0 is the main display) or a display ID; logged at startup |
-| `--capture-scale`      | native, within the budget   | streamed pixels per point                                                              |
-| `--max-capture-pixels` | `4096000` (2560x1600)       | pixel budget for the automatic scale: x264's cost grows with area                      |
-| `--microphone-device`  | first loopback device found | output device (name or prefix) to play the browser microphone into                     |
-| `--resize-scale`       | the capture scale           | so a viewer's window maps to the same number of points on the Mac                      |
+| macOS flag             | Default                             |                                                                                        |
+| ---------------------- | ----------------------------------- | -------------------------------------------------------------------------------------- |
+| `--display`            | main display                        | display to stream: an index (0 is the main display) or a display ID; logged at startup |
+| `--capture-scale`      | native, within the budget           | streamed pixels per point                                                              |
+| `--max-capture-pixels` | `4096000` (2560x1600)               | pixel budget for the automatic scale: x264's cost grows with area                      |
+| `--microphone-device`  | first loopback device found         | output device (name or prefix) to play the browser microphone into                     |
+| `--resize-scale`       | the capture scale                   | so a viewer's window maps to the same number of points on the Mac                      |
+| `--show-cursor`        | `false` (`true` with `--read-only`) | include the host cursor in the video stream (for viewers/observers)                    |
 
 The other flags work as on Linux; `--audio-device-name`, `--microphone-fifo` and the
 rounded-corner flags don't apply.
@@ -275,6 +278,20 @@ The other flags work as on Linux; `--microphone-fifo` and the rounded-corner fla
 apply. Dynamic resolution picks the largest display mode that fits the viewer's window,
 and Windows restores the original mode when voxl exits.
 
+### HTTPS
+
+`--tls-cert` and `--tls-key` serve HTTPS with a PEM certificate chain and key you
+provide. `--tls` on its own makes a self-signed certificate on first start and reuses it
+after that, so each browser asks to trust it only once. It's kept in `VOXL_TLS_DIR` if
+set, otherwise `%LOCALAPPDATA%\voxl` on Windows or `~/.config/voxl` elsewhere, and names
+`localhost`, the machine's host name, the `--addr` address and the `--allowed-hosts`
+names; delete it to make a new one. Over HTTPS, open `https://`: a browser that asks for
+`http://` on the same port gets an invalid response.
+
+```sh
+voxl --addr=0.0.0.0 --tls
+```
+
 ## FAQ
 
 **Why a WebSocket and not WebRTC?** One WebSocket goes wherever a web page does: through
@@ -303,12 +320,14 @@ goes through the ID and relay servers, and the self-hosted one comes with RustDe
 Server Pro.
 
 **Why doesn't the stream load at `http://<ip>:6901`?** Browsers only allow WebCodecs on
-HTTPS pages and on localhost. To watch from another machine, put voxl behind a TLS proxy
-(Caddy, Cloudflare Tunnel, `tailscale serve`) and name its host with `--allowed-hosts`,
-or forward the port over SSH and open `localhost`.
+HTTPS pages and on localhost. To watch from another machine, start voxl with `--tls`
+(see [HTTPS](#https)), put it behind a TLS proxy (Caddy, Cloudflare Tunnel,
+`tailscale serve`) and name its host with `--allowed-hosts`, or forward the port over
+SSH and open `localhost`.
 
-**Is it safe to expose?** voxl asks for a password by default but serves plain HTTP, so
-put it behind TLS away from localhost. See [SECURITY.md](SECURITY.md).
+**Is it safe to expose?** voxl asks for a password by default but serves plain HTTP
+unless `--tls` or `--tls-cert` is given, so serve it over HTTPS away from localhost. See
+[SECURITY.md](SECURITY.md).
 
 **Which browsers and devices work?** Any browser with WebCodecs, on an HTTPS page or
 localhost:
@@ -320,7 +339,9 @@ localhost:
 | Safari 16.4+ and any browser on iPhone or iPad (sound needs Safari 26) | Yes   |
 | Firefox for Android                                                    | No    |
 
-Phones and tablets get touch input and an on-screen keyboard.
+Phones and tablets get touch input (tap to click, drag, long press to right click, pinch
+to zoom, two fingers to move around a zoomed-in view and scroll) and an on-screen
+keyboard.
 
 **Wayland?** Not yet; on Linux voxl streams X11 displays, Xvfb included. The virtual
 desktops voxl is built for run on Xvfb (E2B's and Daytona's do too), and X11 lets voxl

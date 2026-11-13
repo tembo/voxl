@@ -186,8 +186,9 @@ impl Capturer {
                 cfg.setColorSpaceName(&*(kCGColorSpaceSRGB as *const CFString));
                 // Clients draw the cursor themselves (see desktop.rs), so pointer motion
                 // costs no encode and has no stream latency.
-                // If the system cursor can't be read, it has to be in the video.
-                cfg.setShowsCursor(!super::desktop::cursor_readable());
+                // If the system cursor can't be read, or --show-cursor is set (e.g. for viewers),
+                // it has to be in the video.
+                cfg.setShowsCursor(super::show_cursor() || !super::desktop::cursor_readable());
                 cfg.setCaptureResolution(SCCaptureResolutionType::Best);
                 cfg.setQueueDepth(6);
             },
