@@ -90,8 +90,9 @@ function main() {
 		params.get('present') !== 'canvas' &&
 		typeof MediaStreamTrackGenerator !== 'undefined';
 	const video = createVideo(app, canvas, useVideo, () => {
-		cursor.apply();
+		// Fit the zoom first: trackpad mode draws its pointer at the zoom (trackpad.ts).
 		zoom.fit();
+		cursor.apply();
 	});
 	const clipboard = createClipboard(app);
 	const audio = createAudio(app);
@@ -100,7 +101,7 @@ function main() {
 		audio.start();
 		clipboard.flush();
 	};
-	setupPointer(app, zoom, onInteract);
+	setupPointer(app, cursor, zoom, onInteract);
 	setupKeyboard(app, clipboard, onInteract);
 	const updateDisplays = setupToolbar(app, video.layout);
 	const files = createFiles(app);

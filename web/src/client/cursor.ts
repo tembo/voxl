@@ -9,11 +9,30 @@ import type { App } from './app';
 const MIN_CURSOR_PX = 24;
 const MAX_CURSOR_PX = 128;
 
+/** The cursor as shown: a PNG data URL, its CSS size and its hotspot. */
+export interface CursorImage {
+	url: string;
+	w: number;
+	h: number;
+	hx: number;
+	hy: number;
+}
+
+export type Cursor = ReturnType<typeof createCursor>;
+
 export function createCursor(app: App) {
 	let msg: ArrayBuffer | null = null;
+	let image: CursorImage | null = null;
+	const listeners: (() => void)[] = [];
 	const scaled = document.createElement('canvas');
 
+	/** Draws the cursor at the current scale; runs on every cursor change and layout. */
 	function apply() {
+		render();
+		for (const f of listeners) f();
+	}
+	function render() {
+		image = null;
 		if (!msg) return;
 		const v = new DataView(msg);
 		const w = v.getUint16(2),
@@ -55,6 +74,7 @@ export function createCursor(app: App) {
 		const url = scaled.toDataURL('image/png');
 		const hsx = Math.round(hx * s),
 			hsy = Math.round(hy * s);
+		image = { url, w: cw, h: ch, hx: hsx, hy: hsy };
 		app.surface.style.cursor =
 			dpr > 1
 				? `-webkit-image-set(url(${url}) ${dpr}x) ${hsx} ${hsy}, url(${url}) ${hsx} ${hsy}, default`
@@ -69,5 +89,9 @@ export function createCursor(app: App) {
 			apply();
 		},
 		apply,
+		image: () => image,
+		onChange(f: () => void) {
+			listeners.push(f);
+		},
 	};
 }

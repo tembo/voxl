@@ -49,6 +49,8 @@ export function createZoom(app: App) {
 	}
 
 	return {
+		/** How far the view is zoomed in (1: not at all). */
+		scale: () => z,
 		/** Start a pinch with the fingers' centroid at (x, y), `spread` apart. */
 		begin(x: number, y: number, spread: number) {
 			measure();

@@ -100,6 +100,38 @@
 				pointer-events: none;
 				object-fit: fill;
 			}
+			/* Trackpad mode's pointer (touch browsers draw no CSS cursor); a ring while it grabs. */
+			#tp-pointer {
+				position: absolute;
+				left: 0;
+				top: 0;
+				z-index: 1;
+				display: none;
+				pointer-events: none;
+				background-size: 100% 100%;
+				/* trackpad.ts scales it around the hotspot to undo pinch zoom. */
+				transform-origin: var(--hx) var(--hy);
+			}
+			#tp-pointer.dot {
+				width: 12px;
+				height: 12px;
+				border-radius: 50%;
+				background: #fff;
+				box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.6);
+			}
+			#tp-pointer.down::after {
+				content: '';
+				position: absolute;
+				left: calc(var(--hx) - 14px);
+				top: calc(var(--hy) - 14px);
+				width: 24px;
+				height: 24px;
+				border-radius: 50%;
+				border: 2px solid rgba(255, 255, 255, 0.9);
+				box-shadow:
+					0 0 0 1px rgba(0, 0, 0, 0.4),
+					inset 0 0 0 1px rgba(0, 0, 0, 0.4);
+			}
 			/* On-screen so mobile browsers will open the soft keyboard for it. */
 			#kbd {
 				position: fixed;
@@ -340,17 +372,20 @@
 				height: 20px;
 			}
 			#kb-btn,
+			#tp-btn,
 			#files-btn,
 			#mic-btn {
 				display: none !important;
 			}
 			#tools.touch #kb-btn,
+			#tools.touch #tp-btn,
 			#tools.files #files-btn,
 			#tools.mic #mic-btn {
 				display: inline-grid !important;
 			}
-			/* Read-only: nothing on the desktop accepts what the keyboard would send. */
-			#tools.read-only #kb-btn {
+			/* Read-only: nothing on the desktop accepts what the keyboard or pointer would send. */
+			#tools.read-only #kb-btn,
+			#tools.read-only #tp-btn {
 				display: none !important;
 			}
 			/* While the microphone is live the toolbar stays up as a recording indicator. */
@@ -800,6 +835,22 @@
 						stroke-linecap="square" />
 					<path
 						d="M10 17H14M14 5L12 3L10 5M4 9H20C21.1046 9 22 9.89543 22 11V19C22 20.1046 21.1046 21 20 21H4C2.89543 21 2 20.1046 2 19V11C2 9.89543 2.89543 9 4 9Z"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round" />
+				</svg>
+			</button>
+			<button
+				id="tp-btn"
+				class="ib"
+				type="button"
+				title="Trackpad mode"
+				aria-label="Trackpad mode"
+				aria-pressed="false">
+				<svg class="i" viewBox="0 0 24 24" fill="none">
+					<path
+						d="M3 15H21M12 15V20M6 4H18C19.6569 4 21 5.34315 21 7V17C21 18.6569 19.6569 20 18 20H6C4.34315 20 3 18.6569 3 17V7C3 5.34315 4.34315 4 6 4Z"
 						stroke="currentColor"
 						stroke-width="2"
 						stroke-linecap="round"
