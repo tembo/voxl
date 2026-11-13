@@ -1,5 +1,5 @@
 // Toolbar (top right on hover; bottom right and always visible on touch devices):
-// on-screen keyboard, files, microphone and fullscreen buttons.
+// display picker, on-screen keyboard, files, microphone and fullscreen buttons.
 import { cmd } from '../protocol';
 import type { Hello } from '../protocol';
 import type { App } from './app';
@@ -9,14 +9,102 @@ export function setupToolbar(app: App, onFullscreenChange: () => void) {
 	const { tools, kbd } = app;
 	const kbBtn = el<HTMLButtonElement>('kb-btn');
 	const fsBtn = el<HTMLButtonElement>('fs-btn');
-	const displays = el<HTMLSelectElement>('display-select');
-	displays.addEventListener('change', () => {
-		app.send(cmd.releaseAll);
-		app.send(cmd.display(Number(displays.value)));
-		displays.disabled = true;
+	const picker = el('display-picker');
+	const displayBtn = el<HTMLButtonElement>('display-btn');
+	const displayLabel = el('display-label');
+	const menu = el('display-menu');
+	let selected = 0;
+	const options = () => [...menu.children] as HTMLElement[];
+
+	function openMenu() {
+		menu.hidden = false;
+		displayBtn.setAttribute('aria-expanded', 'true');
+		tools.classList.add('menu-open');
+		menu
+			.querySelector<HTMLElement>('[aria-selected="true"]')
+			?.focus({ preventScroll: true });
+	}
+	function closeMenu(toDesktop: boolean) {
+		if (menu.hidden) return;
+		menu.hidden = true;
+		displayBtn.setAttribute('aria-expanded', 'false');
+		tools.classList.remove('menu-open');
 		// Keys go to the desktop again; touch devices skip this to keep the soft keyboard closed.
-		if (!tools.classList.contains('touch')) kbd.focus({ preventScroll: true });
+		if (toDesktop && !tools.classList.contains('touch'))
+			kbd.focus({ preventScroll: true });
+	}
+	function pick(option: HTMLElement) {
+		const id = Number(option.dataset.id);
+		if (id !== selected) {
+			app.send(cmd.releaseAll);
+			app.send(cmd.display(id));
+			displayBtn.disabled = true;
+		}
+		closeMenu(true);
+	}
+
+	displayBtn.addEventListener('click', () =>
+		menu.hidden ? openMenu() : closeMenu(true)
+	);
+	displayBtn.addEventListener('keydown', (e) => {
+		if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+		e.preventDefault();
+		openMenu();
 	});
+	menu.addEventListener('keydown', (e) => {
+		const all = options();
+		const i = all.indexOf(document.activeElement as HTMLElement);
+		const n = all.length;
+		const move = (to: number) => all[to]?.focus({ preventScroll: true });
+		switch (e.key) {
+			case 'ArrowDown':
+				move((i + 1) % n);
+				break;
+			case 'ArrowUp':
+				move(i < 0 ? n - 1 : (i - 1 + n) % n);
+				break;
+			case 'Home':
+				move(0);
+				break;
+			case 'End':
+				move(n - 1);
+				break;
+			case 'Enter':
+			case ' ':
+				if (all[i]) pick(all[i]);
+				break;
+			case 'Escape':
+			case 'Tab':
+				closeMenu(true);
+				break;
+			default:
+				return;
+		}
+		// Esc would otherwise also close the files panel.
+		e.preventDefault();
+		e.stopPropagation();
+	});
+	// Like the app's menus, the option under the pointer is the highlighted one.
+	menu.addEventListener('pointermove', (e) => {
+		const option = (e.target as Element).closest<HTMLElement>('.option');
+		if (option && document.activeElement !== option)
+			option.focus({ preventScroll: true });
+	});
+	menu.addEventListener('pointerleave', () =>
+		menu.focus({ preventScroll: true })
+	);
+	menu.addEventListener('click', (e) => {
+		const option = (e.target as Element).closest<HTMLElement>('.option');
+		if (option) pick(option);
+	});
+	document.addEventListener(
+		'pointerdown',
+		(e) => {
+			if (!picker.contains(e.target as Node)) closeMenu(false);
+		},
+		true
+	);
+
 	let hideTimer: ReturnType<typeof setTimeout> | undefined;
 	function show(ms: number) {
 		tools.classList.add('show');
@@ -37,7 +125,7 @@ export function setupToolbar(app: App, onFullscreenChange: () => void) {
 				show(2500);
 		});
 	// Clicks on the toolbar must not reach the desktop surface underneath.
-	for (const b of tools.querySelectorAll('button, select'))
+	for (const b of tools.querySelectorAll('button, [role="listbox"]'))
 		b.addEventListener('pointerdown', (e) => e.stopPropagation());
 
 	kbBtn.addEventListener('click', () => {
@@ -69,12 +157,24 @@ export function setupToolbar(app: App, onFullscreenChange: () => void) {
 		onFullscreenChange();
 	});
 	return (info: Hello['displays']) => {
-		displays.hidden = !info || info.available.length < 2 || app.readOnly;
-		displays.disabled = false;
-		displays.replaceChildren();
-		for (const display of info?.available || []) {
-			displays.add(new Option(display.name, String(display.id)));
-		}
-		if (info) displays.value = String(info.selected);
+		closeMenu(false);
+		picker.hidden = !info || info.available.length < 2 || app.readOnly;
+		displayBtn.disabled = false;
+		selected = info?.selected ?? 0;
+		const available = info?.available ?? [];
+		displayLabel.textContent =
+			available.find((d) => d.id === selected)?.name ?? '';
+		menu.replaceChildren(
+			...available.map((d) => {
+				const option = document.createElement('div');
+				option.className = 'option';
+				option.setAttribute('role', 'option');
+				option.setAttribute('aria-selected', String(d.id === selected));
+				option.tabIndex = -1;
+				option.dataset.id = String(d.id);
+				option.textContent = d.name;
+				return option;
+			})
+		);
 	};
 }
