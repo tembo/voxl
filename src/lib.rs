@@ -5,7 +5,7 @@
 //! `tembo voxl`) embed the server the same way.
 
 mod access;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "pulseaudio"))]
 mod audio;
 #[cfg(target_os = "linux")]
 mod capture;
@@ -184,6 +184,11 @@ async fn serve(a: HashMap<String, String>) {
         to_client: matches!(clip, "true" | "out"),
     };
     let audio_on = truthy(a.get("audio-enabled"), true);
+    #[cfg(all(target_os = "linux", not(feature = "pulseaudio")))]
+    let audio_on = audio_on && {
+        log::info!("desktop audio off: this voxl was built without PulseAudio");
+        false
+    };
 
     let hub = hub::Hub::new();
     // --read-only: the viewer watches the desktop, it does not drive it. Only the
@@ -257,6 +262,7 @@ async fn serve(a: HashMap<String, String>) {
         Ok(tx) => *hub.input.lock() = Some(tx),
         Err(e) => log::error!("input init failed: {e}"),
     }
+    #[cfg(any(not(target_os = "linux"), feature = "pulseaudio"))]
     if audio_on {
         let dev = a
             .get("audio-device-name")

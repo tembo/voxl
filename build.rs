@@ -32,14 +32,17 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 }
 
-/// x264, libyuv, Opus and PulseAudio from pkg-config; returns x264's include paths.
+/// x264, libyuv, Opus and PulseAudio (with the pulseaudio feature) from pkg-config;
+/// returns x264's include paths.
 fn unix_libs(target: &str) -> Vec<std::path::PathBuf> {
     let x264 = pkg_config::probe_library("x264").expect("x264");
     // macOS captures NV12 (no libyuv) and gets audio from ScreenCaptureKit (no PulseAudio).
     let libs: &[&str] = if target == "macos" {
         &["opus"]
-    } else {
+    } else if std::env::var_os("CARGO_FEATURE_PULSEAUDIO").is_some() {
         &["libyuv", "opus", "libpulse-simple"]
+    } else {
+        &["libyuv", "opus"]
     };
     let others: Vec<_> = libs
         .iter()
