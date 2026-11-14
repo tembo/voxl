@@ -237,8 +237,10 @@ pub struct Stats {
 pub struct Hub {
     #[cfg(target_os = "macos")]
     pub display_req: Mutex<Option<crate::mac::DisplayRequest>>,
+    #[cfg(windows)]
+    pub display_req: Mutex<Option<crate::win::DisplayRequest>>,
     /// Connections older than this may no longer inject input after a display switch.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub input_floor: AtomicU64,
     pub clients: Mutex<Vec<Arc<Client>>>,
     pub next_id: AtomicU64,
@@ -270,9 +272,9 @@ pub struct Hub {
 impl Hub {
     pub fn new() -> Arc<Self> {
         Arc::new(Hub {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             display_req: Mutex::new(None),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             input_floor: AtomicU64::new(0),
             clients: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),
@@ -368,9 +370,17 @@ impl Hub {
         }
     }
 
-    /// Share the admission lock with input senders, so the barrier cannot overtake input.
-    #[cfg(target_os = "macos")]
-    pub fn pause_display_input(&self, id: u32, client: u64) -> Option<crate::mac::DisplayRequest> {
+    /// Share the admission lock with input senders, so the barrier cannot overtake
+    /// input. Returns the input sender and the barrier's receiver; the platform wraps
+    /// them in its own DisplayRequest for the video thread.
+    #[cfg(any(target_os = "macos", windows))]
+    pub fn pause_display_input(
+        &self,
+        client: u64,
+    ) -> Option<(
+        std::sync::mpsc::Sender<crate::input::InputEvent>,
+        std::sync::mpsc::Receiver<()>,
+    )> {
         let mut input = self.input.lock();
         if client < self.input_floor.load(Ordering::Relaxed) {
             return None;
@@ -391,6 +401,6 @@ impl Hub {
         for client in self.clients.lock().drain(..) {
             client.send(Out::Text("{\"t\":\"close\"}".into()));
         }
-        Some(crate::mac::DisplayRequest { id, sender, ready })
+        Some((sender, ready))
     }
 }

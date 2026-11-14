@@ -284,7 +284,9 @@ from "CABLE Output".
 
 The other flags work as on Linux; `--microphone-fifo` and the rounded-corner flags don't
 apply. Dynamic resolution picks the largest display mode that fits the viewer's window,
-and Windows restores the original mode when voxl exits.
+and Windows restores the original mode when voxl exits. As on a Mac, the toolbar's
+Display picker switches between monitors; displays are identified by their index
+(`--display` order, primary first).
 
 ### HTTPS
 

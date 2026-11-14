@@ -10,8 +10,27 @@ use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
     ChangeDisplaySettingsExW, EnumDisplaySettingsW, CDS_FULLSCREEN, DEVMODEW,
     DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH,
-    ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE,
+    DM_POSITION, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE,
 };
+
+/// Apply a display mode. Displays besides the primary also need DM_POSITION (their
+/// offset in the virtual desktop) or the change fails with DISP_CHANGE_FAILED.
+fn set_mode(device: &[u16], m: &mut DEVMODEW) -> Result<(), String> {
+    m.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+    if let Some(c) = mode(device, ENUM_CURRENT_SETTINGS) {
+        unsafe {
+            m.Anonymous1.Anonymous2.dmPosition = c.Anonymous1.Anonymous2.dmPosition;
+        }
+        m.dmFields |= DM_POSITION;
+    }
+    let r = unsafe {
+        ChangeDisplaySettingsExW(PCWSTR(device.as_ptr()), Some(m), None, CDS_FULLSCREEN, None)
+    };
+    if r != DISP_CHANGE_SUCCESSFUL {
+        return Err(format!("ChangeDisplaySettingsEx: {}", r.0));
+    }
+    Ok(())
+}
 
 /// Smallest desktop a client may ask for.
 pub const MIN: (u32, u32) = (640, 480);
@@ -42,6 +61,8 @@ pub struct Screen {
     modes: Vec<DEVMODEW>,
     max: (u32, u32),
     current: (u32, u32),
+    /// The mode the display was in when voxl opened it, restored on display switch.
+    original: DEVMODEW,
 }
 
 unsafe impl Send for Screen {}
@@ -105,6 +126,7 @@ impl Screen {
         );
         Ok(Screen {
             current: size(&cur),
+            original: cur,
             device,
             modes,
             max,
@@ -132,19 +154,7 @@ impl Screen {
             .iter()
             .find(|m| size(m) == want)
             .ok_or("no such mode")?;
-        m.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
-        let r = unsafe {
-            ChangeDisplaySettingsExW(
-                PCWSTR(self.device.as_ptr()),
-                Some(&m),
-                None,
-                CDS_FULLSCREEN,
-                None,
-            )
-        };
-        if r != DISP_CHANGE_SUCCESSFUL {
-            return Err(format!("ChangeDisplaySettingsEx: {}", r.0));
-        }
+        set_mode(&self.device, &mut m)?;
         // Capture restarts right after; let the new size settle first.
         let t = Instant::now();
         while t.elapsed() < Duration::from_secs(2) && current(&self.device) != Some(want) {
@@ -152,6 +162,20 @@ impl Screen {
         }
         self.current = want;
         log::info!("display set to {}x{}", want.0, want.1);
+        Ok(())
+    }
+
+    /// Put the display back in the mode it had when voxl opened it. Called when the
+    /// stream moves to another display; voxl's exit restores the mode either way.
+    pub fn restore(&mut self) -> Result<(), String> {
+        let original = size(&self.original);
+        if self.current == original {
+            return Ok(());
+        }
+        let mut m = self.original;
+        set_mode(&self.device, &mut m)?;
+        self.current = original;
+        log::info!("display restored to {}x{}", original.0, original.1);
         Ok(())
     }
 }
