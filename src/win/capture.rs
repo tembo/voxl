@@ -19,8 +19,8 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_UNSPECIFIED,
-    DXGI_SAMPLE_DESC,
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION, DXGI_MODE_ROTATION_ROTATE180,
+    DXGI_MODE_ROTATION_ROTATE270, DXGI_MODE_ROTATION_ROTATE90, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_WAIT_TIMEOUT,
@@ -74,8 +74,60 @@ struct Dup {
     ctx: ID3D11DeviceContext,
     dup: IDXGIOutputDuplication,
     staging: ID3D11Texture2D,
+    /// The panel's unrotated frame size (what DXGI delivers).
+    sw: u32,
+    sh: u32,
+    /// The streamed size: the display mode as the user sees it.
     width: u32,
     height: u32,
+    rot: Rot,
+}
+
+/// How the display is rotated: the direction the unrotated frame is turned to match
+/// what the user sees (DXGI_MODE_ROTATION).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Rot {
+    Identity,
+    R90,
+    R180,
+    R270,
+}
+
+impl Rot {
+    fn new(r: DXGI_MODE_ROTATION) -> Self {
+        match r {
+            DXGI_MODE_ROTATION_ROTATE90 => Rot::R90,
+            DXGI_MODE_ROTATION_ROTATE180 => Rot::R180,
+            DXGI_MODE_ROTATION_ROTATE270 => Rot::R270,
+            _ => Rot::Identity,
+        }
+    }
+
+    fn swapped(self) -> bool {
+        matches!(self, Rot::R90 | Rot::R270)
+    }
+
+    /// The unrotated frame pixel shown at streamed pixel (x, y).
+    /// (sw, sh) is the unrotated size.
+    fn src_at(self, x: usize, y: usize, sw: usize, sh: usize) -> (usize, usize) {
+        match self {
+            Rot::Identity => (x, y),
+            Rot::R90 => (y, sh - 1 - x),
+            Rot::R180 => (sw - 1 - x, sh - 1 - y),
+            Rot::R270 => (sw - 1 - y, x),
+        }
+    }
+
+    /// The streamed rect covering an unrotated changed rect (x0, y0, x1, y1).
+    fn rect(self, r: (u32, u32, u32, u32), sw: u32, sh: u32) -> (u32, u32, u32, u32) {
+        let (x0, y0, x1, y1) = r;
+        match self {
+            Rot::Identity => r,
+            Rot::R90 => (sh - 1 - y1, x0, sh - 1 - y0, x1),
+            Rot::R180 => (sw - 1 - x1, sh - 1 - y1, sw - 1 - x0, sh - 1 - y0),
+            Rot::R270 => (y0, sw - 1 - x1, y1, sw - 1 - x0),
+        }
+    }
 }
 
 fn open_dup() -> Result<Dup, String> {
@@ -105,14 +157,21 @@ fn open_dup() -> Result<Dup, String> {
         )
     })?;
     let desc = unsafe { dup.GetDesc() };
-    let rot = desc.Rotation;
-    if rot != DXGI_MODE_ROTATION_IDENTITY && rot != DXGI_MODE_ROTATION_UNSPECIFIED {
-        log::warn!("the display is rotated; it streams in its unrotated orientation");
-    }
+    let rot = Rot::new(desc.Rotation);
+    // ModeDesc is the display mode (the orientation the user sees); frames arrive
+    // in the panel's unrotated orientation, swapped for 90°/270°.
     let (width, height) = (desc.ModeDesc.Width, desc.ModeDesc.Height);
+    let (sw, sh) = if rot.swapped() {
+        (height, width)
+    } else {
+        (width, height)
+    };
+    if rot != Rot::Identity {
+        log::info!("the display is rotated {rot:?}; it streams rotated to match");
+    }
     let tdesc = D3D11_TEXTURE2D_DESC {
-        Width: width,
-        Height: height,
+        Width: sw,
+        Height: sh,
         MipLevels: 1,
         ArraySize: 1,
         Format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -133,14 +192,17 @@ fn open_dup() -> Result<Dup, String> {
         ctx,
         dup,
         staging: staging.ok_or("no staging texture")?,
+        sw,
+        sh,
         width,
         height,
+        rot,
     })
 }
 
 /// Changed rectangles of the frame just acquired, clipped to the screen.
 fn frame_rects(d: &Dup, info: &DXGI_OUTDUPL_FRAME_INFO) -> Vec<(u32, u32, u32, u32)> {
-    let (w, h) = (d.width as i32, d.height as i32);
+    let (w, h) = (d.sw as i32, d.sh as i32);
     let mut out = Vec::new();
     let mut push = |r: RECT| {
         let (x0, y0) = (r.left.clamp(0, w), r.top.clamp(0, h));
@@ -218,17 +280,32 @@ fn copy_rects(
         let row = d.width as usize * 4;
         {
             let mut s = shared.lock();
-            for &(x0, y0, x1, y1) in rects {
-                let (a, len) = (x0 as usize * 4, (x1 - x0) as usize * 4);
-                for y in y0 as usize..y1 as usize {
-                    std::ptr::copy_nonoverlapping(
-                        src.add(y * pitch + a),
-                        s.buf.as_mut_ptr().add(y * row + a),
-                        len,
+            for &r in rects {
+                if d.rot == Rot::Identity {
+                    let (x0, y0, x1, y1) = r;
+                    let (a, len) = (x0 as usize * 4, (x1 - x0) as usize * 4);
+                    for y in y0 as usize..y1 as usize {
+                        std::ptr::copy_nonoverlapping(
+                            src.add(y * pitch + a),
+                            s.buf.as_mut_ptr().add(y * row + a),
+                            len,
+                        );
+                    }
+                } else {
+                    let dr = d.rot.rect(r, d.sw, d.sh);
+                    blit_rotated(
+                        src,
+                        pitch,
+                        d.sw as usize,
+                        d.sh as usize,
+                        d.rot,
+                        dr,
+                        &mut s.buf,
+                        d.width as usize,
                     );
                 }
+                s.rects.push(d.rot.rect(r, d.sw, d.sh));
             }
-            s.rects.extend_from_slice(rects);
             s.frames += 1;
         }
         d.ctx.Unmap(&d.staging, 0);
@@ -236,11 +313,48 @@ fn copy_rects(
     Ok(())
 }
 
+/// Rotate `dr` (a rect in streamed space) of the unrotated staging image into `buf`,
+/// in 32x32 tiles so neither the strided reads nor the writes thrash the cache.
+fn blit_rotated(
+    src: *const u8,
+    pitch: usize,
+    sw: usize,
+    sh: usize,
+    rot: Rot,
+    dr: (u32, u32, u32, u32),
+    buf: &mut [u8],
+    dest_w: usize,
+) {
+    const T: u32 = 32;
+    let (x0, y0, x1, y1) = dr;
+    let dstride = dest_w * 4;
+    let mut by = y0;
+    while by < y1 {
+        let mut bx = x0;
+        while bx < x1 {
+            for y in by..(by + T).min(y1) {
+                for x in bx..(bx + T).min(x1) {
+                    let (sx, sy) = rot.src_at(x as usize, y as usize, sw, sh);
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            src.add(sy * pitch + sx * 4),
+                            buf.as_mut_ptr().add(y as usize * dstride + x as usize * 4),
+                            4,
+                        );
+                    }
+                }
+            }
+            bx += T;
+        }
+        by += T;
+    }
+}
+
 /// Takes desktop images until `stop`; reopens duplication when Windows takes it away
 /// (desktop switch, UAC prompt, mode change).
 fn capture_thread(mut d: Dup, shared: Arc<Mutex<Shared>>, wake: Arc<Wake>, stop: Arc<AtomicBool>) {
     let debug = std::env::var("VOXL_DEBUG_DAMAGE").is_ok();
-    let full = vec![(0, 0, d.width, d.height)];
+    let full = vec![(0, 0, d.sw, d.sh)];
     let mut first = true;
     while !stop.load(Ordering::Relaxed) {
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -269,7 +383,7 @@ fn capture_thread(mut d: Dup, shared: Arc<Mutex<Shared>>, wake: Arc<Wake>, stop:
                         Err(e) => log::debug!("reopening capture: {e}"),
                     }
                 }
-                if (d.width, d.height) != (full[0].2, full[0].3) {
+                if (d.sw, d.sh) != (full[0].2, full[0].3) {
                     shared.lock().rebuild = true;
                     wake.signal();
                     return;
