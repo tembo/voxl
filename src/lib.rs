@@ -42,7 +42,6 @@ use mac::{audio, capture, desktop, input, screen};
 use win::{audio, capture, desktop, input, screen};
 
 use std::collections::HashMap;
-use std::time::Instant;
 
 /// Parses `--key=value` / `--key value` / `--flag`; unknown options are accepted so the
 /// binary can take the same argument list as the Python selkies service it replaces.
@@ -348,7 +347,6 @@ async fn serve(a: HashMap<String, String>) {
     let state = server::AppState {
         hub: hub.clone(),
         audio: audio_on,
-        epoch: Instant::now(),
         files,
         mic,
         resize: enable_resize && !read_only,

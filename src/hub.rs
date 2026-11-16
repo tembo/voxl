@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 pub enum Out {
@@ -19,6 +19,84 @@ pub struct Inflight {
     pub bytes: usize,
 }
 
+/// How often a client is pinged: every 500 ms. Its round trip is the
+/// shortest of its last 20 replies, so a path that changes shows within 10 s.
+pub const PING_EVERY: Duration = Duration::from_millis(500);
+
+/// The longest round trip a client's replies can show: 4 s. A client whose oldest
+/// unacknowledged frame is that old is stalled, and the flow check resyncs it (video.rs),
+/// so a longer round trip steers nothing; the bench's links have 80 to 140 ms. At half, a
+/// path of 2 to 4 s would show no round trip and be judged by the 40 ms guess; at double,
+/// a client's record would keep twice the pings for nothing.
+const LONGEST_ROUND_TRIP: Duration = Duration::from_secs(4);
+
+/// The pings a client's record keeps: one goes out every `PING_EVERY`, so this many are
+/// out at once on the longest round trip, 8.
+const PINGS_KEPT: usize = (LONGEST_ROUND_TRIP.as_millis() / PING_EVERY.as_millis()) as usize;
+
+/// What names a ping, and what its reply echoes: 64 bits from the operating system's
+/// random source, 16 hex digits on the wire. A ping used to be named by the time it went
+/// out, which a viewer can tell before the ping reaches it (one goes every `PING_EVERY`,
+/// late by the pinger's scheduling), and a burst of replies naming each microsecond
+/// around it found it for a few kilobytes. A token it has not seen it can only guess, one
+/// in 2^64 a reply.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Token(u64);
+
+impl Token {
+    pub fn random() -> Token {
+        let mut bytes = [0; 8];
+        getrandom::fill(&mut bytes).expect("random ping token");
+        Token(u64::from_ne_bytes(bytes))
+    }
+
+    /// From a reply's field: 16 hex digits, as a ping carries it.
+    pub fn parse(field: &str) -> Option<Token> {
+        let field = field.trim();
+        let digits = field.len() == 16 && field.bytes().all(|b| b.is_ascii_hexdigit());
+        digits.then(|| u64::from_str_radix(field, 16).ok().map(Token))?
+    }
+}
+
+impl std::fmt::Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+/// A ping sent to a client: what names it, and when it went. The time never leaves the
+/// server.
+struct Ping {
+    token: Token,
+    sent: Instant,
+}
+
+/// The pings sent to a client and not yet answered, oldest first, at most `PINGS_KEPT`. A
+/// reply is a round trip only if it echoes the token of one of them.
+#[derive(Default)]
+pub struct Pings(VecDeque<Ping>);
+
+impl Pings {
+    /// A ping named `token`, sent at `now`. The oldest unanswered one leaves once the
+    /// record holds `PINGS_KEPT`.
+    pub fn send(&mut self, now: Instant, token: Token) {
+        if self.0.len() == PINGS_KEPT {
+            self.0.pop_front();
+        }
+        self.0.push_back(Ping { token, sent: now });
+    }
+
+    /// At `now`, a reply echoing `token`: the round trip of the ping it names, if that ping
+    /// is in the record, which it then leaves. A reply echoing anything else (a ping
+    /// already answered, one older than the record keeps, a token never sent, or a time,
+    /// as replies used to) is no round trip.
+    pub fn answer(&mut self, now: Instant, token: Token) -> Option<Duration> {
+        let i = self.0.iter().position(|p| p.token == token)?;
+        let ping = self.0.remove(i)?;
+        now.checked_duration_since(ping.sent)
+    }
+}
+
 pub struct Client {
     pub id: u64,
     pub tx: mpsc::UnboundedSender<Out>,
@@ -27,6 +105,8 @@ pub struct Client {
     pub inflight: Mutex<VecDeque<Inflight>>,
     /// Smoothed min RTT (ms), from pings.
     pub min_rtt_ms: AtomicU32,
+    /// The pings sent to it that it has not answered.
+    pub pings: Mutex<Pings>,
     /// Exponentially-weighted estimate of delivered bytes/sec, from acks.
     pub delivered: Mutex<RateEst>,
     pub needs_keyframe: AtomicBool,
@@ -309,6 +389,7 @@ impl Hub {
             audio: AtomicBool::new(false),
             inflight: Mutex::new(VecDeque::new()),
             min_rtt_ms: AtomicU32::new(0),
+            pings: Mutex::new(Pings::default()),
             delivered: Mutex::new(RateEst {
                 window_start: Instant::now(),
                 bytes: 0,
@@ -392,5 +473,110 @@ impl Hub {
             client.send(Out::Text("{\"t\":\"close\"}".into()));
         }
         Some(crate::mac::DisplayRequest { id, sender, ready })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reply is a round trip only if it echoes the token of a ping that was sent and not
+    /// yet answered: the latest, or an older one still out. One already answered, one never
+    /// sent, and one older than the record keeps are none. A token goes out and comes back
+    /// as 16 hex digits, and a reply in any other shape, a time as replies used to be among
+    /// them, is no token.
+    #[test]
+    fn a_reply_is_a_round_trip_only_to_a_ping_still_out() {
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        let mut pings = Pings::default();
+        for (at, token) in [(0, 10), (500, 11), (1000, 12)] {
+            pings.send(t0 + ms(at), Token(token));
+        }
+        for (now, echoes, round_trip) in [
+            // The latest ping.
+            (1040, 12, Some(ms(40))),
+            // An older one, still out.
+            (1060, 11, Some(ms(560))),
+            // One already answered.
+            (1080, 12, None),
+            // One never sent.
+            (1100, 13, None),
+        ] {
+            let got = pings.answer(t0 + ms(now), Token(echoes));
+            assert_eq!(got, round_trip, "token {echoes} at {now} ms");
+        }
+        // One older than the record keeps: the first of PINGS_KEPT + 1, a ping apart.
+        let mut pings = Pings::default();
+        for i in 0..=PINGS_KEPT as u32 {
+            pings.send(t0 + PING_EVERY * i, Token(i.into()));
+        }
+        let now = t0 + PING_EVERY * (PINGS_KEPT as u32 + 1);
+        assert_eq!(pings.answer(now, Token(0)), None);
+        assert_eq!(
+            pings.answer(now, Token(1)),
+            Some(PING_EVERY * PINGS_KEPT as u32)
+        );
+        assert_eq!(PINGS_KEPT, 8);
+
+        let token = Token(0x0123_4567_89ab_cdef);
+        assert_eq!(token.to_string(), "0123456789abcdef");
+        assert_eq!(Token::parse(&token.to_string()), Some(token));
+        for field in [
+            "",
+            "1",
+            "9999000",
+            "+123456789abcdef",
+            "0123456789abcdeg",
+            "0123456789abcdef0",
+        ] {
+            assert_eq!(Token::parse(field), None, "{field:?}");
+        }
+    }
+
+    /// A reply cannot answer a ping before it arrives: what a
+    /// viewer could know of the next ping before having it is when it is due, one
+    /// `PING_EVERY` after the last, and the tokens of the pings it has had. A burst of
+    /// replies naming each microsecond of the millisecond the ping went out in, written as
+    /// replies wrote times and as tokens, and each token within 500 of one it has had, is
+    /// no round trip.
+    #[test]
+    fn a_reply_cannot_answer_a_ping_before_it_arrives() {
+        let us = Duration::from_micros;
+        let real_round_trip = Duration::from_millis(100);
+        let t0 = Instant::now();
+        let mut pings = Pings::default();
+        // Pings as the pinger sends them: due every 500 ms, each run a little late.
+        let due = |k: u32| t0 + PING_EVERY * k;
+        let late = [us(173), us(412), us(58), us(731)];
+        let mut had = vec![];
+        for (k, &l) in late.iter().enumerate().take(3) {
+            let token = Token::random();
+            pings.send(due(k as u32) + l, token);
+            assert!(pings
+                .answer(due(k as u32) + l + real_round_trip, token)
+                .is_some());
+            had.push(token);
+        }
+        // The fourth goes out; the viewer has not had it yet. 1 ms after it is due, a
+        // burst arrives naming everything it could have guessed.
+        pings.send(due(3) + late[3], Token::random());
+        let now = due(3) + Duration::from_millis(1);
+        // Each microsecond it could have gone out at, as replies wrote it and as a token.
+        let times = (0..1000u64).flat_map(|j| {
+            let us = (PING_EVERY * 3 + us(j)).as_micros();
+            [us.to_string(), format!("{us:016x}")]
+        });
+        let neighbours = had.iter().flat_map(|t| {
+            (0..1000u64).map(move |j| Token(t.0.wrapping_add(j).wrapping_sub(500)).to_string())
+        });
+        let shortest = times
+            .chain(neighbours)
+            .filter_map(|guess| pings.answer(now, Token::parse(&guess)?))
+            .min();
+        assert!(
+            shortest.is_none_or(|rt| rt >= real_round_trip),
+            "a {shortest:?} round trip on a {real_round_trip:?} path"
+        );
     }
 }

@@ -52,7 +52,8 @@ export interface Hello {
 /** JSON text messages from the server. */
 export type ServerMessage =
 	| Hello
-	| { t: 'ping'; s: number }
+	/** `s` names the ping (16 hex digits); the reply echoes it as it is. */
+	| { t: 'ping'; s: string }
 	| { t: 'clip'; d: string }
 	| { t: 'mic'; on: boolean }
 	| { t: 'close' };
@@ -74,7 +75,7 @@ export const cmd = {
 	resize: (w: number, h: number) => `sz,${w},${h}`,
 	display: (id: number) => `ds,${id}`,
 	keyframe: 'kf',
-	pong: (sent: number) => `po,${sent}`,
+	pong: (token: string) => `po,${token}`,
 } as const;
 
 /** Header of a video message (after the type byte). */

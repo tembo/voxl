@@ -12,14 +12,13 @@ use bytes::Bytes;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub struct AppState {
     pub hub: Arc<Hub>,
     pub audio: bool,
-    pub epoch: Instant,
     pub files: Arc<crate::files::Files>,
     pub mic: Option<std::sync::mpsc::Sender<crate::mic::MicMsg>>,
     /// Resizing was enabled; hub.resize_max tracks the current display's capability.
@@ -250,13 +249,13 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     });
     let pinger = {
         let c = client.clone();
-        let epoch = s.epoch;
         tokio::spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_millis(500));
+            let mut iv = tokio::time::interval(crate::hub::PING_EVERY);
             loop {
                 iv.tick().await;
-                let t = epoch.elapsed().as_micros() as u64;
-                c.send(Out::Text(format!("{{\"t\":\"ping\",\"s\":{t}}}")));
+                let token = crate::hub::Token::random();
+                c.pings.lock().send(Instant::now(), token);
+                c.send(Out::Text(format!("{{\"t\":\"ping\",\"s\":\"{token}\"}}")));
             }
         })
     };
@@ -439,9 +438,13 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
             s.hub.wake();
         }
         "po" => {
-            if let Some(sent) = num::<u64>(&mut it) {
-                let now = s.epoch.elapsed().as_micros() as u64;
-                let rtt = (now.saturating_sub(sent) / 1000) as u32;
+            let now = Instant::now();
+            let rtt = it
+                .next()
+                .and_then(crate::hub::Token::parse)
+                .and_then(|token| c.pings.lock().answer(now, token));
+            if let Some(rtt) = rtt {
+                let rtt = u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX);
                 rtts.push_back(rtt.max(1));
                 if rtts.len() > 20 {
                     rtts.pop_front();
@@ -457,6 +460,7 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// Every command the web client sends (web/src/protocol.ts), with arguments.
     const ALL: &[&str] = &[
@@ -475,7 +479,7 @@ mod tests {
         "mi,1",
         "sz,640,480",
         "kf",
-        "po,1",
+        "po,0123456789abcdef",
         "ds,4294967295",
     ];
 
@@ -492,7 +496,6 @@ mod tests {
         let s = AppState {
             hub: hub.clone(),
             audio: true,
-            epoch: Instant::now(),
             files: Arc::new(crate::files::Files {
                 root: std::env::temp_dir(),
                 upload: false,
@@ -538,6 +541,82 @@ mod tests {
         assert!(input >= 9, "{input} input events");
         assert_eq!(mic, 1);
         assert!(resized);
+    }
+
+    /// A reply to no ping is no round trip. With no record of
+    /// the pings sent, a reply naming a moment just past read as a 1 ms round trip on a
+    /// viewer that was never pinged: its frames were then overdue at 81 ms, and the flow
+    /// check held every viewer's frames once one of its own was 121 ms old. A read-only
+    /// viewer may send it.
+    #[test]
+    fn a_reply_to_no_ping_is_no_round_trip() {
+        let hub = Hub::new();
+        let s = AppState {
+            hub: hub.clone(),
+            audio: true,
+            files: Arc::new(crate::files::Files {
+                root: std::env::temp_dir(),
+                upload: false,
+                download: false,
+                default_dir: String::new(),
+                max_upload_bytes: 0,
+            }),
+            mic: None,
+            resize: false,
+            read_only: true,
+            recorder: crate::record::Recorder::new(hub.clone(), Duration::from_secs(1)),
+            index: Bytes::new(),
+            favicon: Bytes::new(),
+            favicon_type: "image/x-icon",
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = hub.add_client(tx);
+        let mut rtts = Default::default();
+        // No ping was sent to this viewer. It names a moment just past, as replies did when
+        // pings were named by the microsecond they went out, then a token.
+        for reply in ["po,9999000", "po,0123456789abcdef"] {
+            handle_text(&s, &client, reply, &mut rtts);
+        }
+        assert_eq!(
+            client.min_rtt_ms.load(Ordering::Relaxed),
+            0,
+            "a reply to no ping read as a round trip"
+        );
+    }
+
+    /// The other half of the one above, so it checks the record rather than a server that
+    /// ignores every reply: the reply to a ping the pinger recorded is a round trip.
+    #[test]
+    fn a_reply_to_the_ping_sent_is_a_round_trip() {
+        let hub = Hub::new();
+        let s = AppState {
+            hub: hub.clone(),
+            audio: true,
+            files: Arc::new(crate::files::Files {
+                root: std::env::temp_dir(),
+                upload: false,
+                download: false,
+                default_dir: String::new(),
+                max_upload_bytes: 0,
+            }),
+            mic: None,
+            resize: false,
+            read_only: true,
+            recorder: crate::record::Recorder::new(hub.clone(), Duration::from_secs(1)),
+            index: Bytes::new(),
+            favicon: Bytes::new(),
+            favicon_type: "image/x-icon",
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = hub.add_client(tx);
+        let mut rtts = Default::default();
+        let token = crate::hub::Token::random();
+        client.pings.lock().send(Instant::now(), token);
+        handle_text(&s, &client, &format!("po,{token}"), &mut rtts);
+        assert!(
+            client.min_rtt_ms.load(Ordering::Relaxed) > 0,
+            "the reply to a ping was no round trip"
+        );
     }
 
     #[test]
