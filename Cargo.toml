@@ -3,6 +3,9 @@
 name = "voxl-server"
 version = "0.3.5"
 edition = "2021"
+# The Rust that CI's Linux job builds with (nixpkgs 25.05), so clippy flags anything newer
+# on every platform.
+rust-version = "1.86"
 license = "MIT"
 description = "Low-latency desktop streaming for the browser: an X11 display, a Mac's screen or a Windows desktop as H.264 over a WebSocket"
 repository = "https://github.com/tembo/voxl"

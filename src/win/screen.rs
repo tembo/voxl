@@ -80,8 +80,8 @@ impl Screen {
                 || m.dmDisplayFrequency != cur.dmDisplayFrequency
                 || s.0 < MIN.0
                 || s.1 < MIN.1
-                || !s.0.is_multiple_of(2)
-                || !s.1.is_multiple_of(2)
+                || s.0 % 2 != 0
+                || s.1 % 2 != 0
                 || (s.0 as u64 * s.1 as u64 > MAX_PIXELS && s != size(&cur))
                 || modes.iter().any(|x| size(x) == s)
             {
