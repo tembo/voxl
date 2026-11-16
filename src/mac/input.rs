@@ -445,6 +445,7 @@ pub fn spawn(
     _display: Option<String>,
     clipboard: Option<super::desktop::ClipboardHandle>,
     _px_per_notch: f64,
+    _runtime_dir: Option<String>,
 ) -> Result<mpsc::Sender<InputEvent>, String> {
     let src = unsafe { CGEventSourceCreate(kCGEventSourceStateHIDSystemState) };
     if src.is_null() {

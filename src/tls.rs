@@ -4,6 +4,7 @@
 //! browser's exception for it lasts across restarts) and serves that.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,9 +14,11 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 /// The TLS settings the flags ask for, or `None` to serve plain HTTP.
 /// `names` go into a newly made self-signed certificate.
+/// A certificate voxl makes is kept in `dir` (see `tls_dir`).
 pub fn from_args(
     a: &HashMap<String, String>,
     names: Vec<String>,
+    dir: &Path,
 ) -> Option<Arc<rustls::ServerConfig>> {
     let (cert, key) = match (a.get("tls-cert"), a.get("tls-key")) {
         (Some(c), Some(k)) => (PathBuf::from(c), PathBuf::from(k)),
@@ -24,7 +27,7 @@ pub fn from_args(
         }
         (None, None) if crate::truthy(a.get("tls"), false) => {
             // One file holds both the certificate and its key.
-            let pem = self_signed(&tls_dir(), names);
+            let pem = self_signed(dir, names);
             (pem.clone(), pem)
         }
         (None, None) => return None,
@@ -54,17 +57,18 @@ fn load(cert: &Path, key: &Path) -> Arc<rustls::ServerConfig> {
 }
 
 /// Where voxl keeps the certificate it makes: %LOCALAPPDATA%\voxl on Windows,
-/// $XDG_CONFIG_HOME/voxl or ~/.config/voxl elsewhere, or VOXL_TLS_DIR.
-fn tls_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("VOXL_TLS_DIR") {
+/// $XDG_CONFIG_HOME/voxl or ~/.config/voxl elsewhere, or VOXL_TLS_DIR; `var_os` reads the
+/// environment (see `Env::read`).
+pub fn tls_dir(var_os: impl Fn(&str) -> Option<OsString>) -> PathBuf {
+    if let Some(d) = var_os("VOXL_TLS_DIR") {
         return d.into();
     }
     #[cfg(windows)]
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let base = var_os("LOCALAPPDATA").map(PathBuf::from);
     #[cfg(not(windows))]
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    let base = var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+        .or_else(|| var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
     base.unwrap_or_else(|| PathBuf::from(".")).join("voxl")
 }
 

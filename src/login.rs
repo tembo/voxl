@@ -36,18 +36,21 @@ impl Login {
     }
 
     /// From --enable-basic-auth (on unless false), --basic-auth-user and the password:
-    /// --basic-auth-password, else VOXL_PASSWORD or SELKIES_BASIC_AUTH_PASSWORD, else a
-    /// random one. `None` with the login off; the flag says whether the password was made
-    /// up here, so the only way to learn it is the link voxl prints.
-    pub fn from_args(a: &HashMap<String, String>) -> Option<(Self, bool)> {
+    /// --basic-auth-password, else `from_env` (VOXL_PASSWORD or SELKIES_BASIC_AUTH_PASSWORD,
+    /// see `Env::password`), else a random one. `None` with the login off; the flag says
+    /// whether the password was made up here, so the only way to learn it is the link voxl
+    /// prints.
+    pub fn from_args(
+        a: &HashMap<String, String>,
+        from_env: Option<String>,
+    ) -> Option<(Self, bool)> {
         if !crate::truthy(a.get("enable-basic-auth"), true) {
             return None;
         }
         let given = a
             .get("basic-auth-password")
             .cloned()
-            .or_else(|| std::env::var("VOXL_PASSWORD").ok())
-            .or_else(|| std::env::var("SELKIES_BASIC_AUTH_PASSWORD").ok())
+            .or(from_env)
             .filter(|p| !p.is_empty());
         let generated = given.is_none();
         let password = given.unwrap_or_else(random_password);
@@ -246,21 +249,17 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect()
         };
-        assert!(Login::from_args(&args(&[("enable-basic-auth", "false")])).is_none());
+        assert!(Login::from_args(&args(&[("enable-basic-auth", "false")]), None).is_none());
         let given = random_password();
         let (login, generated) =
-            Login::from_args(&args(&[("basic-auth-password", &given)])).unwrap();
+            Login::from_args(&args(&[("basic-auth-password", &given)]), None).unwrap();
         assert_eq!((login.password(), generated), (given.as_str(), false));
         // Without a password from the environment, an empty one counts as none and each
         // start makes up a different one.
-        if std::env::var_os("VOXL_PASSWORD").is_none()
-            && std::env::var_os("SELKIES_BASIC_AUTH_PASSWORD").is_none()
-        {
-            let (a, generated) = Login::from_args(&args(&[("basic-auth-password", "")])).unwrap();
-            let (b, _) = Login::from_args(&args(&[])).unwrap();
-            assert!(generated);
-            assert_eq!(a.password().len(), 32);
-            assert_ne!(a.password(), b.password());
-        }
+        let (a, generated) = Login::from_args(&args(&[("basic-auth-password", "")]), None).unwrap();
+        let (b, _) = Login::from_args(&args(&[]), None).unwrap();
+        assert!(generated);
+        assert_eq!(a.password().len(), 32);
+        assert_ne!(a.password(), b.password());
     }
 }

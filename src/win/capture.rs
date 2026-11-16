@@ -6,6 +6,7 @@
 //! cursor out, so clients draw it themselves (see desktop.rs).
 
 use super::Geometry;
+use crate::env::Debugging;
 use crate::hub::{Waitable, Wake};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -238,8 +239,14 @@ fn copy_rects(
 
 /// Takes desktop images until `stop`; reopens duplication when Windows takes it away
 /// (desktop switch, UAC prompt, mode change).
-fn capture_thread(mut d: Dup, shared: Arc<Mutex<Shared>>, wake: Arc<Wake>, stop: Arc<AtomicBool>) {
-    let debug = std::env::var("VOXL_DEBUG_DAMAGE").is_ok();
+fn capture_thread(
+    mut d: Dup,
+    shared: Arc<Mutex<Shared>>,
+    wake: Arc<Wake>,
+    stop: Arc<AtomicBool>,
+    debug: Debugging,
+) {
+    let debug = debug.damage;
     let full = vec![(0, 0, d.width, d.height)];
     let mut first = true;
     while !stop.load(Ordering::Relaxed) {
@@ -311,7 +318,7 @@ fn capture_thread(mut d: Dup, shared: Arc<Mutex<Shared>>, wake: Arc<Wake>, stop:
 }
 
 impl Capturer {
-    pub fn new(_display: Option<&str>) -> Result<Self, String> {
+    pub fn new(_display: Option<&str>, debug: Debugging) -> Result<Self, String> {
         let wake = Arc::new(Wake::new().map_err(|e| e.to_string())?);
         let stop = Arc::new(AtomicBool::new(false));
         let shared = Arc::new(Mutex::new(Shared {
@@ -332,7 +339,7 @@ impl Capturer {
                         Ok(d) => {
                             shared.lock().buf = vec![0; d.width as usize * d.height as usize * 4];
                             let _ = tx.send(Ok((d.width, d.height)));
-                            capture_thread(d, shared, wake, stop);
+                            capture_thread(d, shared, wake, stop, debug);
                         }
                         Err(e) => {
                             let _ = tx.send(Err(e));

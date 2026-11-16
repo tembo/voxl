@@ -3,6 +3,7 @@
 use crate::capture::{Band, Capturer};
 use crate::convert::I420;
 use crate::encoder::{Encoded, Encoder, EncoderConfig, Planes};
+use crate::env::{Debugging, Marker};
 use crate::hub::wait_any;
 use crate::hub::{Hub, Inflight, Out};
 use bytes::Bytes;
@@ -29,6 +30,8 @@ pub struct VideoConfig {
     pub coalesce: Duration,
     pub stripes: u32,
     pub adaptive_threads: bool,
+    /// The debugging variables (`VOXL_*`), read when voxl started.
+    pub debug: Debugging,
 }
 
 struct Job {
@@ -43,7 +46,9 @@ struct Job {
     /// Per-macroblock change map for this capture (None: analyse everything).
     mb_dirty: Option<Arc<Vec<u8>>>,
     captured_at: Instant,
-    marker_ms: i64,
+    /// What the bench loadgen's marker said when the frame was captured, while
+    /// `VOXL_DEBUG_MARKER` is set (see `marker_reading`).
+    marker_ms: Option<u32>,
 }
 
 fn union(a: Option<Band>, b: Band) -> Band {
@@ -171,7 +176,7 @@ fn switch_display(
 }
 
 fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
-    let cap = Capturer::new(cfg.display.as_deref())?;
+    let cap = Capturer::new(cfg.display.as_deref(), cfg.debug)?;
     let (w, h) = (cap.width, cap.height);
     hub.width.store(w, Ordering::Relaxed);
     hub.height.store(h, Ordering::Relaxed);
@@ -201,6 +206,7 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
             fps: cfg.fps,
             preset: cfg.preset.clone(),
             threads: fixed,
+            debug: cfg.debug,
             crf: cfg.crf,
             max_kbps: cfg.max_kbps,
         };
@@ -221,10 +227,10 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
     }
     *hub.stripes.lock() = layout;
     let hub2 = hub.clone();
-    let (crf, po_crf) = (cfg.crf, cfg.paintover_crf);
+    let (crf, po_crf, debug) = (cfg.crf, cfg.paintover_crf, cfg.debug);
     let encode = std::thread::Builder::new()
         .name("encode".into())
-        .spawn(move || encode_loop(stripes, job_rx, ret_tx, hub2, crf, po_crf))
+        .spawn(move || encode_loop(stripes, job_rx, ret_tx, hub2, crf, po_crf, debug))
         .unwrap();
     #[cfg(target_os = "macos")]
     {
@@ -551,7 +557,21 @@ fn capture_loop(
     let mut had_clients = false;
     let mut full_next = true;
     let mut refiner = Refiner::new(w.div_ceil(16) * h.div_ceil(16), w.div_ceil(16));
-    let debug_marker = std::env::var("VOXL_DEBUG_MARKER").is_ok();
+    let marker = cfg.debug.marker;
+    // The marker is read only where all of it fits this capture (a resize builds a new
+    // loop): past an edge its squares are outside the picture or in the next row.
+    let probe = marker.and_then(|at| {
+        let probe = MarkerProbe::fit(at, w, h);
+        if probe.is_none() {
+            log::error!(
+                "VOXL_DEBUG_MARKER={},{}: the marker does not fit the {w}x{h} capture; \
+                 it is not read",
+                at.x,
+                at.y
+            );
+        }
+        probe
+    });
 
     loop {
         #[cfg(target_os = "macos")]
@@ -681,7 +701,7 @@ fn capture_loop(
             }
         }
         let t1 = Instant::now();
-        if debug_marker {
+        if marker.is_some() {
             log::info!(
                 "cap dt {:.1} ms band {:?} grab {} us",
                 last_capture.elapsed().as_secs_f64() * 1000.0,
@@ -689,10 +709,7 @@ fn capture_loop(
                 (t1 - t0).as_micros()
             );
         }
-        let marker_ms = match cap.bgrx() {
-            Some((px, stride)) if debug_marker => marker_probe(px, stride, "grab"),
-            _ => -1,
-        };
+        let marker_ms = marker_reading(cap.bgrx(), probe);
         let is_motion = band.is_some();
         if !is_motion && !want_key && !paintover_due {
             // Damage was empty after all.
@@ -1175,11 +1192,12 @@ fn encode_loop(
     hub: Arc<Hub>,
     crf: f32,
     po_crf: f32,
+    debug: Debugging,
 ) {
     let epoch = Instant::now();
     let mut frame_id: u32 = 0;
     let n = stripes_in.len();
-    let debug_stripes = std::env::var("VOXL_DEBUG_STRIPES").is_ok();
+    let debug_stripes = debug.stripes;
     // Geometry and paint-over bookkeeping stay here; encoders move to their workers.
     let mut stripes: Vec<(usize, usize, bool)> =
         stripes_in.iter().map(|s| (s.y, s.h, false)).collect();
@@ -1280,7 +1298,7 @@ fn encode_loop(
         frame_id = frame_id.wrapping_add(1);
         // Server-side pipeline latency (capture -> sent) in 1/10 ms, for client stats.
         let mut pipe = (job.captured_at.elapsed().as_micros() / 100).min(u32::MAX as u128) as u32;
-        if job.marker_ms >= 0 {
+        if job.marker_ms.is_some() {
             // Debug: wall-clock send time instead of pipeline latency.
             pipe = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1335,17 +1353,16 @@ fn encode_loop(
             job.captured_at.elapsed().as_micros() as u64,
             Ordering::Relaxed,
         );
-        if job.marker_ms >= 0 {
+        if let Some(ms) = job.marker_ms {
             log::info!(
                 "marker sent age {} ms (encode {} us)",
-                marker_age(job.marker_ms),
+                marker_age(ms),
                 enc_us
             );
         }
     }
 }
 
-/// Debug: decode the bench loadgen marker at (300,150) and log its age.
 /// CPU time this thread has used, in microseconds.
 #[cfg(unix)]
 fn thread_cpu_us() -> i64 {
@@ -1367,45 +1384,156 @@ fn thread_cpu_us() -> i64 {
     }
 }
 
-fn marker_probe(buf: &[u8], stride: usize, what: &str) -> i64 {
+/// The bench loadgen's marker as `bench/loadgen.c` draws it: 40 bits (the wall clock's
+/// milliseconds in the low 24, the frame in the next 16), each a square of 24 px, 20 to
+/// a row, read at each square's centre. These are loadgen's numbers, not chosen here: any
+/// other value reads pixels it did not draw.
+const MARKER_BITS: usize = 40;
+const MARKER_ROW: usize = 20;
+const MARKER_SQUARE: usize = 24;
+
+/// A `VOXL_DEBUG_MARKER` place on a capture the whole marker fits, so every square it
+/// reads is a pixel of the picture in the square's own row.
+#[derive(Clone, Copy, Debug)]
+struct MarkerProbe(Marker);
+
+impl MarkerProbe {
+    /// The marker at `at` on a `width` x `height` capture, if the centre of its last
+    /// square across and its last square down are inside it.
+    fn fit(at: Marker, width: usize, height: usize) -> Option<MarkerProbe> {
+        let last = |from: usize, squares: usize| {
+            from.checked_add((squares - 1) * MARKER_SQUARE + MARKER_SQUARE / 2)
+        };
+        (last(at.x, MARKER_ROW)? < width && last(at.y, MARKER_BITS / MARKER_ROW)? < height)
+            .then_some(MarkerProbe(at))
+    }
+}
+
+/// What the bench loadgen's marker says on this capture: none unless `VOXL_DEBUG_MARKER`
+/// placed it where it fits and the capture has pixels to read it from.
+fn marker_reading(bgrx: Option<(&[u8], usize)>, probe: Option<MarkerProbe>) -> Option<u32> {
+    match (bgrx, probe) {
+        (Some((px, stride)), Some(at)) => Some(marker_probe(px, stride, at, "grab")),
+        _ => None,
+    }
+}
+
+/// Debug: decode the bench loadgen marker at `at` and log its age.
+fn marker_probe(buf: &[u8], stride: usize, MarkerProbe(at): MarkerProbe, what: &str) -> u32 {
     let mut v: u64 = 0;
-    let (mx, my) = std::env::var("VOXL_DEBUG_MARKER")
-        .ok()
-        .and_then(|s| {
-            s.split_once(',')
-                .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?)))
-        })
-        .unwrap_or((300, 150));
-    for b in 0..40 {
-        let x = mx + (b % 20) * 24 + 12;
-        let y = my + (b / 20) * 24 + 12;
+    for b in 0..MARKER_BITS {
+        let x = at.x + (b % MARKER_ROW) * MARKER_SQUARE + MARKER_SQUARE / 2;
+        let y = at.y + (b / MARKER_ROW) * MARKER_SQUARE + MARKER_SQUARE / 2;
         let i = y * stride + x * 4;
         if buf[i + 2] > 128 {
             v |= 1 << b;
         }
     }
-    let ms = (v & 0xffffff) as i64;
+    let ms = (v & 0xffffff) as u32;
     let now = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64)
         & 0xffffff;
-    log::info!("marker {} frame {} age {} ms", what, v >> 24, now - ms);
+    log::info!(
+        "marker {} frame {} age {} ms",
+        what,
+        v >> 24,
+        now - i64::from(ms)
+    );
     ms
 }
 
-fn marker_age(ms: i64) -> i64 {
+fn marker_age(ms: u32) -> i64 {
     let now = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64)
         & 0xffffff;
-    now - ms
+    now - i64::from(ms)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A marker is read where all of it fits the capture, as the time painted on it, and
+    /// nowhere else: a place past an edge (by a pixel, by far, or so far the sum overflows)
+    /// reads none and never leaves its square's row or the picture. Captures of random sizes
+    /// and padding, either side of the marker's own, with random pixels (a fixed seed); the
+    /// places are drawn around the last one that fits, anywhere, and near the largest. The
+    /// model is the 40 squares' centres as loadgen draws them.
+    #[test]
+    fn a_marker_is_read_where_it_fits_and_nowhere_else() {
+        let mut state = 0u64;
+        let mut next = || {
+            // splitmix64
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            (z ^ (z >> 31)) as usize
+        };
+        // Places that fit, that do not, and one pixel either side of the last that fits.
+        let (mut fits, mut not, mut edge) = (0, 0, 0);
+        for _ in 0..4000 {
+            let (w, h) = (440 + next() % 100, 30 + next() % 40);
+            let stride = w * 4 + next() % 3 * 4;
+            let mut buf = vec![0u8; stride * h];
+            for chunk in buf.chunks_mut(8) {
+                chunk.copy_from_slice(&next().to_le_bytes()[..chunk.len()]);
+            }
+            let mut place = |room: usize| match next() % 8 {
+                0..=2 => room.saturating_sub(4) + next() % 8,
+                3..=5 => next() % (room + 8),
+                6 => usize::MAX - next() % 600,
+                _ => next(),
+            };
+            let at = Marker {
+                x: place(w.saturating_sub(468)),
+                y: place(h.saturating_sub(36)),
+            };
+            let centres: Vec<_> = (0..40)
+                .map(|b| {
+                    let x = at.x.checked_add(b % 20 * 24 + 12).filter(|&x| x < w)?;
+                    let y = at.y.checked_add(b / 20 * 24 + 12).filter(|&y| y < h)?;
+                    Some(y * stride + x * 4)
+                })
+                .collect::<Option<_>>()
+                .unwrap_or_default();
+            let painted = match next() % 4 {
+                0 => next() & !0xff_ffff,
+                1 => next() | 0xff_ffff,
+                _ => next(),
+            } & 0xff_ffff_ffff;
+            for (b, &i) in centres.iter().enumerate() {
+                let r = next() as u8 % 127;
+                buf[i + 2] = if painted >> b & 1 == 1 { 129 + r } else { r };
+            }
+            let probe = MarkerProbe::fit(at, w, h);
+            assert_eq!(probe.is_some(), !centres.is_empty(), "{at:?} on {w}x{h}");
+            if probe.is_some() {
+                fits += 1;
+            } else {
+                not += 1;
+            }
+            if [469, 468].contains(&w.wrapping_sub(at.x))
+                || [37, 36].contains(&h.wrapping_sub(at.y))
+            {
+                edge += 1;
+            }
+            assert_eq!(
+                marker_reading(Some((&buf[..], stride)), probe),
+                probe.map(|_| (painted & 0xff_ffff) as u32),
+                "{at:?} on {w}x{h} {painted:#x}"
+            );
+            assert_eq!(marker_reading(None, probe), None);
+        }
+        assert!(
+            fits > 300 && not > 300 && edge > 300,
+            "{fits} fit, {not} do not, {edge} at an edge"
+        );
+    }
 
     const W: usize = 1280;
     const H: usize = 768;
@@ -1481,6 +1609,7 @@ mod tests {
                     fps: 60,
                     preset: "ultrafast".into(),
                     threads: 1,
+                    debug: crate::env::Debugging::read(|_| None).0,
                     crf,
                     max_kbps,
                 })

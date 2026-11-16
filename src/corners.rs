@@ -6,6 +6,7 @@
 //! whatever is behind it through the corners. Nothing is repainted per frame, so
 //! damage stays precise.
 
+use crate::env::Debugging;
 use std::collections::HashMap;
 use x11rb::connection::Connection;
 use x11rb::protocol::shape::{self, ConnectionExt as _};
@@ -28,6 +29,7 @@ struct State {
     shaped: HashMap<u32, Option<(u16, u16, u16)>>,
     /// Last size seen per window; moves (same size) need no work.
     seen: HashMap<u32, (u16, u16)>,
+    debug: Debugging,
 }
 
 impl State {
@@ -102,7 +104,7 @@ impl State {
         if self.shaped.get(&win) == Some(&want) {
             return;
         }
-        if std::env::var("VOXL_DEBUG_CORNERS").is_ok() {
+        if self.debug.corners {
             log::info!(
                 "corners: window {win:#x} {width}x{height} -> {want:?} (was {:?})",
                 self.shaped.get(&win)
@@ -163,6 +165,7 @@ pub fn spawn(
     display: Option<String>,
     radius: u16,
     named: Vec<(String, u16)>,
+    debug: Debugging,
 ) -> Result<(), String> {
     let (conn, n) = RustConnection::connect(display.as_deref()).map_err(|e| e.to_string())?;
     conn.shape_query_version()
@@ -191,6 +194,7 @@ pub fn spawn(
         net_wm_window_type,
         shaped: HashMap::new(),
         seen: HashMap::new(),
+        debug,
     };
     std::thread::Builder::new()
         .name("corners".into())
@@ -211,7 +215,7 @@ pub fn spawn(
                         }
                     }
                     Ok(Event::ConfigureNotify(e)) if e.event == st.root => {
-                        if std::env::var("VOXL_DEBUG_CORNERS").is_ok() {
+                        if st.debug.corners {
                             log::info!(
                                 "configure {:#x} {}x{} at {},{}",
                                 e.window,

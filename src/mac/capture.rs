@@ -97,7 +97,7 @@ unsafe fn dict_i64(dict: CFDictionaryRef, key: *const c_void) -> Option<i64> {
 }
 
 impl Capturer {
-    pub fn new(_display: Option<&str>) -> Result<Self, String> {
+    pub fn new(_display: Option<&str>, debug: crate::env::Debugging) -> Result<Self, String> {
         let display = super::display();
         let (width, height) = super::capture_size(display);
         let geometry = Geometry {
@@ -109,7 +109,7 @@ impl Capturer {
         let fps = super::fps();
         let incoming = Arc::new(Mutex::new(Incoming::default()));
         let (wake_r, wake_w) = crate::hub::wake_pipe().map_err(|e| e.to_string())?;
-        let debug = std::env::var("VOXL_DEBUG_DAMAGE").is_ok();
+        let debug = debug.damage;
         let inc = incoming.clone();
         let (w, h) = (width, height);
         let on_frame = move |sb: CMSampleBufferRef, ty: OutputType| unsafe {

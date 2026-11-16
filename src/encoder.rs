@@ -10,6 +10,7 @@ mod ffi {
     include!(concat!(env!("OUT_DIR"), "/x264.rs"));
 }
 
+use crate::env::{Debugging, X264Log};
 use std::ffi::CString;
 use std::ptr;
 
@@ -20,6 +21,7 @@ pub struct EncoderConfig {
     pub fps: u32,
     pub preset: String,
     pub threads: u32,
+    pub debug: Debugging,
     pub crf: f32,
     /// VBV cap in kbit/s (0 = uncapped).
     pub max_kbps: u32,
@@ -32,6 +34,7 @@ pub struct Encoder {
     pts: i64,
     pub width: u32,
     pub height: u32,
+    debug: Debugging,
 }
 
 unsafe impl Send for Encoder {}
@@ -73,13 +76,11 @@ impl Encoder {
             param.b_annexb = 1;
             param.b_repeat_headers = 1;
             param.b_aud = 0;
-            param.i_log_level = if std::env::var("VOXL_X264_INFO").as_deref() == Ok("debug") {
+            param.i_log_level = match cfg.debug.x264_log {
+                X264Log::Warning => ffi::X264_LOG_WARNING,
+                X264Log::Info => ffi::X264_LOG_INFO,
                 // Per-frame QP, macroblock types and size.
-                ffi::X264_LOG_DEBUG
-            } else if std::env::var("VOXL_X264_INFO").is_ok() {
-                ffi::X264_LOG_INFO
-            } else {
-                ffi::X264_LOG_WARNING
+                X264Log::Debug => ffi::X264_LOG_DEBUG,
             } as i32;
             param.rc.i_rc_method = ffi::X264_RC_CRF as i32;
             param.rc.f_rf_constant = cfg.crf;
@@ -90,7 +91,7 @@ impl Encoder {
             param.analyse.i_me_method = ffi::X264_ME_UMH as i32;
             param.analyse.i_me_range = 64;
             // Per-macroblock "unchanged" hints from X damage let x264 skip analysis.
-            param.analyse.b_mb_info = (std::env::var("VOXL_NO_MBINFO").is_err()) as i32;
+            param.analyse.b_mb_info = cfg.debug.mb_info as i32;
             param.i_sync_lookahead = 0;
             param.rc.b_mb_tree = 0;
             if cfg.max_kbps > 0 {
@@ -122,6 +123,7 @@ impl Encoder {
                 pts: 0,
                 width: cfg.width,
                 height: cfg.height,
+                debug: cfg.debug,
             })
         }
     }
@@ -191,7 +193,7 @@ impl Encoder {
                 let first = &*nals;
                 out.extend_from_slice(std::slice::from_raw_parts(first.p_payload, size as usize));
             }
-            if std::env::var("VOXL_DEBUG_MARKER").is_ok() {
+            if self.debug.marker.is_some() {
                 log::info!(
                     "x264 out {} bytes, delayed {}, pts in {} out {}",
                     size,
@@ -266,6 +268,7 @@ mod bench {
                 fps: 60,
                 preset: "ultrafast".into(),
                 threads,
+                debug: crate::env::Debugging::read(|_| None).0,
                 crf: 24.0,
                 max_kbps: 30000,
             })

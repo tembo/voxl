@@ -502,6 +502,7 @@ pub fn spawn(
     _display: Option<String>,
     clipboard: Option<super::desktop::ClipboardHandle>,
     px_per_notch: f64,
+    _runtime_dir: Option<String>,
 ) -> Result<mpsc::Sender<InputEvent>, String> {
     let mut inj = Injector {
         pressed: HashMap::new(),

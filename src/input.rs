@@ -49,8 +49,8 @@ enum ShiftFix {
     Lift,
 }
 
-fn scratch_file(display: Option<&str>) -> std::path::PathBuf {
-    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+fn scratch_file(display: Option<&str>, runtime_dir: Option<String>) -> std::path::PathBuf {
+    let dir = runtime_dir.unwrap_or_else(|| "/tmp".into());
     let d = display.unwrap_or(":0").replace([':', '/'], "_");
     std::path::Path::new(&dir).join(format!("voxl-keymap{d}"))
 }
@@ -178,7 +178,7 @@ struct Injector {
 }
 
 impl Injector {
-    fn new(display: Option<&str>) -> Result<Self, String> {
+    fn new(display: Option<&str>, runtime_dir: Option<String>) -> Result<Self, String> {
         let (conn, n) = RustConnection::connect(display).map_err(|e| e.to_string())?;
         let root = conn.setup().roots[n].root;
         let min_kc = conn.setup().min_keycode;
@@ -200,7 +200,7 @@ impl Injector {
             scroll_acc: (0.0, 0.0),
             px_per_notch: 180.0,
             shift_kc: 0,
-            scratch_path: scratch_file(display),
+            scratch_path: scratch_file(display, runtime_dir),
         };
         // Undo remaps left behind by a previous run that didn't exit cleanly.
         if let Ok(old) = std::fs::read_to_string(&me.scratch_path) {
@@ -489,8 +489,9 @@ pub fn spawn(
     display: Option<String>,
     clipboard: Option<crate::desktop::ClipboardHandle>,
     px_per_notch: f64,
+    runtime_dir: Option<String>,
 ) -> Result<mpsc::Sender<InputEvent>, String> {
-    let mut inj = Injector::new(display.as_deref())?;
+    let mut inj = Injector::new(display.as_deref(), runtime_dir)?;
     inj.clipboard = clipboard;
     inj.px_per_notch = px_per_notch.max(1.0);
     let (tx, rx) = mpsc::channel::<InputEvent>();
