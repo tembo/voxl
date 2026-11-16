@@ -23,7 +23,15 @@ pub struct EncoderConfig {
     pub crf: f32,
     /// VBV cap in kbit/s (0 = uncapped).
     pub max_kbps: u32,
+    /// How far the motion search looks, in pixels (`ME_RANGE`).
+    pub me_range: u32,
 }
+
+/// How far x264's motion search looks, in pixels. A trackpad flick through a terminal
+/// moves the text up to ~140 px between frames at 60 fps, and its speed changes every
+/// frame, so the vectors the search starts from are tens of pixels off. At 64 the frames
+/// that moved more than 32 px came out 19-57% bigger than at 128, for the same picture.
+pub const ME_RANGE: u32 = 128;
 
 pub struct Encoder {
     h: *mut ffi::x264_t,
@@ -88,7 +96,23 @@ impl Encoder {
             // window or a fast scroll would be coded as new pixels every frame. UMH finds
             // those shifts (a third of the bits for a window drag) for about the same CPU.
             param.analyse.i_me_method = ffi::X264_ME_UMH as i32;
-            param.analyse.i_me_range = 64;
+            param.analyse.i_me_range = cfg.me_range as i32;
+            // What a scroll or a page of new text costs is the pixels that weren't on the
+            // screen before, and ultrafast codes those the dearest way H.264 has: whole
+            // 16x16 blocks, with the simple entropy coder. Text is edges a few pixels wide:
+            // 4x4 intra blocks follow them, and CABAC packs what is left. Together a
+            // scrolling page of text costs 30% fewer bits at the same quantizer for about
+            // 2 ms more a frame at 3024x1898 (`scroll_cost` below); unchanged areas are
+            // skipped as before, so a desktop at rest costs what it did (`encode_cost`).
+            param.b_cabac = 1;
+            param.analyse.inter = ffi::X264_ANALYSE_I4x4;
+            // The same blocks in keyframes: `inter` only covers intra blocks inside P
+            // frames, and ultrafast leaves `intra` empty, so a keyframe was still all
+            // 16x16. And ultrafast picks each block's mode by SAD on whole pixels only;
+            // one step finer (SATD, a half-pixel pass) picks better ones for no more
+            // time. A keyframe of text is a third smaller, a page of new text 6%.
+            param.analyse.intra = ffi::X264_ANALYSE_I4x4;
+            param.analyse.i_subpel_refine = 1;
             // Per-macroblock "unchanged" hints from X damage let x264 skip analysis.
             param.analyse.b_mb_info = (std::env::var("VOXL_NO_MBINFO").is_err()) as i32;
             param.i_sync_lookahead = 0;
@@ -236,19 +260,180 @@ impl Drop for Encoder {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A page of text `rows` tall, light on dark: words of 5x7 glyphs drawn 3x in 18x30
+    /// cells, from a 16-letter alphabet, so letters repeat as they do in real text.
+    fn text_page(w: usize, rows: usize) -> Vec<u8> {
+        let mut page = vec![12u8; w * rows];
+        let hash = |n: usize| (n as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 29;
+        let glyphs: Vec<u64> = (1..=16).map(|i| hash(i) & ((1 << 35) - 1)).collect();
+        for line in 0..rows / 30 {
+            let len = (hash(line + 99) % 60) as usize;
+            for col in 0..len.min(w / 18) {
+                if col % 6 == 5 || hash(line * 977 + col / 6) % 9 == 0 {
+                    continue; // a space, or a blank word
+                }
+                let glyph = glyphs[(hash(line * 31 + col) % 16) as usize];
+                for gy in 0..7 {
+                    for gx in (0..5).filter(|gx| (glyph >> (gy * 5 + gx)) & 1 == 1) {
+                        for py in 0..3 {
+                            let at = (line * 30 + 4 + gy * 3 + py) * w + col * 18 + 2 + gx * 3;
+                            page[at..at + 3].fill(220);
+                        }
+                    }
+                }
+            }
+        }
+        page
+    }
+
+    /// Bytes of the frames that moved 32 px or more, scrolling text as a trackpad flick
+    /// does: from 140 px a frame, slowing every frame.
+    fn flick_bytes(me_range: u32) -> usize {
+        let (w, h) = (1280, 768);
+        let steps: Vec<usize> = (0..40)
+            .map(|i| (140.0 * (-(i as f64) / 20.0).exp()) as usize)
+            .collect();
+        let page = text_page(w, h + steps.iter().sum::<usize>() + 30);
+        let (u, v) = (vec![128u8; w * h / 4], vec![128u8; w * h / 4]);
+        let mut enc = Encoder::new(&EncoderConfig {
+            width: w as u32,
+            height: h as u32,
+            fps: 60,
+            preset: "ultrafast".into(),
+            threads: 1,
+            crf: 24.0,
+            max_kbps: 0,
+            me_range,
+        })
+        .unwrap();
+        let (mut top, mut bytes, mut out) = (0, 0, Vec::new());
+        for (f, step) in std::iter::once(0).chain(steps).enumerate() {
+            top += step;
+            let planes = Planes {
+                y: &page[top * w..(top + h) * w],
+                u: &u,
+                v: &v,
+                stride_y: w,
+                stride_uv: w / 2,
+            };
+            out.clear();
+            enc.encode(&planes, f as i64 * 16, f == 0, None, None, &mut out)
+                .unwrap();
+            if step >= 32 {
+                bytes += out.len();
+            }
+        }
+        bytes
+    }
+
+    /// The frames of a flick move further than the search used to look, by different
+    /// amounts each frame: found, they are coded as motion, not as new text.
+    #[test]
+    fn a_flick_is_found() {
+        let (short, default) = (flick_bytes(64), flick_bytes(ME_RANGE));
+        assert!(
+            (default as f64) < short as f64 * 0.8,
+            "{default} bytes at the default search range, {short} at 64"
+        );
+    }
+}
+
+#[cfg(test)]
 mod bench {
     use super::*;
+
+    /// A full-screen page of text-like lines scrolled `STEP` px a frame: motion the search
+    /// finds, plus `STEP` rows of new text every frame.
+    /// cargo test --release scroll_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn scroll_cost() {
+        /// Three of the page's 44 px lines a frame, near the fastest a trackpad flick moves
+        /// a terminal (see `ME_RANGE`). The bench's default since it was written; it was
+        /// also run at one line and at five.
+        const STEP: usize = 132;
+        let (w, h) = (3024usize, 1898usize);
+        let step: usize = std::env::var("D")
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(132);
+        let range: u32 = std::env::var("R")
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(ME_RANGE);
+        let mut enc = Encoder::new(&EncoderConfig {
+            width: w as u32,
+            height: h as u32,
+            fps: 60,
+            preset: "ultrafast".into(),
+            threads: 4,
+            crf: 24.0,
+            max_kbps: 0,
+            me_range: range,
+        })
+        .unwrap();
+        let mut y = vec![0u8; w * h];
+        let (u, v) = (vec![128u8; w * h / 4], vec![128u8; w * h / 4]);
+        let mut out = Vec::new();
+        let (mut bytes, mut total) = (0usize, std::time::Duration::ZERO);
+        let (frames, warm) = (40, 5);
+        for f in 0..frames {
+            for row in 0..h {
+                let r = row + f * step;
+                let line = (r / 44) as u64;
+                for x in 0..w {
+                    // 22x44 cells, each a "glyph" of light strokes on dark, its own per
+                    // line and column.
+                    let cell = (x / 22) as u64;
+                    let g = (cell.wrapping_mul(2654435761) ^ line.wrapping_mul(0x9E3779B97F4A7C15))
+                        >> 11;
+                    let (gx, gy) = (x % 22, r % 44);
+                    let ink = gy > 6
+                        && gy < 36
+                        && gx > 2
+                        && gx < 19
+                        && (g >> (((gx / 3) + (gy / 6) * 5) % 40)) & 1 == 1;
+                    y[row * w + x] = if ink { 200 } else { 12 };
+                }
+            }
+            let planes = Planes {
+                y: &y,
+                u: &u,
+                v: &v,
+                stride_y: w,
+                stride_uv: w / 2,
+            };
+            out.clear();
+            let t = std::time::Instant::now();
+            enc.encode(&planes, f as i64 * 16, f == 0, None, None, &mut out)
+                .unwrap();
+            if f >= warm {
+                total += t.elapsed();
+                bytes += out.len();
+            }
+        }
+        let n = (frames - warm) as f64;
+        println!(
+            "scroll {step} px/frame, search range {range}: {:.1} KB/frame, {:.1} ms/frame",
+            bytes as f64 / n / 1024.0,
+            total.as_secs_f64() * 1000.0 / n
+        );
+    }
 
     /// cargo test --release encode_cost -- --ignored --nocapture
     #[test]
     #[ignore]
     fn encode_cost() {
+        /// One thread: what `--adaptive-threads` encodes on until a frame would miss its
+        /// budget. The bench's default since it was written; it was also run at four, the
+        /// default without that flag.
+        const THREADS: u32 = 1;
         let (w, h) = (2560usize, 1600usize);
         let mbs = (w / 16) * (h / 16);
-        let threads: u32 = std::env::var("T")
-            .ok()
-            .and_then(|t| t.parse().ok())
-            .unwrap_or(1);
+        let threads = THREADS;
         #[cfg(unix)]
         let cpu = || unsafe {
             let mut r: libc::rusage = std::mem::zeroed();
@@ -268,6 +453,7 @@ mod bench {
                 threads,
                 crf: 24.0,
                 max_kbps: 30000,
+                me_range: ME_RANGE,
             })
             .unwrap();
             let mut y = vec![0u8; w * h];

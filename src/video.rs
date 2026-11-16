@@ -203,6 +203,7 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
             threads: fixed,
             crf: cfg.crf,
             max_kbps: cfg.max_kbps,
+            me_range: crate::encoder::ME_RANGE,
         };
         let max_threads = if cfg.adaptive_threads {
             (cfg.threads / layout.len() as u32).max(1)
@@ -1483,6 +1484,7 @@ mod tests {
                     threads: 1,
                     crf,
                     max_kbps,
+                    me_range: crate::encoder::ME_RANGE,
                 })
                 .unwrap(),
                 motion: MotionQuality::default(),
