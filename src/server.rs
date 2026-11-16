@@ -300,8 +300,80 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     log::info!("client {} disconnected", client.id);
 }
 
-fn num<T: std::str::FromStr>(it: &mut std::str::Split<'_, char>) -> Option<T> {
-    it.next()?.trim().parse().ok()
+fn num<T: std::str::FromStr>(field: &str) -> Option<T> {
+    field.trim().parse().ok()
+}
+
+/// A button the viewer's pointer has, which a command names by X's number for it.
+/// pointer.ts sends the browser's five (main, middle, secondary, back, forward) as 1, 2,
+/// 3, 8 and 9, and those five are all macOS and Windows press. X has more (4 to 7 are its
+/// wheel, which `sp` turns) and no button 0.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Button {
+    Left,
+    Middle,
+    Right,
+    Back,
+    Forward,
+}
+
+impl Button {
+    pub const ALL: [Button; 5] = [
+        Button::Left,
+        Button::Middle,
+        Button::Right,
+        Button::Back,
+        Button::Forward,
+    ];
+
+    /// Its number on X, and in a command.
+    pub fn number(self) -> u8 {
+        match self {
+            Button::Left => 1,
+            Button::Middle => 2,
+            Button::Right => 3,
+            Button::Back => 8,
+            Button::Forward => 9,
+        }
+    }
+
+    fn parse(field: &str) -> Option<Button> {
+        let number: u8 = field.trim().parse().ok()?;
+        Button::ALL.into_iter().find(|b| b.number() == number)
+    }
+}
+
+/// The longest pixel scroll one message carries, either way on either axis: 2^20 desktop
+/// pixels, about a million.
+///
+/// Who needs it: an input thread adds each pixel scroll to the remainder it keeps between
+/// messages, scaled to wheel units (on X and Windows 120 a notch over
+/// `--scroll-px-per-notch`, which may be as small as 1), and sends the whole units on as
+/// an i32. A finite distance near f64::MAX scales to infinity there, the remainder is NaN
+/// from then on, and no pixel scroll moves anything until voxl restarts. At this bound
+/// one message makes at most 120 x 2^20 units, and with the remainder under a notch the
+/// sum is under 2^27: exact, and in an i32 sixteen times over.
+///
+/// What sets it: a message is what pointer.ts gathered in one animation frame, in desktop
+/// pixels: the wheel's deltas (pixels, lines times 40 or pages times 800) and two fingers'
+/// moves, times desktop pixels per CSS pixel. A page is the most one notch scrolls; on a
+/// desktop drawn at an eighth of its size that is 6,400 px, and five notches in one frame
+/// 32,000. This is 32 times that, so half or double it changes nothing either side.
+const MAX_SCROLL_PX: f64 = 1_048_576.0;
+
+/// A distance in desktop pixels, finite and at most `MAX_SCROLL_PX` either way. Rust's
+/// `f64` parser reads `NaN` and `inf` too (JavaScript's `toFixed` writes them as `NaN`
+/// and `Infinity`); added to the input thread's scroll remainder, either one stays in it,
+/// as a finite distance past the bound does once scaled, and every pixel scroll after it
+/// moves nothing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Pixels(f64);
+
+impl Pixels {
+    fn parse(field: &str) -> Option<Pixels> {
+        let px: f64 = field.trim().parse().ok()?;
+        (px.abs() <= MAX_SCROLL_PX).then_some(Pixels(px))
+    }
 }
 
 fn send_input(hub: &Hub, client: &Client, event: InputEvent) {
@@ -317,81 +389,151 @@ fn send_input(hub: &Hub, client: &Client, event: InputEvent) {
     }
 }
 
-/// Commands a --read-only viewer may send: acks, video and audio on/off, keyframe
-/// requests and ping replies. Everything else acts on the desktop (input, clipboard,
-/// microphone, resizing) and is dropped. The web client keeps the same list.
-const READ_ONLY_COMMANDS: &[&str] = &["a", "v", "au", "kf", "po"];
+/// A text command from a viewer (web/src/protocol.ts), parsed once where it arrives.
+enum Command {
+    /// `a,<frame>`
+    Ack { frame: u32 },
+    /// `m,<x>,<y>`: a desktop pixel, from the top left. X's coordinates are 16-bit (XTest
+    /// takes them as they are); macOS's CGFloat and Windows's LONG hold every one.
+    Move { x: i16, y: i16 },
+    /// `b,<button>,<1|0>`
+    Button { button: Button, down: bool },
+    /// `sp,<dx>,<dy>`: desktop pixels.
+    ScrollPx { dx: Pixels, dy: Pixels },
+    /// `k,<keysym>,<1|0>`
+    Key { keysym: u32, down: bool },
+    /// `r`
+    ReleaseAll,
+    /// `c,<text>`: the text is everything after the first comma.
+    Clipboard(String),
+    /// `v,<1|0>`
+    Video(bool),
+    /// `au,<1|0>`
+    Audio(bool),
+    /// `mi,<1|0>`
+    Mic(bool),
+    /// `sz,<w>,<h>`: the desktop size the viewer's window wants.
+    Resize { w: u32, h: u32 },
+    /// `kf`
+    Keyframe,
+    /// `po,<sent>`: a ping's reply, echoing the time the ping carried.
+    Pong { sent: u64 },
+    /// `ds,<id>`: switch to another display.
+    #[cfg(target_os = "macos")]
+    Display(u32),
+}
+
+impl Command {
+    /// The command `t` is, if it is one this server knows, well formed. One rule for all
+    /// of them: a command is its name and exactly the fields its pattern names, the line
+    /// split at every comma, so a field more or a field fewer is no command, as a
+    /// malformed one is. A clipboard's one field is its text, the rest of the line, commas
+    /// and all.
+    fn parse(t: &str) -> Option<Command> {
+        let (name, fields): (&str, Vec<&str>) = match t.split_once(',') {
+            Some(("c", text)) => return Some(Command::Clipboard(text.to_string())),
+            Some((name, rest)) => (name, rest.split(',').collect()),
+            None => (t, vec![]),
+        };
+        let flag = |v: &str| match v {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
+        };
+        Some(match (name, fields.as_slice()) {
+            ("a", [frame]) => Command::Ack { frame: num(frame)? },
+            ("m", [x, y]) => Command::Move {
+                x: num(x)?,
+                y: num(y)?,
+            },
+            ("b", [button, down]) => Command::Button {
+                button: Button::parse(button)?,
+                down: flag(down)?,
+            },
+            ("sp", [dx, dy]) => Command::ScrollPx {
+                dx: Pixels::parse(dx)?,
+                dy: Pixels::parse(dy)?,
+            },
+            ("k", [keysym, down]) => Command::Key {
+                keysym: num(keysym)?,
+                down: flag(down)?,
+            },
+            ("r", []) => Command::ReleaseAll,
+            ("v", [on]) => Command::Video(flag(on)?),
+            ("au", [on]) => Command::Audio(flag(on)?),
+            ("mi", [on]) => Command::Mic(flag(on)?),
+            ("sz", [w, h]) => Command::Resize {
+                w: num(w)?,
+                h: num(h)?,
+            },
+            ("kf", []) => Command::Keyframe,
+            ("po", [sent]) => Command::Pong { sent: num(sent)? },
+            #[cfg(target_os = "macos")]
+            ("ds", [id]) => Command::Display(id.parse().ok()?),
+            _ => return None,
+        })
+    }
+
+    /// Whether a --read-only viewer may send it: what watching needs (acks, video,
+    /// audio, keyframe requests, ping replies). Everything else acts on the desktop
+    /// (input, clipboard, microphone, resizing, displays). Checked right where commands
+    /// are applied, so a client that ignores the hello flag cannot drive the desktop;
+    /// web/src/client/main.ts keeps the same list.
+    fn watches(&self) -> bool {
+        match self {
+            Command::Ack { .. }
+            | Command::Video(_)
+            | Command::Audio(_)
+            | Command::Keyframe
+            | Command::Pong { .. } => true,
+            Command::Move { .. }
+            | Command::Button { .. }
+            | Command::ScrollPx { .. }
+            | Command::Key { .. }
+            | Command::ReleaseAll
+            | Command::Clipboard(_)
+            | Command::Mic(_)
+            | Command::Resize { .. } => false,
+            #[cfg(target_os = "macos")]
+            Command::Display(_) => false,
+        }
+    }
+}
 
 fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collections::VecDeque<u32>) {
-    let (cmd, rest) = t.split_once(',').unwrap_or((t, ""));
-    // --read-only: accept only what watching needs, right where commands are applied,
-    // so a client that ignores the hello flag cannot drive the desktop, whatever
-    // commands are added later.
-    if s.read_only && !READ_ONLY_COMMANDS.contains(&cmd) {
+    let Some(command) = Command::parse(t) else {
+        return;
+    };
+    if s.read_only && !command.watches() {
         return;
     }
     let input = |ev| send_input(&s.hub, c, ev);
-    let mut it = rest.split(',');
-    match cmd {
+    match command {
         #[cfg(target_os = "macos")]
-        "ds" => {
-            if let Ok(id) = rest.parse() {
-                match crate::mac::request_display(&s.hub, id, c.id) {
-                    Ok(true) => {}
-                    result => {
-                        if let Err(e) = result {
-                            log::warn!("display switch: {e}");
-                        }
-                        c.needs_keyframe.store(true, Ordering::Relaxed);
-                        c.send(Out::Text(s.hub.hello()));
-                        s.hub.wake();
-                    }
+        Command::Display(id) => match crate::mac::request_display(&s.hub, id, c.id) {
+            Ok(true) => {}
+            result => {
+                if let Err(e) = result {
+                    log::warn!("display switch: {e}");
                 }
-            }
-        }
-        "a" => {
-            if let Some(id) = num::<u32>(&mut it) {
-                c.on_ack(id);
+                c.needs_keyframe.store(true, Ordering::Relaxed);
+                c.send(Out::Text(s.hub.hello()));
                 s.hub.wake();
             }
+        },
+        Command::Ack { frame } => {
+            c.on_ack(frame);
+            s.hub.wake();
         }
-        "m" => {
-            if let (Some(x), Some(y)) = (num(&mut it), num(&mut it)) {
-                input(InputEvent::Move { x, y });
-            }
-        }
-        "b" => {
-            if let (Some(button), Some(d)) = (num::<u8>(&mut it), num::<u8>(&mut it)) {
-                input(InputEvent::Button {
-                    button,
-                    down: d == 1,
-                });
-            }
-        }
-        "s" => {
-            if let (Some(dx), Some(dy)) = (num(&mut it), num(&mut it)) {
-                input(InputEvent::Scroll { dx, dy });
-            }
-        }
-        "sp" => {
-            if let (Some(dx), Some(dy)) = (num::<f64>(&mut it), num::<f64>(&mut it)) {
-                input(InputEvent::ScrollPx { dx, dy });
-            }
-        }
-        "k" => {
-            if let (Some(keysym), Some(d)) = (num::<u32>(&mut it), num::<u8>(&mut it)) {
-                input(InputEvent::Key {
-                    keysym,
-                    down: d == 1,
-                });
-            }
-        }
-        "r" => input(InputEvent::ReleaseAll),
-        "c" => input(InputEvent::Clipboard(crate::desktop::ClipContent::Text(
-            rest.to_string(),
-        ))),
-        "v" => {
-            let on = rest == "1";
+        Command::Move { x, y } => input(InputEvent::Move { x, y }),
+        Command::Button { button, down } => input(InputEvent::Button { button, down }),
+        Command::ScrollPx { dx, dy } => input(InputEvent::ScrollPx { dx: dx.0, dy: dy.0 }),
+        Command::Key { keysym, down } => input(InputEvent::Key { keysym, down }),
+        Command::ReleaseAll => input(InputEvent::ReleaseAll),
+        Command::Clipboard(text) => input(InputEvent::Clipboard(
+            crate::desktop::ClipContent::Text(text),
+        )),
+        Command::Video(on) => {
             c.video.store(on, Ordering::Relaxed);
             if on {
                 c.inflight.lock().clear();
@@ -400,30 +542,29 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
             }
             s.hub.wake();
         }
-        "au" => c.audio.store(rest == "1" && s.audio, Ordering::Relaxed),
-        "mi" => {
+        Command::Audio(on) => c.audio.store(on && s.audio, Ordering::Relaxed),
+        Command::Mic(on) => {
             if let Some(tx) = &s.mic {
-                let _ = tx.send(if rest == "1" {
+                let _ = tx.send(if on {
                     crate::mic::MicMsg::Start(c.id)
                 } else {
                     crate::mic::MicMsg::Stop(c.id)
                 });
             }
         }
-        // sz,w,h: the desktop size this client's window wants (dynamic resolution).
-        // The latest request wins; the video thread clamps it and applies it.
-        "sz" if s.resize => {
+        // The desktop size this client's window wants (dynamic resolution). The latest
+        // request wins; the video thread clamps it and applies it.
+        Command::Resize { w, h } => {
+            if !s.resize {
+                return;
+            }
             #[cfg(target_os = "macos")]
             let input = s.hub.input.lock();
             #[cfg(target_os = "macos")]
             if input.is_none() || c.id < s.hub.input_floor.load(Ordering::Relaxed) {
                 return;
             }
-            if let (Some(w), Some(h), Some(max)) = (
-                num::<u32>(&mut it),
-                num::<u32>(&mut it),
-                *s.hub.resize_max.lock(),
-            ) {
+            if let Some(max) = *s.hub.resize_max.lock() {
                 let want = crate::screen::fit(w, h, max);
                 let current = (
                     s.hub.width.load(Ordering::Relaxed),
@@ -433,24 +574,21 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
                 s.hub.wake();
             }
         }
-        "kf" => {
+        Command::Keyframe => {
             c.started.store(false, Ordering::Relaxed);
             c.needs_keyframe.store(true, Ordering::Relaxed);
             s.hub.wake();
         }
-        "po" => {
-            if let Some(sent) = num::<u64>(&mut it) {
-                let now = s.epoch.elapsed().as_micros() as u64;
-                let rtt = (now.saturating_sub(sent) / 1000) as u32;
-                rtts.push_back(rtt.max(1));
-                if rtts.len() > 20 {
-                    rtts.pop_front();
-                }
-                c.min_rtt_ms
-                    .store(*rtts.iter().min().unwrap(), Ordering::Relaxed);
+        Command::Pong { sent } => {
+            let now = s.epoch.elapsed().as_micros() as u64;
+            let rtt = (now.saturating_sub(sent) / 1000) as u32;
+            rtts.push_back(rtt.max(1));
+            if rtts.len() > 20 {
+                rtts.pop_front();
             }
+            c.min_rtt_ms
+                .store(*rtts.iter().min().unwrap(), Ordering::Relaxed);
         }
-        _ => {}
     }
 }
 
@@ -464,7 +602,6 @@ mod tests {
         "m,10,20",
         "b,1,1",
         "b,1,0",
-        "s,0,1",
         "sp,0.0,12.0",
         "k,65,1",
         "k,65,0",
@@ -535,9 +672,333 @@ mod tests {
         // The same commands do reach the desktop without --read-only, so the test above
         // checks the guard rather than an unwired server.
         let (input, mic, resized) = drive(false);
-        assert!(input >= 9, "{input} input events");
+        assert!(input >= 8, "{input} input events");
         assert_eq!(mic, 1);
         assert!(resized);
+    }
+
+    /// Every command the web client sends parses here (a display switch only on
+    /// macOS), and one that is malformed is no command at all.
+    #[test]
+    fn commands_are_parsed_once_at_the_door() {
+        for c in ALL {
+            let known = Command::parse(c).is_some();
+            assert!(
+                known || (c.starts_with("ds,") && !cfg!(target_os = "macos")),
+                "{c}"
+            );
+        }
+        for c in [
+            "v,2", "v", "a", "a,x", "k,65", "b,1,7", "sp,1", "po,-1", "zz,1",
+        ] {
+            assert!(Command::parse(c).is_none(), "{c} parsed");
+        }
+    }
+
+    /// How many fields each command has, written apart from `parse`. A clipboard is not
+    /// here: its one field is the rest of the line, commas and all.
+    fn fields_of(name: &str) -> &'static [usize] {
+        match name {
+            "m" | "b" | "sp" | "k" | "sz" => &[2],
+            "a" | "v" | "au" | "mi" | "po" | "ds" => &[1],
+            "r" | "kf" => &[0],
+            _ => &[],
+        }
+    }
+
+    /// The buttons pointer.ts sends, by the number a command names each with: the browser's
+    /// main, middle, secondary, back and forward.
+    const BUTTONS: [(i128, Button); 5] = [
+        (1, Button::Left),
+        (2, Button::Middle),
+        (3, Button::Right),
+        (8, Button::Back),
+        (9, Button::Forward),
+    ];
+
+    /// Whether a position, a button, a pixel scroll or a clipboard with its own count of
+    /// fields is a command, written apart from `parse` from what each number must be where
+    /// it is used: a position in X's 16 bits, a button one of `BUTTONS` and a flag, a pixel
+    /// scroll finite and within `MAX_SCROLL_PX`, and a clipboard any text. A line naming
+    /// the wheel (`s`) never is. `None` for any other line.
+    fn takes(name: &str, fields: &[&str]) -> Option<bool> {
+        let int = |f: &str| f.trim().parse::<i128>().ok();
+        let position = |f: &str| int(f).is_some_and(|n| i16::try_from(n).is_ok());
+        let pixels = |f: &str| {
+            f.trim()
+                .parse::<f64>()
+                .is_ok_and(|px| px.abs() <= MAX_SCROLL_PX)
+        };
+        Some(match (name, fields) {
+            ("m", [x, y]) => position(x) && position(y),
+            ("b", [button, down]) => {
+                BUTTONS.iter().any(|&(n, _)| int(button) == Some(n)) && matches!(*down, "0" | "1")
+            }
+            ("s", _) => false,
+            ("sp", [dx, dy]) => pixels(dx) && pixels(dy),
+            ("c", [_, ..]) => true,
+            _ => return None,
+        })
+    }
+
+    /// One rule for every command: its name and exactly its fields. Each command the web
+    /// client sends, with none to four well-formed fields (its own, then copies of its
+    /// last), parses exactly when that is a count `fields_of` gives it. A clipboard takes
+    /// one field or more, and its text is all of them, commas and all.
+    #[test]
+    fn a_command_is_exactly_its_fields() {
+        for c in ALL {
+            let (name, own) = match c.split_once(',') {
+                Some((name, rest)) => (name, rest.split(',').collect()),
+                None => (*c, vec![]),
+            };
+            if name == "ds" && !cfg!(target_os = "macos") {
+                continue;
+            }
+            let last = own.last().copied().unwrap_or("1");
+            for count in 0..=4 {
+                let fields: Vec<&str> = own
+                    .iter()
+                    .copied()
+                    .chain(std::iter::repeat(last))
+                    .take(count)
+                    .collect();
+                let line = [name]
+                    .iter()
+                    .chain(&fields)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let parsed = Command::parse(&line);
+                let has = match name {
+                    "c" => count >= 1,
+                    name => fields_of(name).contains(&count),
+                };
+                assert_eq!(parsed.is_some(), has, "{line}");
+                if let Some(Command::Clipboard(text)) = parsed {
+                    assert_eq!(text, fields.join(","), "{line}");
+                }
+            }
+        }
+    }
+
+    /// A pixel scroll is two finite numbers. `NaN` and `inf` parse as `f64` but are no
+    /// distance, and one of them in the input thread's scroll remainder never leaves it.
+    #[test]
+    fn a_pixel_scroll_is_finite() {
+        let Some(Command::ScrollPx { dx, dy }) = Command::parse("sp,-0.5,1e3") else {
+            panic!("sp,-0.5,1e3 is no pixel scroll");
+        };
+        assert_eq!((dx, dy), (Pixels(-0.5), Pixels(1000.0)));
+        for c in [
+            "sp,NaN,0",
+            "sp,0,Infinity",
+            "sp,-Infinity,1",
+            "sp,inf,0",
+            "sp,0,nan",
+        ] {
+            assert!(Command::parse(c).is_none(), "{c} parsed");
+        }
+    }
+
+    /// A command is parsed once, into what it is, so what parses is in range
+    /// where it is used. X takes a pointer position as 16 bits, and X has no button 0.
+    /// These are no command: a position that only fits by wrapping, and a button that
+    /// isn't.
+    #[test]
+    fn what_parses_is_in_range_where_it_is_used() {
+        let mut out = vec![];
+        for line in ["m,65636,100", "m,-32769,0", "b,0,1"] {
+            match Command::parse(line) {
+                // A position is X's 16 bits, so these would have wrapped to fit.
+                Some(Command::Move { x, y }) => {
+                    out.push(format!("{line}: the pointer goes to ({x}, {y})"))
+                }
+                // No button is 0, so any button this is was not the one asked for.
+                Some(Command::Button { button, .. }) => {
+                    out.push(format!("{line}: button {}", button.number()))
+                }
+                _ => {}
+            }
+        }
+        assert!(out.is_empty(), "{out:#?}");
+    }
+
+    /// `Pixels` holds a finite number, but the input thread adds it to its remainder
+    /// scaled by `NOTCH / px_per_notch` (input.rs: 120 over `--scroll-px-per-notch`, which
+    /// may be anything from 1). Below 120 px a notch the scale is over one, and a finite
+    /// pixel count near f64::MAX would become infinite in the remainder, then NaN once the
+    /// whole units are taken off: every pixel scroll after it would move nothing.
+    #[test]
+    fn a_pixel_scroll_stays_finite_in_the_input_threads_remainder() {
+        // input.rs's NOTCH, and --scroll-px-per-notch at its floor, at a value below
+        // the 120 px a notch where the scale passes one, and at its default.
+        const NOTCH: f64 = 120.0;
+        let mut out = vec![];
+        for line in ["sp,0,1.7e308", "sp,-1e308,0"] {
+            let Some(Command::ScrollPx { dx, dy }) = Command::parse(line) else {
+                continue;
+            };
+            for px_per_notch in [1.0, 100.0, 180.0] {
+                let k = NOTCH / px_per_notch;
+                if !(dx.0 * k).is_finite() || !(dy.0 * k).is_finite() {
+                    out.push(format!("{line} at {px_per_notch} px a notch"));
+                }
+            }
+        }
+        assert!(out.is_empty(), "infinite in the remainder: {out:?}");
+    }
+
+    /// Wheel units a notch: input.rs's NOTCH, and Windows's WHEEL_DELTA.
+    const UNITS_PER_NOTCH: f64 = 120.0;
+    /// `--scroll-px-per-notch` at its floor (X's and Windows's input threads raise
+    /// anything smaller to it), where a pixel is the most wheel units.
+    const LEAST_PX_PER_NOTCH: f64 = 1.0;
+
+    /// What the input threads do with a command's numbers, every step checked: a pixel
+    /// scroll is scaled to wheel units (on macOS to points, which are fewer), added to a
+    /// remainder of up to a notch, and its whole units are sent as an i32. A position and a
+    /// button go through as they are.
+    fn through_the_input_threads(c: &Command) -> Result<(), String> {
+        if let Command::ScrollPx { dx, dy } = c {
+            for px in [dx.0, dy.0] {
+                let units = UNITS_PER_NOTCH + px.abs() * UNITS_PER_NOTCH / LEAST_PX_PER_NOTCH;
+                if !units.is_finite() || units.trunc() > f64::from(i32::MAX) {
+                    return Err(format!("{px} px: {units} wheel units"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 200,000 random lines: every command name, and some that are none, with no fields up
+    /// to four, each empty, at an edge of a type or a range, signed, huge, a float, `NaN`,
+    /// `inf`, not a number, or random. Nothing panics; a position, a button, a pixel
+    /// scroll, a clipboard or a wheel is a command exactly when `takes` says it is; and
+    /// each that parses into a position, a button or a pixel scroll holds exactly the
+    /// numbers the line says (a button the one `BUTTONS` names), and they go through the
+    /// input threads' arithmetic.
+    #[test]
+    fn random_lines_parse_in_range_or_not_at_all() {
+        const NAMES: [&str; 17] = [
+            "a", "m", "b", "s", "sp", "k", "r", "c", "v", "au", "mi", "sz", "kf", "po", "ds", "zz",
+            "",
+        ];
+        const EDGES: [&str; 42] = [
+            "",
+            "0",
+            "-0",
+            "+1",
+            " 2 ",
+            "-1",
+            "3",
+            "8",
+            "9",
+            "20",
+            "-20",
+            "21",
+            "-21",
+            "127",
+            "-128",
+            "128",
+            "255",
+            "256",
+            "32767",
+            "-32768",
+            "32768",
+            "-32769",
+            "65636",
+            "2147483647",
+            "-2147483648",
+            "2147483648",
+            "1048576",
+            "-1048576",
+            "1048576.5",
+            "-1048577",
+            "10",
+            "1.7e308",
+            "-1e308",
+            "1e309",
+            "0.5",
+            "NaN",
+            "inf",
+            "-Infinity",
+            "x",
+            "é",
+            "1e3",
+            "18446744073709551616",
+        ];
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        // Lines that parsed into a position, a button and a pixel scroll.
+        let mut parsed = [0; 3];
+        let mut out = vec![];
+        for _ in 0..200_000 {
+            let mut line = NAMES[next() as usize % NAMES.len()].to_string();
+            // Two fields most often, the most any command has; none to four.
+            for _ in 0..[0, 1, 1, 2, 2, 2, 3, 4][next() as usize % 8] {
+                let r = next();
+                // Half a digit (a flag, a button, a small count), a quarter an edge, and
+                // the rest an integer or a float of any size, or any f64 at all.
+                let field = match r % 8 {
+                    0..=3 => ((r >> 3) % 10).to_string(),
+                    4 | 5 => EDGES[(r >> 3) as usize % EDGES.len()].to_string(),
+                    6 => ((next() as i64) >> ((r >> 3) % 64)).to_string(),
+                    _ if r & 8 == 0 => {
+                        (((next() as i64) >> ((r >> 4) % 64)) as f64 / 10.0).to_string()
+                    }
+                    _ => f64::from_bits(next()).to_string(),
+                };
+                line = format!("{line},{field}");
+            }
+            let said: Vec<&str> = line.split(',').skip(1).collect();
+            let name = line.split(',').next().expect("a line has a name");
+            let command = Command::parse(&line);
+            match takes(name, &said) {
+                Some(true) if command.is_none() => out.push(format!("{line}: no command")),
+                Some(false) if command.is_some() => out.push(format!("{line}: a command")),
+                _ => {}
+            }
+            let Some(c) = command else {
+                continue;
+            };
+            if name != "c" && !fields_of(name).contains(&said.len()) {
+                out.push(format!("{line}: {} fields", said.len()));
+            }
+            let int = |i: usize| said[i].trim().parse::<i128>().ok();
+            let float = |i: usize| said[i].trim().parse::<f64>().ok();
+            let (kind, as_said) = match &c {
+                Command::Move { x, y } => (
+                    0,
+                    int(0) == Some((*x).into()) && int(1) == Some((*y).into()),
+                ),
+                Command::Button { button, .. } => (
+                    1,
+                    BUTTONS.contains(&(int(0).expect("a button is a number"), *button)),
+                ),
+                Command::ScrollPx { dx, dy } => {
+                    (2, float(0) == Some(dx.0) && float(1) == Some(dy.0))
+                }
+                _ => continue,
+            };
+            parsed[kind] += 1;
+            if !as_said {
+                out.push(format!("{line}: not what it says"));
+            }
+            if let Err(e) = through_the_input_threads(&c) {
+                out.push(format!("{line}: {e}"));
+            }
+        }
+        assert!(out.is_empty(), "{out:#?}");
+        assert!(
+            parsed.iter().all(|&n| n >= 100),
+            "too few reached (positions, buttons, pixel scrolls): {parsed:?}"
+        );
     }
 
     #[test]

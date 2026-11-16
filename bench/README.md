@@ -103,7 +103,7 @@ desktop (pointer, keyboard, clipboard), so run them when nobody is using the Mac
   typing and mouse in a scratch TextEdit document and, with `--enable-resize`, a
   display mode switch and back.
 - `input.js`: clicks, typing (symbols, accents, CJK, emoji), Command shortcuts, drag
-  selection, pixel and wheel scrolling, cursor shape, on a page in a temporary Chrome.
+  selection, pixel scrolling, cursor shape, on a page in a temporary Chrome.
 - `clipimage.js`: clipboard images both ways.
 - `mic.js`: a 440 Hz tone through the microphone path (see voxl's log for drops).
 - `perf.js`: full-screen animation; viewer FPS, pipeline and encode times.

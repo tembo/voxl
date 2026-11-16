@@ -1,6 +1,6 @@
 // macOS input against a page in a headed Chrome with a temporary profile: clicks,
 // double/right/middle click, typing (symbols, accents, CJK, emoji), Cmd shortcuts,
-// Shift selection, drag selection, pixel and wheel scrolling, cursor shape.
+// Shift selection, drag selection, pixel scrolling, cursor shape.
 // Usage: PORT=6960 node input.js   (needs playwright-core and Google Chrome)
 const { chromium } = require(process.env.PLAYWRIGHT_CORE || 'playwright-core');
 const net = require('net');
@@ -90,9 +90,6 @@ const SHIFT = 0xffe1, SUPER = 0xffeb;
 	await sleep(600);
 	const y1 = await p.evaluate(() => scrollY);
 	check(Math.abs((y1 - y0) - 300 / k) < 300 / k * 0.25, `pixel scroll: ${y1 - y0}px of page for 300 desktop px (expect ~${Math.round(300 / k)})`);
-	c.send('s,0,-3'); await sleep(600);
-	const y2 = await p.evaluate(() => scrollY);
-	check(y2 < y1, `wheel clicks scroll up: ${y1} -> ${y2}`);
 	await b.close();
 	console.log(failed ? `${failed} failed` : 'all passed');
 	process.exit(failed ? 1 : 0);

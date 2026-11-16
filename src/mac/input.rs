@@ -9,18 +9,14 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub enum InputEvent {
+    /// A desktop pixel, in 16 bits as X's coordinates are; a CGFloat holds every one.
     Move {
-        x: i32,
-        y: i32,
+        x: i16,
+        y: i16,
     },
     Button {
-        button: u8,
+        button: crate::server::Button,
         down: bool,
-    },
-    /// Wheel ticks: positive dy scrolls down, positive dx scrolls right.
-    Scroll {
-        dx: i32,
-        dy: i32,
     },
     /// Precise scroll in desktop pixels (trackpads, smooth wheels).
     ScrollPx {
@@ -187,14 +183,14 @@ impl Injector {
         }
     }
 
-    fn to_point(&self, x: i32, y: i32) -> CGPoint {
+    fn to_point(&self, x: i16, y: i16) -> CGPoint {
         let Some(g) = *super::GEOMETRY.lock() else {
             return CGPoint::default();
         };
         let k = 1.0 / g.scale();
         CGPoint {
-            x: g.bounds.origin.x + (x as f64 + 0.5) * k,
-            y: g.bounds.origin.y + (y as f64 + 0.5) * k,
+            x: g.bounds.origin.x + (f64::from(x) + 0.5) * k,
+            y: g.bounds.origin.y + (f64::from(y) + 0.5) * k,
         }
     }
 
@@ -259,8 +255,9 @@ impl Injector {
                 self.mouse(ty, b);
             }
             InputEvent::Button { button, down } => {
-                let b = button as usize;
-                if b >= self.buttons.len() || self.buttons[b] == down {
+                let number = button.number();
+                let b = usize::from(number);
+                if self.buttons[b] == down {
                     return;
                 }
                 self.buttons[b] = down;
@@ -269,36 +266,22 @@ impl Injector {
                     let (t, p, last) = self.last_click;
                     let near = (p.x - self.pos.x).abs() < 4.0 && (p.y - self.pos.y).abs() < 4.0;
                     self.clicks =
-                        if last == button && near && t.elapsed() < Duration::from_millis(500) {
+                        if last == number && near && t.elapsed() < Duration::from_millis(500) {
                             self.clicks % 3 + 1
                         } else {
                             1
                         };
-                    self.last_click = (Instant::now(), self.pos, button);
+                    self.last_click = (Instant::now(), self.pos, number);
                 }
-                // X buttons: 1 left, 2 middle, 3 right, 8 back, 9 forward.
+                use crate::server::Button;
                 let (dn, up, mb) = match button {
-                    1 => (kCGEventLeftMouseDown, kCGEventLeftMouseUp, 0),
-                    3 => (kCGEventRightMouseDown, kCGEventRightMouseUp, 1),
-                    2 => (kCGEventOtherMouseDown, kCGEventOtherMouseUp, 2),
-                    8 => (kCGEventOtherMouseDown, kCGEventOtherMouseUp, 3),
-                    9 => (kCGEventOtherMouseDown, kCGEventOtherMouseUp, 4),
-                    _ => return,
+                    Button::Left => (kCGEventLeftMouseDown, kCGEventLeftMouseUp, 0),
+                    Button::Right => (kCGEventRightMouseDown, kCGEventRightMouseUp, 1),
+                    Button::Middle => (kCGEventOtherMouseDown, kCGEventOtherMouseUp, 2),
+                    Button::Back => (kCGEventOtherMouseDown, kCGEventOtherMouseUp, 3),
+                    Button::Forward => (kCGEventOtherMouseDown, kCGEventOtherMouseUp, 4),
                 };
                 self.mouse(if down { dn } else { up }, mb);
-            }
-            InputEvent::Scroll { dx, dy } => {
-                let e = unsafe {
-                    CGEventCreateScrollWheelEvent2(
-                        self.src,
-                        kCGScrollEventUnitLine,
-                        2,
-                        -dy.clamp(-20, 20),
-                        -dx.clamp(-20, 20),
-                        0,
-                    )
-                };
-                self.post(e);
             }
             InputEvent::ScrollPx { dx, dy } => {
                 // Desktop pixels -> points; macOS scrolls content down for positive values.
@@ -430,10 +413,10 @@ impl Injector {
         for ks in self.mods.keys().copied().collect::<Vec<_>>() {
             self.key(ks, false);
         }
-        for b in 1..self.buttons.len() {
-            if self.buttons[b] {
+        for button in crate::server::Button::ALL {
+            if self.buttons[usize::from(button.number())] {
                 self.handle(InputEvent::Button {
-                    button: b as u8,
+                    button,
                     down: false,
                 });
             }
@@ -470,9 +453,9 @@ pub fn spawn(
         .name("input".into())
         .spawn(move || {
             while let Ok(first) = rx.recv() {
-                let mut pending_move: Option<(i32, i32)> = None;
+                let mut pending_move: Option<(i16, i16)> = None;
                 let handle =
-                    |inj: &mut Injector, ev: InputEvent, pm: &mut Option<(i32, i32)>| match ev {
+                    |inj: &mut Injector, ev: InputEvent, pm: &mut Option<(i16, i16)>| match ev {
                         InputEvent::Move { x, y } => *pm = Some((x, y)),
                         other => {
                             if let Some((x, y)) = pm.take() {

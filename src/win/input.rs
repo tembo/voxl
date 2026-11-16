@@ -14,18 +14,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 pub enum InputEvent {
+    /// A desktop pixel, in 16 bits as X's coordinates are; a LONG holds every one.
     Move {
-        x: i32,
-        y: i32,
+        x: i16,
+        y: i16,
     },
     Button {
-        button: u8,
+        button: crate::server::Button,
         down: bool,
-    },
-    /// Wheel ticks: positive dy scrolls down, positive dx scrolls right.
-    Scroll {
-        dx: i32,
-        dy: i32,
     },
     /// Precise scroll in desktop pixels (trackpads, smooth wheels).
     ScrollPx {
@@ -267,7 +263,7 @@ impl Injector {
     }
 
     /// Pixels on the virtual desktop -> SendInput's absolute 0..65535 range.
-    fn absolute(&self, x: i32, y: i32) -> (i32, i32) {
+    fn absolute(&self, x: i16, y: i16) -> (i32, i32) {
         let g = super::GEOMETRY.lock().unwrap_or(super::Geometry {
             left: 0,
             top: 0,
@@ -282,8 +278,8 @@ impl Injector {
                 GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1),
             )
         };
-        let px = (g.left + x.clamp(0, g.width as i32 - 1) - vx) as i64;
-        let py = (g.top + y.clamp(0, g.height as i32 - 1) - vy) as i64;
+        let px = (g.left + i32::from(x).clamp(0, g.width as i32 - 1) - vx) as i64;
+        let py = (g.top + i32::from(y).clamp(0, g.height as i32 - 1) - vy) as i64;
         // Windows maps n back to n * size / 65536 pixels; aim at the pixel's centre.
         (
             ((px * 65536 + 32768) / vw as i64) as i32,
@@ -303,37 +299,25 @@ impl Injector {
                 )]);
             }
             InputEvent::Button { button, down } => {
-                let b = button as usize;
-                if b >= self.buttons.len() || self.buttons[b] == down {
+                let b = usize::from(button.number());
+                if self.buttons[b] == down {
                     return;
                 }
                 self.buttons[b] = down;
-                // X buttons: 1 left, 2 middle, 3 right, 8 back, 9 forward.
+                use crate::server::Button;
                 let (flags, data) = match (button, down) {
-                    (1, true) => (MOUSEEVENTF_LEFTDOWN, 0),
-                    (1, false) => (MOUSEEVENTF_LEFTUP, 0),
-                    (2, true) => (MOUSEEVENTF_MIDDLEDOWN, 0),
-                    (2, false) => (MOUSEEVENTF_MIDDLEUP, 0),
-                    (3, true) => (MOUSEEVENTF_RIGHTDOWN, 0),
-                    (3, false) => (MOUSEEVENTF_RIGHTUP, 0),
-                    (8, true) => (MOUSEEVENTF_XDOWN, 1),
-                    (8, false) => (MOUSEEVENTF_XUP, 1),
-                    (9, true) => (MOUSEEVENTF_XDOWN, 2),
-                    (9, false) => (MOUSEEVENTF_XUP, 2),
-                    _ => return,
+                    (Button::Left, true) => (MOUSEEVENTF_LEFTDOWN, 0),
+                    (Button::Left, false) => (MOUSEEVENTF_LEFTUP, 0),
+                    (Button::Middle, true) => (MOUSEEVENTF_MIDDLEDOWN, 0),
+                    (Button::Middle, false) => (MOUSEEVENTF_MIDDLEUP, 0),
+                    (Button::Right, true) => (MOUSEEVENTF_RIGHTDOWN, 0),
+                    (Button::Right, false) => (MOUSEEVENTF_RIGHTUP, 0),
+                    (Button::Back, true) => (MOUSEEVENTF_XDOWN, 1),
+                    (Button::Back, false) => (MOUSEEVENTF_XUP, 1),
+                    (Button::Forward, true) => (MOUSEEVENTF_XDOWN, 2),
+                    (Button::Forward, false) => (MOUSEEVENTF_XUP, 2),
                 };
                 send(&[mouse_input(0, 0, data, flags)]);
-            }
-            InputEvent::Scroll { dx, dy } => {
-                let d = WHEEL_DELTA as i32;
-                let mut v = Vec::new();
-                if dy != 0 {
-                    v.push(mouse_input(0, 0, -dy.clamp(-20, 20) * d, MOUSEEVENTF_WHEEL));
-                }
-                if dx != 0 {
-                    v.push(mouse_input(0, 0, dx.clamp(-20, 20) * d, MOUSEEVENTF_HWHEEL));
-                }
-                send(&v);
             }
             InputEvent::ScrollPx { dx, dy } => {
                 // Desktop pixels -> wheel units (120 per notch); apps that support
@@ -487,10 +471,10 @@ impl Injector {
         for ks in self.mods.keys().copied().collect::<Vec<_>>() {
             self.key(ks, false);
         }
-        for b in 1..self.buttons.len() {
-            if self.buttons[b] {
+        for button in crate::server::Button::ALL {
+            if self.buttons[usize::from(button.number())] {
                 self.handle(InputEvent::Button {
-                    button: b as u8,
+                    button,
                     down: false,
                 });
             }
@@ -517,9 +501,9 @@ pub fn spawn(
         .spawn(move || {
             super::follow_input_desktop();
             while let Ok(first) = rx.recv() {
-                let mut pending_move: Option<(i32, i32)> = None;
+                let mut pending_move: Option<(i16, i16)> = None;
                 let handle =
-                    |inj: &mut Injector, ev: InputEvent, pm: &mut Option<(i32, i32)>| match ev {
+                    |inj: &mut Injector, ev: InputEvent, pm: &mut Option<(i16, i16)>| match ev {
                         InputEvent::Move { x, y } => *pm = Some((x, y)),
                         other => {
                             if let Some((x, y)) = pm.take() {
