@@ -74,6 +74,7 @@ Desktop (this Mac's screen):
                                 within the budget)
   --max-capture-pixels          pixel budget for the automatic scale
                                 (default 4096000)
+  --encoder                     x264 (default) or videotoolbox (hardware H.264)
   --enable-clipboard            true, in, out or false (default true)
   --audio-enabled               system audio (default true)
   --audio-bitrate               Opus bitrate (default 128000)

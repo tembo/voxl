@@ -8,6 +8,7 @@
 //! - audio: system audio from ScreenCaptureKit
 //! - screen: dynamic resolution by switching display modes
 //! - mic: browser microphone played into a loopback output device
+//! - vt: H.264 on the media engine with VideoToolbox (--encoder=videotoolbox)
 
 pub mod audio;
 pub mod capture;
@@ -17,6 +18,7 @@ pub mod input;
 pub mod mic;
 pub mod screen;
 pub mod stream;
+pub mod vt;
 
 use ffi::*;
 use parking_lot::Mutex;
