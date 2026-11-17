@@ -5,6 +5,8 @@ use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -240,6 +242,11 @@ pub struct Hub {
     /// Connections older than this may no longer inject input after a display switch.
     #[cfg(target_os = "macos")]
     pub input_floor: AtomicU64,
+    #[cfg(target_os = "macos")]
+    pub restore_display_on_disconnect: AtomicBool,
+    /// Updated while holding the clients lock, so viewer admission and restore agree.
+    #[cfg(target_os = "macos")]
+    last_client_left: Mutex<Option<Instant>>,
     pub clients: Mutex<Vec<Arc<Client>>>,
     pub next_id: AtomicU64,
     pub stats: Stats,
@@ -274,6 +281,10 @@ impl Hub {
             display_req: Mutex::new(None),
             #[cfg(target_os = "macos")]
             input_floor: AtomicU64::new(0),
+            #[cfg(target_os = "macos")]
+            restore_display_on_disconnect: AtomicBool::new(false),
+            #[cfg(target_os = "macos")]
+            last_client_left: Mutex::new(None),
             clients: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),
             stats: Stats::default(),
@@ -327,8 +338,44 @@ impl Hub {
     }
 
     pub fn remove_client(&self, id: u64) {
-        self.clients.lock().retain(|c| c.id != id);
+        {
+            let mut clients = self.clients.lock();
+            #[cfg(target_os = "macos")]
+            let had_clients = !clients.is_empty();
+            clients.retain(|c| c.id != id);
+            #[cfg(target_os = "macos")]
+            if self.restore_display_on_disconnect.load(Ordering::Relaxed)
+                && had_clients
+                && clients.is_empty()
+            {
+                // Don't let a size request from the old connection apply to the next.
+                self.resize_req.lock().take();
+                *self.last_client_left.lock() = Some(Instant::now());
+            }
+        }
         self.wake();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn display_is_idle(&self, clients: &[Arc<Client>]) -> bool {
+        clients.is_empty()
+            && self
+                .last_client_left
+                .lock()
+                .is_some_and(|left| left.elapsed() >= Duration::from_millis(500))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn display_restore_due(&self) -> bool {
+        self.display_is_idle(&self.clients.lock())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn restore_idle_display<T>(&self, restore: impl FnOnce() -> T) -> Option<T> {
+        // Recheck after the capture pipeline drained, and keep admission serialized
+        // until the mode change is complete.
+        let clients = self.clients.lock();
+        self.display_is_idle(&clients).then(restore)
     }
 
     pub fn video_clients(&self) -> Vec<Arc<Client>> {
@@ -392,5 +439,52 @@ impl Hub {
             client.send(Out::Text("{\"t\":\"close\"}".into()));
         }
         Some(crate::mac::DisplayRequest { id, sender, ready })
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod display_restore_tests {
+    use super::*;
+
+    #[test]
+    fn restore_waits_for_the_last_client_even_if_video_is_paused() {
+        let hub = Hub::new();
+        hub.restore_display_on_disconnect
+            .store(true, Ordering::Relaxed);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let first = hub.add_client(tx.clone());
+        let paused = hub.add_client(tx.clone());
+        first.video.store(true, Ordering::Relaxed);
+        *hub.resize_req.lock() = Some((800, 600));
+        hub.remove_client(first.id);
+
+        assert!(hub.video_clients().is_empty());
+        assert!(!hub.display_restore_due());
+        assert_eq!(*hub.resize_req.lock(), Some((800, 600)));
+
+        hub.remove_client(paused.id);
+        assert!(hub.resize_req.lock().is_none());
+        *hub.last_client_left.lock() = Some(Instant::now() - Duration::from_secs(1));
+        assert!(hub.display_restore_due());
+
+        // A fast reconnect after the capture thread queued the restore cancels it.
+        let reconnect = hub.add_client(tx);
+        assert!(hub.restore_idle_display(|| panic!("viewer is connected")).is_none());
+        let previous_disconnect = hub.last_client_left.lock().unwrap();
+        hub.remove_client(reconnect.id);
+        assert!(hub.last_client_left.lock().unwrap() > previous_disconnect);
+        *hub.last_client_left.lock() = Some(Instant::now() - Duration::from_secs(1));
+        assert_eq!(hub.restore_idle_display(|| "restored"), Some("restored"));
+    }
+
+    #[test]
+    fn disconnect_leaves_pending_resize_alone_when_restore_is_disabled() {
+        let hub = Hub::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = hub.add_client(tx);
+        *hub.resize_req.lock() = Some((800, 600));
+        hub.remove_client(client.id);
+        assert_eq!(*hub.resize_req.lock(), Some((800, 600)));
+        assert!(!hub.display_restore_due());
     }
 }
