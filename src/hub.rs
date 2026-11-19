@@ -469,7 +469,9 @@ mod display_restore_tests {
 
         // A fast reconnect after the capture thread queued the restore cancels it.
         let reconnect = hub.add_client(tx);
-        assert!(hub.restore_idle_display(|| panic!("viewer is connected")).is_none());
+        assert!(hub
+            .restore_idle_display(|| panic!("viewer is connected"))
+            .is_none());
         let previous_disconnect = hub.last_client_left.lock().unwrap();
         hub.remove_client(reconnect.id);
         assert!(hub.last_client_left.lock().unwrap() > previous_disconnect);
