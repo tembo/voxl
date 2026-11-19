@@ -100,9 +100,9 @@ function main() {
 		audio.start();
 		clipboard.flush();
 	};
-	setupPointer(app, zoom, onInteract);
+	const pointer = setupPointer(app, zoom, onInteract);
 	setupKeyboard(app, clipboard, onInteract);
-	const updateDisplays = setupToolbar(app, video.layout);
+	const updateDisplays = setupToolbar(app, video.layout, pointer.setTrackpad);
 	const files = createFiles(app);
 	const mic = createMic(app);
 	const resize = createResize(app);

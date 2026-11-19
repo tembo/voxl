@@ -92,6 +92,29 @@
 				display: block;
 				pointer-events: none;
 			}
+			/* Trackpad mode takes touches anywhere in the window, around the desktop too. */
+			#pad {
+				position: fixed;
+				inset: 0;
+				touch-action: none;
+			}
+			/* Trackpad mode's cursor (pointer.ts): touch screens show no pointer, so the page
+			   draws the desktop's cursor image (cursor.ts) where the pointer is. It scales
+			   back by the pinch zoom (zoom.ts) to keep its size, around its hotspot. */
+			#pointer {
+				display: none;
+				position: absolute;
+				z-index: 1;
+				pointer-events: none;
+				background: 0 0 / 100% 100% no-repeat;
+				transform: scale(calc(1 / var(--zoom, 1)));
+			}
+			#surface.trackpad #pointer {
+				display: block;
+			}
+			#surface.trackpad #pointer.none {
+				display: none;
+			}
 			.stripe {
 				position: absolute;
 				left: 0;
@@ -340,18 +363,25 @@
 				height: 20px;
 			}
 			#kb-btn,
+			#tp-btn,
 			#files-btn,
 			#mic-btn {
 				display: none !important;
 			}
 			#tools.touch #kb-btn,
+			#tools.touch #tp-btn,
 			#tools.files #files-btn,
 			#tools.mic #mic-btn {
 				display: inline-grid !important;
 			}
-			/* Read-only: nothing on the desktop accepts what the keyboard would send. */
-			#tools.read-only #kb-btn {
+			/* Read-only: nothing on the desktop accepts what the keyboard or trackpad would send. */
+			#tools.read-only #kb-btn,
+			#tools.read-only #tp-btn {
 				display: none !important;
+			}
+			#tp-btn.on,
+			#tp-btn.on:hover {
+				background: var(--state-pressed);
 			}
 			/* While the microphone is live the toolbar stays up as a recording indicator. */
 			#tools.mic-on {
@@ -737,7 +767,11 @@
 		</style>
 	</head>
 	<body>
-		<div id="surface" tabindex="0"><canvas id="screen"></canvas></div>
+		<div id="pad" hidden></div>
+		<div id="surface" tabindex="0">
+			<canvas id="screen"></canvas>
+			<div id="pointer" class="none"></div>
+		</div>
 		<textarea
 			id="kbd"
 			autocomplete="off"
@@ -803,6 +837,26 @@
 						stroke="currentColor"
 						stroke-width="2"
 						stroke-linecap="round"
+						stroke-linejoin="round" />
+				</svg>
+			</button>
+			<button
+				id="tp-btn"
+				class="ib"
+				type="button"
+				title="Trackpad mode"
+				aria-label="Trackpad mode"
+				aria-pressed="false">
+				<svg class="i" viewBox="0 0 24 24" fill="none">
+					<path
+						d="M19 4H5C3.89543 4 3 4.89543 3 6V18C3 19.1046 3.89543 20 5 20H19C20.1046 20 21 19.1046 21 18V6C21 4.89543 20.1046 4 19 4Z"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linejoin="round" />
+					<path
+						d="M3 15H21M12 15V20"
+						stroke="currentColor"
+						stroke-width="2"
 						stroke-linejoin="round" />
 				</svg>
 			</button>

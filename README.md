@@ -350,6 +350,10 @@ localhost:
 Phones and tablets get touch input (tap to click, drag, long press to right click, pinch
 to zoom, two fingers to move around a zoomed-in view and scroll) and an on-screen
 keyboard.
+The toolbar's trackpad button switches to trackpad mode, which works like a laptop's
+trackpad: one finger moves a cursor from where it is (farther the faster it moves), a
+tap clicks and a two-finger tap right clicks where the cursor is, and press and hold,
+then move, drags. The whole screen is the trackpad, and the browser remembers the mode.
 
 **Wayland?** Not yet; on Linux voxl streams X11 displays, Xvfb included. The virtual
 desktops voxl is built for run on Xvfb (E2B's and Daytona's do too), and X11 lets voxl

@@ -2,6 +2,7 @@
 // latency. Cursor messages: type byte, pad, width, height, hot x, hot y (u16 each),
 // serial (u32), then RGBA.
 import type { App } from './app';
+import { el } from './app';
 
 // On-screen cursor size bounds in CSS pixels, applied to the image's longer side.
 // 24 is the standard pointer size (Xcursor's default), so a desktop scaled down
@@ -12,6 +13,8 @@ const MAX_CURSOR_PX = 128;
 export function createCursor(app: App) {
 	let msg: ArrayBuffer | null = null;
 	const scaled = document.createElement('canvas');
+	/** Trackpad mode's cursor (pointer.ts), which shows the same image. */
+	const pointer = el('pointer');
 
 	function apply() {
 		if (!msg) return;
@@ -22,6 +25,7 @@ export function createCursor(app: App) {
 			hy = v.getUint16(8);
 		if (!w || !h) {
 			app.surface.style.cursor = 'none';
+			pointer.classList.add('none');
 			return;
 		}
 		const src = document.createElement('canvas');
@@ -61,6 +65,14 @@ export function createCursor(app: App) {
 				: `url(${url}) ${hsx} ${hsy}, default`;
 		if (dpr > 1 && !app.surface.style.cursor)
 			app.surface.style.cursor = `url(${url}) ${hsx} ${hsy}, default`;
+		Object.assign(pointer.style, {
+			backgroundImage: `url(${url})`,
+			width: `${cw}px`,
+			height: `${ch}px`,
+			margin: `${-hsy}px 0 0 ${-hsx}px`,
+			transformOrigin: `${hsx}px ${hsy}px`,
+		});
+		pointer.classList.remove('none');
 	}
 
 	return {
