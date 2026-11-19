@@ -95,6 +95,12 @@ cargo build --release
 On Linux, `--no-default-features` leaves out PulseAudio, and with it desktop audio: a
 voxl that can be linked statically (musl) and runs without PulseAudio's libraries.
 
+`nix-shell` and `default.nix` build x264 with the patches in
+[`patches/x264`](patches/x264) ([`x264.nix`](x264.nix)), which skip the work x264 does
+on macroblocks voxl's damage map marks unchanged: a frame where a small window changed
+encodes in about 40% less time, and the stream comes out bit for bit the same. voxl
+builds against a stock x264 too, without the savings.
+
 Or install it from [crates.io](https://crates.io/crates/voxl-server) with the same
 libraries on your system (the crate is `voxl-server`, the binary is `voxl`):
 
