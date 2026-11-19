@@ -9,9 +9,10 @@ use objc2::{define_class, msg_send, AnyThread, DefinedClass};
 use objc2_core_media::CMSampleBuffer;
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
-    SCStreamDelegate, SCStreamOutput, SCStreamOutputType,
+    SCContentFilter, SCDisplay, SCScreenshotManager, SCShareableContent, SCStream,
+    SCStreamConfiguration, SCStreamDelegate, SCStreamOutput, SCStreamOutputType,
 };
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
@@ -69,6 +70,38 @@ pub struct Stream {
     _queue: SendBox<dispatch2::DispatchRetained<DispatchQueue>>,
     /// Set when ScreenCaptureKit ends the stream (display gone, permission revoked).
     pub stopped: Arc<AtomicBool>,
+    /// One-shot captures like the stream's (macOS 14+).
+    pub shooter: Option<Arc<Shooter>>,
+}
+
+/// Takes single screenshots with a stream's own filter and configuration.
+pub struct Shooter {
+    filter: Retained<SCContentFilter>,
+    cfg: Retained<SCStreamConfiguration>,
+}
+// SAFETY: ScreenCaptureKit objects may be used from any thread, and the configuration
+// isn't changed once the stream has started.
+unsafe impl Send for Shooter {}
+unsafe impl Sync for Shooter {}
+
+impl Shooter {
+    /// Captures the screen once; `done` gets the sample buffer (None on failure) on a
+    /// ScreenCaptureKit queue, valid only during the call.
+    pub fn capture(&self, done: impl FnOnce(Option<CMSampleBufferRef>) + Send + 'static) {
+        let done = Mutex::new(Some(done));
+        let block = block2::RcBlock::new(move |sb: *mut CMSampleBuffer, _err: *mut NSError| {
+            if let Some(f) = done.lock().take() {
+                f((!sb.is_null()).then_some(sb as CMSampleBufferRef));
+            }
+        });
+        unsafe {
+            SCScreenshotManager::captureSampleBufferWithFilter_configuration_completionHandler(
+                &self.filter,
+                &self.cfg,
+                Some(&block),
+            )
+        };
+    }
 }
 
 fn shareable_display(id: u32) -> Result<Retained<SCDisplay>, String> {
@@ -108,7 +141,7 @@ pub fn start(
     let stopped = Arc::new(AtomicBool::new(false));
     let output = Output::new(Box::new(handler), stopped.clone());
     let queue = DispatchQueue::new(&format!("voxl.{name}"), None);
-    let stream = unsafe {
+    let (stream, shooter) = unsafe {
         let filter = SCContentFilter::initWithDisplay_excludingWindows(
             SCContentFilter::alloc(),
             &d,
@@ -131,7 +164,8 @@ pub fn start(
                 )
                 .map_err(|e| format!("adding a stream output: {}", e.localizedDescription()))?;
         }
-        stream
+        let shooter = objc2::available!(macos = 14.0).then(|| Arc::new(Shooter { filter, cfg }));
+        (stream, shooter)
     };
     let (tx, rx) = mpsc::channel::<Option<String>>();
     let done = block2::RcBlock::new(move |err: *mut NSError| {
@@ -148,6 +182,7 @@ pub fn start(
         _output: SendBox(output),
         _queue: SendBox(queue),
         stopped,
+        shooter,
     })
 }
 
