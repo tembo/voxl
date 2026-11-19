@@ -21,28 +21,30 @@ screen instead; see [macOS](#macos) and [Windows](#windows).
 
 https://github.com/user-attachments/assets/acdf3f31-64fc-4acf-b5c5-ff173d7100a8
 
-In every test below voxl averages 60 FPS with a median latency of 12–99 ms; noVNC
+In every test below voxl averages 60 FPS with a median latency of 13–98 ms; noVNC
 averages under 8 FPS.
 
 A 16 vCPU AMD EPYC 9334 VM (no GPU), 2560x1600 Xvfb desktop, same workloads, each
 stream decoded by a native client that reads a pixel marker drawn into the content.
 Cells are FPS (worst second), then latency p50/p99 from the content being drawn to the
-frame being decoded. voxl's column is its best run of each test. To reproduce, see
-[`bench/`](bench/README.md).
+frame being decoded. voxl's column is its best of three runs of each test, and its
+numbers (the column and the CPU row) come from a later session than the other
+servers', on the same kind of VM, with x264 built with [`patches/x264`](patches/x264).
+To reproduce, see [`bench/`](bench/README.md).
 
 | Test                           | voxl                       | [selkies](https://github.com/selkies-project/selkies) | [KasmVNC](https://github.com/kasmtech/KasmVNC) | [Neko](https://github.com/m1k1o/neko) | [Neko, tuned](https://github.com/m1k1o/neko) | [Sunshine](https://github.com/LizardByte/Sunshine) | [Sunshine, tuned](https://github.com/LizardByte/Sunshine) | [noVNC](https://github.com/novnc/noVNC) | [Daytona](https://www.daytona.io) |
 | ------------------------------ | -------------------------- | ----------------------------------------------------- | ---------------------------------------------- | ------------------------------------- | -------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------- | --------------------------------------- | --------------------------------- |
-| Chromium scroll, LAN           | **60.1 (59.7), 55/60 ms**  | 56.8 (54.0), 85/106 ms                                | 51.7 (39.5), 99/135 ms                         | 25.0 (23.7), 156/217 ms               | 53.9 (49.9), 128/155 ms                      | 28.3 (23.5), 88/115 ms                             | 48.5 (44.0), 94/117 ms                                    | 6.7 (6.3), 198/301 ms                   | 5.2 (2.5), 306/713 ms             |
-| Scroll, 10 Mbps / 40 ms RTT    | **60.0 (59.4), 82/94 ms**  | 55.6 (47.7), 152/261 ms                               | 8.3 (7.4), 229/249 ms                          | 24.6 (14.9), 221/737 ms               | 46.3 (40.3), 606/831 ms                      | 27.9 (25.3), 160/179 ms                            | 51.3 (47.5), 147/162 ms                                   | 2.6 (2.4), 426/678 ms                   | 1.9 (1.6), 617/798 ms             |
-| Scroll, 5 Mbps / 60 ms RTT     | **60.1 (59.7), 99/109 ms** | 27.9 (19.6), 2.7/3.7 s                                | 4.9 (3.6), 306/415 ms                          | 21.7 (3.8), 1.2/3.6 s                 | stalls                                       | 29.6 (21.9), 178/207 ms                            | 44.5 (35.2), 164/191 ms                                   | 1.6 (1.4), 637/937 ms                   | 1.1 (0.9), 1.1/1.2 s              |
-| 1080p animation, LAN           | **60.1 (59.9), 12/16 ms**  | 58.7 (55.9), 31/48 ms                                 | 56.7 (51.6), 51/82 ms                          | 24.8 (23.6), 122/202 ms               | 55.6 (50.0), 54/82 ms                        | 27.1 (22.7), 69/91 ms                              | 45.6 (40.3), 42/57 ms                                     | 7.7 (7.2), 149/210 ms                   | 10.5 (8.8), 138/209 ms            |
-| Animation, 10 Mbps / 40 ms RTT | **60.1 (59.5), 46/71 ms**  | 39.3 (31.8), 2.3/3.1 s                                | 52.9 (49.2), 76/115 ms                         | 25.1 (9.1), 295/962 ms                | 33.3 (25.4), 4.0/7.1 s                       | 29.7 (26.0), 108/125 ms                            | 51.1 (44.6), 86/107 ms                                    | 5.8 (5.2), 160/226 ms                   | 7.4 (7.0), 154/213 ms             |
-| Animation, 5 Mbps / 60 ms RTT  | **60.0 (58.8), 66/92 ms**  | 18.4 (15.3), 2.2/4.3 s                                | 34.1 (26.4), 104/156 ms                        | 15.2 (8.6), 5.0/9.4 s                 | stalls                                       | 34.7 (25.4), 123/143 ms                            | 45.5 (40.9), 114/131 ms                                   | 5.1 (4.7), 174/240 ms                   | 5.8 (4.4), 189/252 ms             |
-| Full-screen animation, LAN     | **59.8 (54.0), 18/25 ms**  | 54.8 (49.8), 54/79 ms                                 | 34.2 (32.5), 83/102 ms                         | 22.7 (18.0), 2.9/3.3 s                | 54.6 (49.7), 54/79 ms                        | 24.9 (21.7), 73/98 ms                              | 47.4 (43.4), 46/65 ms                                     | 5.9 (5.2), 184/279 ms                   | 9.1 (7.2), 154/247 ms             |
+| Chromium scroll, LAN           | **60.0 (58.1), 37/50 ms**  | 56.8 (54.0), 85/106 ms                                | 51.7 (39.5), 99/135 ms                         | 25.0 (23.7), 156/217 ms               | 53.9 (49.9), 128/155 ms                      | 28.3 (23.5), 88/115 ms                             | 48.5 (44.0), 94/117 ms                                    | 6.7 (6.3), 198/301 ms                   | 5.2 (2.5), 306/713 ms             |
+| Scroll, 10 Mbps / 40 ms RTT    | **60.1 (59.6), 80/90 ms**  | 55.6 (47.7), 152/261 ms                               | 8.3 (7.4), 229/249 ms                          | 24.6 (14.9), 221/737 ms               | 46.3 (40.3), 606/831 ms                      | 27.9 (25.3), 160/179 ms                            | 51.3 (47.5), 147/162 ms                                   | 2.6 (2.4), 426/678 ms                   | 1.9 (1.6), 617/798 ms             |
+| Scroll, 5 Mbps / 60 ms RTT     | **60.0 (59.2), 98/115 ms** | 27.9 (19.6), 2.7/3.7 s                                | 4.9 (3.6), 306/415 ms                          | 21.7 (3.8), 1.2/3.6 s                 | stalls                                       | 29.6 (21.9), 178/207 ms                            | 44.5 (35.2), 164/191 ms                                   | 1.6 (1.4), 637/937 ms                   | 1.1 (0.9), 1.1/1.2 s              |
+| 1080p animation, LAN           | **60.0 (59.8), 13/18 ms**  | 58.7 (55.9), 31/48 ms                                 | 56.7 (51.6), 51/82 ms                          | 24.8 (23.6), 122/202 ms               | 55.6 (50.0), 54/82 ms                        | 27.1 (22.7), 69/91 ms                              | 45.6 (40.3), 42/57 ms                                     | 7.7 (7.2), 149/210 ms                   | 10.5 (8.8), 138/209 ms            |
+| Animation, 10 Mbps / 40 ms RTT | **60.0 (58.1), 45/72 ms**  | 39.3 (31.8), 2.3/3.1 s                                | 52.9 (49.2), 76/115 ms                         | 25.1 (9.1), 295/962 ms                | 33.3 (25.4), 4.0/7.1 s                       | 29.7 (26.0), 108/125 ms                            | 51.1 (44.6), 86/107 ms                                    | 5.8 (5.2), 160/226 ms                   | 7.4 (7.0), 154/213 ms             |
+| Animation, 5 Mbps / 60 ms RTT  | **60.0 (59.4), 60/84 ms**  | 18.4 (15.3), 2.2/4.3 s                                | 34.1 (26.4), 104/156 ms                        | 15.2 (8.6), 5.0/9.4 s                 | stalls                                       | 34.7 (25.4), 123/143 ms                            | 45.5 (40.9), 114/131 ms                                   | 5.1 (4.7), 174/240 ms                   | 5.8 (4.4), 189/252 ms             |
+| Full-screen animation, LAN     | **60.0 (59.4), 16/23 ms**  | 54.8 (49.8), 54/79 ms                                 | 34.2 (32.5), 83/102 ms                         | 22.7 (18.0), 2.9/3.3 s                | 54.6 (49.7), 54/79 ms                        | 24.9 (21.7), 73/98 ms                              | 47.4 (43.4), 46/65 ms                                     | 5.9 (5.2), 184/279 ms                   | 9.1 (7.2), 154/247 ms             |
 
 | Server CPU, X server + streamer (cores)                   | idle | 1080p animation  | scroll           | full screen      |
 | --------------------------------------------------------- | ---- | ---------------- | ---------------- | ---------------- |
-| voxl                                                      | 0.00 | 1.39             | 1.33             | 1.68             |
+| voxl                                                      | 0.00 | 1.54             | 1.44             | 2.00             |
 | [selkies](https://github.com/selkies-project/selkies)     | 1.29 | not measured     | 1.54             | 1.80             |
 | [KasmVNC](https://github.com/kasmtech/KasmVNC)            | 0.00 | 1.97             | 2.07             | 1.82 (at 34 FPS) |
 | [Neko](https://github.com/m1k1o/neko)                     | 1.63 | 2.50 (at 25 FPS) | 2.20 (at 25 FPS) | 2.46 (at 23 FPS) |
@@ -94,6 +96,12 @@ cargo build --release
 
 On Linux, `--no-default-features` leaves out PulseAudio, and with it desktop audio: a
 voxl that can be linked statically (musl) and runs without PulseAudio's libraries.
+
+`nix-shell` and `default.nix` build x264 with the patches in
+[`patches/x264`](patches/x264) ([`x264.nix`](x264.nix)), which skip the work x264 does
+on macroblocks voxl's damage map marks unchanged: a frame where a small window changed
+encodes in about 40% less time, and the stream comes out bit for bit the same. voxl
+builds against a stock x264 too, without the savings.
 
 Or install it from [crates.io](https://crates.io/crates/voxl-server) with the same
 libraries on your system (the crate is `voxl-server`, the binary is `voxl`):

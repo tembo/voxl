@@ -42,7 +42,8 @@ rustPlatform.buildRustPackage {
   '';
 
   buildInputs = [
-    x264
+    # x264 patched to skip the macroblocks voxl's damage map marks unchanged.
+    (import ./x264.nix {inherit x264;})
     libyuv
     libopus
     libpulseaudio
