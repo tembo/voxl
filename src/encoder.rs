@@ -94,13 +94,13 @@ impl Encoder {
         match self {
             Encoder::X264(e) => e.encode(p, ts_ms, force_idr, qp, mb_info, out),
             #[cfg(target_os = "macos")]
-            Encoder::VideoToolbox(e) => e
-                .encode(p, ts_ms, force_idr, out)
-                .map(|keyframe| Encoded {
+            Encoder::VideoToolbox(e) => {
+                e.encode(p, ts_ms, force_idr, out).map(|keyframe| Encoded {
                     keyframe,
                     qp: None,
                     crf_avg: 0.0,
-                }),
+                })
+            }
         }
     }
 }
