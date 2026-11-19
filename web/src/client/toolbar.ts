@@ -1,13 +1,22 @@
 // Toolbar (top right on hover; bottom right and always visible on touch devices):
-// display picker, on-screen keyboard, files, microphone and fullscreen buttons.
+// display picker, on-screen keyboard, trackpad mode, files, microphone and fullscreen
+// buttons.
 import { cmd } from '../protocol';
 import type { Hello } from '../protocol';
 import type { App } from './app';
 import { el } from './app';
 
-export function setupToolbar(app: App, onFullscreenChange: () => void) {
+/** localStorage key that remembers trackpad mode on this device. */
+const TRACKPAD_KEY = 'voxl-trackpad';
+
+export function setupToolbar(
+	app: App,
+	onFullscreenChange: () => void,
+	onTrackpad: (on: boolean) => void
+) {
 	const { tools, kbd } = app;
 	const kbBtn = el<HTMLButtonElement>('kb-btn');
+	const tpBtn = el<HTMLButtonElement>('tp-btn');
 	const fsBtn = el<HTMLButtonElement>('fs-btn');
 	const picker = el('display-picker');
 	const displayBtn = el<HTMLButtonElement>('display-btn');
@@ -112,7 +121,8 @@ export function setupToolbar(app: App, onFullscreenChange: () => void) {
 		if (ms) hideTimer = setTimeout(() => tools.classList.remove('show'), ms);
 	}
 	// Touch devices keep the toolbar visible; mice reveal it near the top edge.
-	if (matchMedia('(pointer: coarse)').matches) {
+	const touch = matchMedia('(pointer: coarse)').matches;
+	if (touch) {
 		tools.classList.add('touch');
 		show(0);
 	} else
@@ -138,6 +148,28 @@ export function setupToolbar(app: App, onFullscreenChange: () => void) {
 		}
 	});
 
+	// Trackpad mode: only touch devices show its button, and read-only viewers send
+	// no input to move a cursor with.
+	let trackpad = false;
+	try {
+		trackpad = localStorage.getItem(TRACKPAD_KEY) === '1';
+	} catch {}
+	function applyTrackpad() {
+		const on = trackpad && touch && !app.readOnly;
+		tpBtn.classList.toggle('on', on);
+		tpBtn.setAttribute('aria-pressed', String(on));
+		onTrackpad(on);
+	}
+	tpBtn.addEventListener('click', () => {
+		trackpad = !trackpad;
+		try {
+			if (trackpad) localStorage.setItem(TRACKPAD_KEY, '1');
+			else localStorage.removeItem(TRACKPAD_KEY);
+		} catch {}
+		applyTrackpad();
+	});
+	applyTrackpad();
+
 	if (!document.fullscreenEnabled) fsBtn.style.display = 'none';
 	fsBtn.addEventListener('click', () => {
 		if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -156,7 +188,9 @@ export function setupToolbar(app: App, onFullscreenChange: () => void) {
 		fsBtn.classList.toggle('on', !!document.fullscreenElement);
 		onFullscreenChange();
 	});
+	// Called with each hello.
 	return (info: Hello['displays']) => {
+		applyTrackpad();
 		closeMenu(false);
 		picker.hidden = !info || info.available.length < 2 || app.readOnly;
 		displayBtn.disabled = false;

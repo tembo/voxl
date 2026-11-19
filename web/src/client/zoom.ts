@@ -38,6 +38,8 @@ export function createZoom(app: App) {
 
 	function set(nz: number, ntx: number, nty: number) {
 		z = limit(nz);
+		// Trackpad mode's cursor scales back by this to keep its size (index.html).
+		surface.style.setProperty('--zoom', String(z));
 		if (z === 1) {
 			tx = ty = 0;
 			surface.style.transform = '';
