@@ -144,7 +144,7 @@ async fn serve(a: HashMap<String, String>) {
         .unwrap_or(4) as u32;
     let vcfg = video::VideoConfig {
         display: display.clone(),
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         enable_resize: truthy(a.get("enable-resize"), false) && !truthy(a.get("read-only"), false),
         fps: range_max(a.get("framerate"), 60.0) as u32,
         preset: a

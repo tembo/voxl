@@ -214,9 +214,9 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
     let client = {
         // New connections must not receive the old geometry during a display change.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         let input = s.hub.input.lock();
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if input.is_none() && s.hub.input_floor.load(Ordering::Relaxed) != 0 {
             return;
         }
@@ -306,11 +306,11 @@ fn num<T: std::str::FromStr>(it: &mut std::str::Split<'_, char>) -> Option<T> {
 
 fn send_input(hub: &Hub, client: &Client, event: InputEvent) {
     let input = hub.input.lock();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     if client.id < hub.input_floor.load(Ordering::Relaxed) {
         return;
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     let _ = client;
     if let Some(tx) = input.as_ref() {
         let _ = tx.send(event);
@@ -333,10 +333,14 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
     let input = |ev| send_input(&s.hub, c, ev);
     let mut it = rest.split(',');
     match cmd {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         "ds" => {
             if let Ok(id) = rest.parse() {
-                match crate::mac::request_display(&s.hub, id, c.id) {
+                #[cfg(target_os = "macos")]
+                let result = crate::mac::request_display(&s.hub, id, c.id);
+                #[cfg(windows)]
+                let result = crate::win::request_display(&s.hub, id, c.id);
+                match result {
                     Ok(true) => {}
                     result => {
                         if let Err(e) = result {
@@ -413,9 +417,9 @@ fn handle_text(s: &AppState, c: &Arc<Client>, t: &str, rtts: &mut std::collectio
         // sz,w,h: the desktop size this client's window wants (dynamic resolution).
         // The latest request wins; the video thread clamps it and applies it.
         "sz" if s.resize => {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             let input = s.hub.input.lock();
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             if input.is_none() || c.id < s.hub.input_floor.load(Ordering::Relaxed) {
                 return;
             }
@@ -558,7 +562,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn display_switch_drains_input_and_retires_old_connections() {
         let hub = Hub::new();
@@ -567,7 +571,7 @@ mod tests {
         let (out, _messages) = mpsc::unbounded_channel();
         let old = hub.add_client(out);
         send_input(&hub, &old, InputEvent::Move { x: 1, y: 2 });
-        let request = hub.pause_display_input(20, old.id).unwrap();
+        let (sender, ready) = hub.pause_display_input(old.id).unwrap();
         assert!(
             hub.clients.lock().is_empty(),
             "old subscriptions were not retired"
@@ -592,14 +596,14 @@ mod tests {
             "input entered while capture was changing"
         );
         done.send(()).unwrap();
-        request.ready.recv().unwrap();
-        *hub.input.lock() = Some(request.sender);
+        ready.recv().unwrap();
+        *hub.input.lock() = Some(sender);
         send_input(&hub, &old, InputEvent::Move { x: 100, y: 200 });
         assert!(
             events.try_recv().is_err(),
             "an old connection used the new geometry"
         );
-        assert!(hub.pause_display_input(30, old.id).is_none());
+        assert!(hub.pause_display_input(old.id).is_none());
         let (out, _messages) = mpsc::unbounded_channel();
         let fresh = hub.add_client(out);
         send_input(&hub, &fresh, InputEvent::Move { x: 3, y: 4 });
