@@ -2,7 +2,7 @@ name: Release
 
 # Publishes to crates.io when a version tag (v0.2.0, ...) is pushed, then creates the
 # GitHub release: GitHub's generated notes (the pull requests merged since the previous
-# tag), with the published crate attached.
+# tag), with the published crate and Windows executable attached.
 # Bump `version` in Cargo.toml on main first; the tag has to match it.
 on:
   push:
@@ -40,9 +40,34 @@ jobs:
           path: target/package/voxl-server-*.crate
           if-no-files-found: error
 
+  windows-build:
+    name: Build Windows x86_64 binary
+    runs-on: windows-latest
+    env:
+      VCPKGRS_TRIPLET: x64-windows-static-md
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.93.0'
+      - name: Install native libraries and esbuild
+        shell: pwsh
+        run: |
+          vcpkg install x264 libyuv opus --triplet $env:VCPKGRS_TRIPLET
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          npm install -g esbuild
+      - name: Build Windows server
+        run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voxl-windows-x86_64
+          path: target/release/voxl.exe
+          if-no-files-found: error
+
   github-release:
     name: GitHub release
-    needs: publish
+    needs: [publish, windows-build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -55,6 +80,10 @@ jobs:
         with:
           name: crate
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: voxl-windows-x86_64
+          path: dist
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -65,4 +94,4 @@ jobs:
           if [ -n "$prev" ]; then
             args+=(--notes-start-tag "$prev")
           fi
-          gh release create "$GITHUB_REF_NAME" "${args[@]}" dist/*.crate
+          gh release create "$GITHUB_REF_NAME" "${args[@]}" dist/*.crate dist/*.exe
