@@ -60,7 +60,7 @@ export function createMic(app: App) {
 		return null;
 	}
 
-	function onChunk(f: Float32Array) {
+	function onChunk(f: Float32Array<ArrayBuffer>) {
 		if (!on) return;
 		if (enc && enc.state === 'configured') {
 			const data = new AudioData({
@@ -103,8 +103,9 @@ export function createMic(app: App) {
 				channelCount: 1,
 				channelCountMode: 'explicit',
 			});
-			node.port.addEventListener('message', (e: MessageEvent<Float32Array>) =>
-				onChunk(e.data)
+			node.port.addEventListener(
+				'message',
+				(e: MessageEvent<Float32Array<ArrayBuffer>>) => onChunk(e.data)
 			);
 			node.port.start();
 			ctx.createMediaStreamSource(stream).connect(node);

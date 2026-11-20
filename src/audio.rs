@@ -123,7 +123,7 @@ pub fn spawn(device: String, bitrate: i32, hub: Arc<Hub>) {
                         break;
                     }
                     checked += 1;
-                    if checked % 50 == 0 && !want() {
+                    if checked.is_multiple_of(50) && !want() {
                         break;
                     }
                     if pcm.iter().all(|&s| s == 0) {
