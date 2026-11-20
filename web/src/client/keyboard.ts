@@ -215,7 +215,20 @@ export function setupKeyboard(
 		kbd.value = '';
 	});
 	window.addEventListener('blur', releaseAll);
-	surface.addEventListener('focus', () => kbd.focus({ preventScroll: true }));
+	// A finger on the desktop must not raise the on-screen keyboard: only the toolbar's
+	// keyboard button does (it sets kbd.dataset.soft). Mice and pens still focus it.
+	let lastTouch = false;
+	surface.addEventListener(
+		'pointerdown',
+		(e) => {
+			lastTouch = e.pointerType === 'touch';
+		},
+		{ capture: true }
+	);
+	surface.addEventListener('focus', () => {
+		if (lastTouch && !kbd.dataset.soft) return;
+		kbd.focus({ preventScroll: true });
+	});
 	if (!app.inIframe) kbd.focus({ preventScroll: true });
 
 	return { releaseAll };
