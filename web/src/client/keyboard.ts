@@ -131,7 +131,12 @@ export function setupKeyboard(
 		const ks = keysymOf(e);
 		if (!ks) return;
 		const accel = isMac ? e.metaKey : e.ctrlKey;
-		if (accel && !e.altKey && (e.key === 'v' || e.key === 'V') && !e.repeat) {
+		const letter = e.key.toLowerCase();
+		// Copy and cut, with Command or Control on any host (Control+Shift+C in terminals).
+		const copyKey = letter === 'c' || letter === 'x';
+		if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.repeat && copyKey)
+			clipboard.expectCopy();
+		if (accel && !e.altKey && letter === 'v' && !e.repeat) {
 			// Let the browser deliver a paste event to the hidden textarea first, so the
 			// remote clipboard holds the local contents before the shortcut lands.
 			pendingPaste = { code: e.code, ks, timer: setTimeout(flushPaste, 150) };
@@ -165,7 +170,6 @@ export function setupKeyboard(
 		const dt = e.clipboardData;
 		const text = dt?.getData('text/plain');
 		if (text) {
-			clipboard.noteLocal(text);
 			send(cmd.clipboard(text));
 			flushPaste();
 			return;

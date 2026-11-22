@@ -34,7 +34,6 @@ const MAX_IMAGE: usize = 15 << 20;
 struct ClipState {
     /// Pasteboard change count after our own last write (not echoed back to clients).
     own_change: isize,
-    last_image: Option<u64>,
 }
 
 /// Sets the Mac's clipboard; returns once it holds the new contents, so a paste
@@ -57,10 +56,10 @@ impl ClipboardHandle {
         match content {
             ClipContent::Text(t) => {
                 unsafe { pb.setString_forType(&NSString::from_str(&t), NSPasteboardTypeString) };
-                *self.hub.last_clipboard.lock() = Some(t);
+                self.hub.paste_echo.note(t.as_bytes());
             }
             ClipContent::Image(png) => {
-                st.last_image = Some(hash(&png));
+                self.hub.paste_echo.note(&png);
                 let data = NSData::with_bytes(&png);
                 unsafe { pb.setData_forType(Some(&data), NSPasteboardTypePNG) };
                 // Many Mac apps only read TIFF images from the pasteboard.
@@ -119,7 +118,8 @@ fn clipboard_loop(hub: Arc<Hub>, state: Arc<Mutex<ClipState>>) {
     let pb = NSPasteboard::generalPasteboard();
     let mut seen = pb.changeCount();
     loop {
-        std::thread::sleep(Duration::from_millis(250));
+        // The change count is cheap to read; a copy reaches viewers within 50 ms.
+        std::thread::sleep(Duration::from_millis(50));
         let n = pb.changeCount();
         if n == seen {
             continue;
@@ -131,15 +131,8 @@ fn clipboard_loop(hub: Arc<Hub>, state: Arc<Mutex<ClipState>>) {
         objc2::rc::autoreleasepool(|_| unsafe {
             if let Some(s) = pb.stringForType(NSPasteboardTypeString) {
                 let text = s.to_string();
-                if text.is_empty() {
+                if text.is_empty() || hub.paste_echo.is_echo(text.as_bytes()) {
                     return;
-                }
-                {
-                    let mut last = hub.last_clipboard.lock();
-                    if last.as_deref() == Some(text.as_str()) {
-                        return;
-                    }
-                    *last = Some(text.clone());
                 }
                 let msg = serde_json::json!({"t": "clip", "d": text}).to_string();
                 hub.broadcast(|| Out::Text(msg.clone()));
@@ -156,16 +149,8 @@ fn clipboard_loop(hub: Arc<Hub>, state: Arc<Mutex<ClipState>>) {
                 return;
             };
             let data = png.to_vec();
-            if data.is_empty() || data.len() > MAX_IMAGE {
+            if data.is_empty() || data.len() > MAX_IMAGE || hub.paste_echo.is_echo(&data) {
                 return;
-            }
-            let h = hash(&data);
-            {
-                let mut st = state.lock();
-                if st.last_image == Some(h) {
-                    return;
-                }
-                st.last_image = Some(h);
             }
             let mut msg = Vec::with_capacity(data.len() + 1);
             msg.push(0x04);

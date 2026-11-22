@@ -130,17 +130,16 @@ pub fn spawn(
             let mut owned: Option<ClipContent> = None;
             // INCR transfer in progress: (target being fetched, bytes so far).
             let mut incr: Option<(u32, Vec<u8>)> = None;
-            let mut last_image: Option<u64> = None;
             send_cursor(&conn, &hub);
             loop {
                 let mut drain = [0u8; 64];
                 while matches!(read(&wake_r, &mut drain), Ok(n) if n > 0) {}
                 while let Ok((content, done)) = rx.try_recv() {
                     if mode.to_server {
-                        match &content {
-                            ClipContent::Text(t) => *hub.last_clipboard.lock() = Some(t.clone()),
-                            ClipContent::Image(png) => last_image = Some(hash(png)),
-                        }
+                        hub.paste_echo.note(match &content {
+                            ClipContent::Text(t) => t.as_bytes(),
+                            ClipContent::Image(png) => png,
+                        });
                         owned = Some(content);
                         let _ = conn.set_selection_owner(win, atoms.clipboard, x11rb::CURRENT_TIME);
                         // Round trip: ownership is in effect once this returns.
@@ -211,7 +210,7 @@ pub fn spawn(
                             } else if r.type_ == atoms.incr {
                                 incr = Some((e.target, Vec::new()));
                             } else {
-                                publish(&hub, &atoms, e.target, r.value, &mut last_image);
+                                publish(&hub, &atoms, e.target, r.value);
                             }
                             let _ = conn.flush();
                         }
@@ -227,7 +226,7 @@ pub fn spawn(
                         {
                             if r.value.is_empty() {
                                 let (target, data) = incr.take().unwrap();
-                                publish(&hub, &atoms, target, data, &mut last_image);
+                                publish(&hub, &atoms, target, data);
                             } else {
                                 incr.as_mut().unwrap().1.extend_from_slice(&r.value);
                             }
@@ -322,23 +321,14 @@ pub fn spawn(
     Ok(ClipboardHandle { tx, wake_w })
 }
 
-fn hash(data: &[u8]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    data.hash(&mut h);
-    h.finish()
-}
-
-fn publish(hub: &Hub, atoms: &Atoms, target: u32, data: Vec<u8>, last_image: &mut Option<u64>) {
+fn publish(hub: &Hub, atoms: &Atoms, target: u32, data: Vec<u8>) {
+    if data.is_empty() || hub.paste_echo.is_echo(&data) {
+        return;
+    }
     if target == atoms.png {
-        if data.is_empty() || data.len() > MAX_IMAGE {
+        if data.len() > MAX_IMAGE {
             return;
         }
-        let h = hash(&data);
-        if *last_image == Some(h) {
-            return;
-        }
-        *last_image = Some(h);
         let mut msg = Vec::with_capacity(data.len() + 1);
         msg.push(0x04);
         msg.extend_from_slice(&data);
@@ -349,16 +339,6 @@ fn publish(hub: &Hub, atoms: &Atoms, target: u32, data: Vec<u8>, last_image: &mu
     let Ok(text) = String::from_utf8(data) else {
         return;
     };
-    if text.is_empty() {
-        return;
-    }
-    {
-        let mut last = hub.last_clipboard.lock();
-        if last.as_deref() == Some(text.as_str()) {
-            return;
-        }
-        *last = Some(text.clone());
-    }
     let msg = serde_json::json!({"t": "clip", "d": text}).to_string();
     hub.broadcast(|| Out::Text(msg.clone()));
 }
