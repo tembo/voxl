@@ -470,6 +470,8 @@ pub fn spawn(
         .name("input".into())
         .spawn(move || {
             while let Ok(first) = rx.recv() {
+                // The lock screen doesn't take a typed password until the display is awake.
+                super::wake_display();
                 let mut pending_move: Option<(i32, i32)> = None;
                 let handle =
                     |inj: &mut Injector, ev: InputEvent, pm: &mut Option<(i32, i32)>| match ev {

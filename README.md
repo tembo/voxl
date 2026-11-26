@@ -249,6 +249,11 @@ starts it) for Screen Recording and Accessibility permissions. For the microphon
 install a loopback device (`brew install blackhole-2ch`) and pick it as the input in the
 apps that should hear you.
 
+A sleeping display can't be captured, so voxl wakes it when it starts, when a viewer
+connects and on viewer input, as a local user would (it stays locked if it locked). When
+the display falls asleep under a running voxl, voxl exits; run it under launchd with
+`KeepAlive` and the next start wakes the display and streams again.
+
 | macOS flag             | Default                             |                                                                                        |
 | ---------------------- | ----------------------------------- | -------------------------------------------------------------------------------------- |
 | `--display`            | main display                        | display to stream: an index (0 is the main display) or a display ID; logged at startup |
