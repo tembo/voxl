@@ -131,6 +131,12 @@ impl Activity {
         }
     }
 
+    /// Whether a `/wait` is pending.
+    #[cfg(target_os = "macos")]
+    pub fn waiting(&self) -> bool {
+        self.seq.receiver_count() > 0
+    }
+
     /// Sequence number of the latest change.
     pub fn seq(&self) -> u64 {
         self.map.lock().last.0
@@ -225,6 +231,9 @@ pub async fn wait(
     };
     let deadline = start + timeout;
     let mut rx = a.seq.subscribe();
+    // Let the capture thread know someone waits: on macOS it then also looks for changes
+    // ScreenCaptureKit holds back (mac/capture.rs).
+    hub.wake();
     let timed_out = loop {
         // Mark the current change seen before looking, so a later one wakes us.
         rx.borrow_and_update();
