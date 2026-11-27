@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 pub enum Out {
@@ -254,7 +254,7 @@ pub struct Hub {
     /// Wakes the capture thread (acks, joins, keyframe requests).
     pub waker: Wake,
     pub input: Mutex<Option<std::sync::mpsc::Sender<crate::input::InputEvent>>>,
-    pub last_clipboard: Mutex<Option<String>>,
+    pub paste_echo: PasteEcho,
     /// Desktop size a client asked for (dynamic resolution), applied by the video thread.
     pub resize_req: Mutex<Option<(u32, u32)>>,
     /// Largest desktop size (Some when dynamic resolution is on).
@@ -265,6 +265,33 @@ pub struct Hub {
     pub snapshots: Mutex<Vec<tokio::sync::oneshot::Sender<Arc<crate::record::Snapshot>>>>,
     /// When each part of the screen last changed (`/wait`).
     pub activity: crate::wait::Activity,
+}
+
+/// What a viewer last pasted onto the desktop's clipboard, so the desktop handing it
+/// straight back (a clipboard manager taking it over, or a poll that raced the write)
+/// isn't sent back to viewers. Anything copied on the desktop afterwards is sent, the
+/// same text included: the viewer's own clipboard may hold something else by then.
+#[derive(Default)]
+pub struct PasteEcho(Mutex<Option<(u64, Instant)>>);
+
+impl PasteEcho {
+    const WINDOW: Duration = Duration::from_secs(1);
+
+    pub fn note(&self, data: &[u8]) {
+        *self.0.lock() = Some((Self::hash(data), Instant::now()));
+    }
+
+    /// Whether `data`, just copied on the desktop, is the viewer's paste coming back.
+    pub fn is_echo(&self, data: &[u8]) -> bool {
+        matches!(self.0.lock().take(), Some((h, at)) if h == Self::hash(data) && at.elapsed() < Self::WINDOW)
+    }
+
+    fn hash(data: &[u8]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        data.hash(&mut h);
+        h.finish()
+    }
 }
 
 impl Hub {
@@ -284,7 +311,7 @@ impl Hub {
             cursor: Mutex::new(None),
             waker: Wake::new().expect("wake"),
             input: Mutex::new(None),
-            last_clipboard: Mutex::new(None),
+            paste_echo: PasteEcho::default(),
             resize_req: Mutex::new(None),
             resize_max: Mutex::new(None),
             hello_extra: Mutex::new(serde_json::Map::new()),
@@ -392,5 +419,23 @@ impl Hub {
             client.send(Out::Text("{\"t\":\"close\"}".into()));
         }
         Some(crate::mac::DisplayRequest { id, sender, ready })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PasteEcho;
+
+    #[test]
+    fn paste_echo_skips_only_the_paste_coming_back() {
+        let echo = PasteEcho::default();
+        echo.note(b"pasted");
+        // The desktop handing a viewer's paste straight back is skipped...
+        assert!(echo.is_echo(b"pasted"));
+        // ...but copying the same text on the desktop again is a real copy.
+        assert!(!echo.is_echo(b"pasted"));
+
+        echo.note(b"pasted");
+        assert!(!echo.is_echo(b"copied on the desktop"));
     }
 }

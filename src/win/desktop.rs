@@ -44,7 +44,6 @@ const MAX_IMAGE: usize = 15 << 20;
 struct ClipState {
     /// Clipboard sequence number after our own last write (not echoed back to clients).
     own_change: u32,
-    last_image: Option<u64>,
 }
 
 /// The "PNG" clipboard format browsers and Office use for images with transparency.
@@ -131,10 +130,10 @@ impl ClipboardHandle {
                         .flat_map(|u| u.to_le_bytes())
                         .collect();
                     put(CF_UNICODETEXT.0 as u32, &w);
-                    *self.hub.last_clipboard.lock() = Some(t);
+                    self.hub.paste_echo.note(t.as_bytes());
                 }
                 ClipContent::Image(png) => {
-                    st.last_image = Some(hash(&png));
+                    self.hub.paste_echo.note(&png);
                     put(png_format(), &png);
                     // Most apps read images as a DIB.
                     if let Some(dib) = png_to_dib(&png) {
@@ -145,13 +144,6 @@ impl ClipboardHandle {
         }
         st.own_change = unsafe { GetClipboardSequenceNumber() };
     }
-}
-
-fn hash(data: &[u8]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    data.hash(&mut h);
-    h.finish()
 }
 
 /// A PNG as a bottom-up 32-bit DIB (BITMAPINFOHEADER and BGRA rows).
@@ -281,7 +273,8 @@ fn clipboard_loop(hub: Arc<Hub>, state: Arc<Mutex<ClipState>>) {
     let mut seen = unsafe { GetClipboardSequenceNumber() };
     let png = png_format();
     loop {
-        std::thread::sleep(Duration::from_millis(250));
+        // The sequence number is cheap to read; a copy reaches viewers within 50 ms.
+        std::thread::sleep(Duration::from_millis(50));
         let n = unsafe { GetClipboardSequenceNumber() };
         if n == seen {
             continue;
@@ -304,15 +297,8 @@ fn clipboard_loop(hub: Arc<Hub>, state: Arc<Mutex<ClipState>>) {
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect();
             let text = super::from_wide(&units);
-            if text.is_empty() {
+            if text.is_empty() || hub.paste_echo.is_echo(text.as_bytes()) {
                 continue;
-            }
-            {
-                let mut last = hub.last_clipboard.lock();
-                if last.as_deref() == Some(text.as_str()) {
-                    continue;
-                }
-                *last = Some(text.clone());
             }
             let msg = serde_json::json!({"t": "clip", "d": text}).to_string();
             hub.broadcast(|| Out::Text(msg.clone()));
@@ -330,16 +316,8 @@ fn clipboard_loop(hub: Arc<Hub>, state: Arc<Mutex<ClipState>>) {
         let Some(data) = data else {
             continue;
         };
-        if data.is_empty() || data.len() > MAX_IMAGE {
+        if data.is_empty() || data.len() > MAX_IMAGE || hub.paste_echo.is_echo(&data) {
             continue;
-        }
-        let h = hash(&data);
-        {
-            let mut st = state.lock();
-            if st.last_image == Some(h) {
-                continue;
-            }
-            st.last_image = Some(h);
         }
         let mut msg = Vec::with_capacity(data.len() + 1);
         msg.push(0x04);
