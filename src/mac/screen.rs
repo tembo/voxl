@@ -36,7 +36,9 @@ struct Mode {
 pub struct Screen {
     display: u32,
     original: Mode,
-    resized: bool,
+    last_resize: Option<i32>,
+    restore_on_disconnect: bool,
+    idle_restore_failed: bool,
     modes: Vec<Mode>,
     max: (u32, u32),
     current: (u32, u32),
@@ -48,20 +50,11 @@ impl Screen {
     pub fn open(_display: Option<&str>) -> Result<Self, String> {
         let display = super::display();
         let mut modes: Vec<Mode> = Vec::new();
-        let original;
+        let original = Mode::current(display)?;
         unsafe {
-            let cur = CGDisplayCopyDisplayMode(display);
-            if cur.is_null() {
-                return Err("no display mode".into());
-            }
-            let hidpi = CGDisplayModeGetPixelWidth(cur) > CGDisplayModeGetWidth(cur);
-            let current = (CGDisplayModeGetWidth(cur), CGDisplayModeGetHeight(cur));
-            let rate = CGDisplayModeGetRefreshRate(cur);
-            original = Mode {
-                mode: cur,
-                points: current,
-                size: super::size_for(current.0 as f64, current.1 as f64),
-            };
+            let current = original.points;
+            let hidpi = CGDisplayModeGetPixelWidth(original.mode) > current.0;
+            let rate = CGDisplayModeGetRefreshRate(original.mode);
             let key = kCGDisplayShowDuplicateLowResolutionModes;
             let opts = objc2_core_foundation::CFDictionary::from_slices(
                 &[&*(key as *const objc2_core_foundation::CFString)],
@@ -118,7 +111,9 @@ impl Screen {
         Ok(Screen {
             display,
             original,
-            resized: false,
+            last_resize: None,
+            restore_on_disconnect: false,
+            idle_restore_failed: false,
             modes,
             max,
             current: super::capture_size(display),
@@ -133,6 +128,22 @@ impl Screen {
         fit(w, h, self.max)
     }
 
+    pub fn restore_on_disconnect(&mut self, enabled: bool) {
+        self.restore_on_disconnect = enabled;
+    }
+
+    pub fn needs_idle_restore(&self) -> bool {
+        self.last_resize.is_some() && !self.idle_restore_failed
+    }
+
+    pub fn restore_after_disconnect(&mut self) -> Result<(), String> {
+        let result = self.restore();
+        // A disconnected display may refuse its old mode. Keep the snapshot for
+        // an explicit display switch, but do not continuously rebuild capture.
+        self.idle_restore_failed = result.is_err();
+        result
+    }
+
     pub fn resize(&mut self, w: u32, h: u32) -> Result<(), String> {
         let want = self.fit(w, h);
         self.current = super::capture_size(self.display);
@@ -144,8 +155,17 @@ impl Screen {
             .iter()
             .find(|m| m.size == want)
             .ok_or("no such mode")?;
+        // Save the live mode, since the user could change it after voxl started.
+        // Keep it only if this resize actually succeeds.
+        let previous = (self.restore_on_disconnect && self.last_resize.is_none())
+            .then(|| Mode::current(self.display))
+            .transpose()?;
         set_mode(self.display, m)?;
-        self.resized = true;
+        if let Some(previous) = previous {
+            self.original = previous;
+        }
+        self.last_resize = Some(m.id());
+        self.idle_restore_failed = false;
         self.current = want;
         log::info!(
             "display set to {}x{} points ({}x{} streamed)",
@@ -158,12 +178,45 @@ impl Screen {
     }
 
     pub fn restore(&mut self) -> Result<(), String> {
-        if self.resized {
+        if let Some(last_resize) = self.last_resize {
+            // A change made outside voxl after its last resize takes precedence.
+            if self.restore_on_disconnect && Mode::current(self.display)?.id() != last_resize {
+                self.last_resize = None;
+                return Ok(());
+            }
             set_mode(self.display, &self.original)?;
             self.current = self.original.size;
-            self.resized = false;
+            self.last_resize = None;
+            if self.restore_on_disconnect {
+                log::info!(
+                    "restored display to {}x{} points",
+                    self.original.points.0,
+                    self.original.points.1
+                );
+            }
         }
         Ok(())
+    }
+}
+
+impl Mode {
+    fn current(display: u32) -> Result<Self, String> {
+        unsafe {
+            let mode = CGDisplayCopyDisplayMode(display);
+            if mode.is_null() {
+                return Err("no display mode".into());
+            }
+            let points = (CGDisplayModeGetWidth(mode), CGDisplayModeGetHeight(mode));
+            Ok(Self {
+                mode,
+                points,
+                size: super::size_for(points.0 as f64, points.1 as f64),
+            })
+        }
+    }
+
+    fn id(&self) -> i32 {
+        unsafe { CGDisplayModeGetIODisplayModeID(self.mode) }
     }
 }
 

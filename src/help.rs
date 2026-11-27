@@ -85,6 +85,9 @@ Desktop (this Mac's screen):
                                 (default false)
   --resize-scale                display pixels per CSS pixel (default: the
                                 capture scale)
+  --restore-display-on-disconnect
+                                restore the mode before the first resize when
+                                the last viewer leaves (default false)
   --read-only                   viewers only watch (default false)
   --show-cursor                 include the host cursor in the video stream
                                 (default: true with --read-only, else false)

@@ -146,6 +146,8 @@ async fn serve(a: HashMap<String, String>) {
         display: display.clone(),
         #[cfg(target_os = "macos")]
         enable_resize: truthy(a.get("enable-resize"), false) && !truthy(a.get("read-only"), false),
+        #[cfg(target_os = "macos")]
+        restore_display_on_disconnect: truthy(a.get("restore-display-on-disconnect"), false),
         fps: range_max(a.get("framerate"), 60.0) as u32,
         preset: a
             .get("preset")

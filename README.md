@@ -266,6 +266,10 @@ the display falls asleep under a running voxl, voxl exits; run it under launchd 
 The other flags work as on Linux; `--audio-device-name`, `--microphone-fifo` and the
 rounded-corner flags don't apply.
 
+With `--enable-resize --restore-display-on-disconnect`, voxl saves the display mode
+before the first resize. It restores that mode after the last client disconnects and
+a short reconnect period. A mode chosen outside voxl after its last resize stays in place.
+
 ### Windows
 
 voxl also streams a Windows desktop (Windows 10 or later), with every feature of the

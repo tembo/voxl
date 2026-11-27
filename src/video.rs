@@ -16,6 +16,8 @@ pub struct VideoConfig {
     pub display: Option<String>,
     #[cfg(target_os = "macos")]
     pub enable_resize: bool,
+    #[cfg(target_os = "macos")]
+    pub restore_display_on_disconnect: bool,
     pub fps: u32,
     pub preset: String,
     pub threads: u32,
@@ -72,9 +74,14 @@ pub fn spawn(
     hub: Arc<Hub>,
     mut screen: Option<crate::screen::Screen>,
 ) -> Result<(), String> {
-    if let Some(s) = &screen {
+    if let Some(s) = screen.as_mut() {
         *hub.resize_max.lock() = Some(s.max());
+        #[cfg(target_os = "macos")]
+        s.restore_on_disconnect(cfg.restore_display_on_disconnect);
     }
+    #[cfg(target_os = "macos")]
+    hub.restore_display_on_disconnect
+        .store(cfg.restore_display_on_disconnect, Ordering::Relaxed);
     let mut p = build(&cfg, &hub)?;
     std::thread::Builder::new()
         .name("capture".into())
@@ -85,7 +92,18 @@ pub fn spawn(
                 ret_rx,
                 encode,
             } = p;
-            if let Err(e) = capture_loop(&mut cap, cfg.clone(), hub.clone(), job_tx, ret_rx) {
+            #[cfg(target_os = "macos")]
+            let restore_on_idle = cfg.restore_display_on_disconnect
+                && screen.as_ref().is_some_and(|s| s.needs_idle_restore());
+            if let Err(e) = capture_loop(
+                &mut cap,
+                cfg.clone(),
+                hub.clone(),
+                job_tx,
+                ret_rx,
+                #[cfg(target_os = "macos")]
+                restore_on_idle,
+            ) {
                 #[cfg(target_os = "linux")]
                 let resized = cap.geometry_changed();
                 #[cfg(not(target_os = "linux"))]
@@ -111,10 +129,25 @@ pub fn spawn(
                 });
                 continue;
             }
-            let req = hub.resize_req.lock().take();
-            if let (Some(s), Some((w, h))) = (screen.as_mut(), req) {
-                if let Err(e) = s.resize(w, h) {
-                    log::warn!("resize to {w}x{h} failed: {e}");
+            #[cfg(target_os = "macos")]
+            if let Some(s) = screen.as_mut().filter(|_| restore_on_idle) {
+                if let Some(Err(e)) = hub.restore_idle_display(|| s.restore_after_disconnect()) {
+                    log::warn!("could not restore the display mode: {e}");
+                }
+            }
+            {
+                #[cfg(target_os = "macos")]
+                let clients = cfg
+                    .restore_display_on_disconnect
+                    .then(|| hub.clients.lock());
+                let req = hub.resize_req.lock().take();
+                #[cfg(target_os = "macos")]
+                let req =
+                    req.filter(|_| !clients.as_ref().is_some_and(|clients| clients.is_empty()));
+                if let (Some(s), Some((w, h))) = (screen.as_mut(), req) {
+                    if let Err(e) = s.resize(w, h) {
+                        log::warn!("resize to {w}x{h} failed: {e}");
+                    }
                 }
             }
             p = match build(&cfg, &hub) {
@@ -154,6 +187,9 @@ fn switch_display(
         } else {
             None
         };
+        if let Some(s) = screen.as_mut() {
+            s.restore_on_disconnect(cfg.restore_display_on_disconnect);
+        }
         *hub.resize_max.lock() = screen.as_ref().map(|s| s.max());
         build(cfg, hub)
     };
@@ -531,6 +567,7 @@ fn capture_loop(
     hub: Arc<Hub>,
     job_tx: mpsc::SyncSender<Job>,
     ret_rx: mpsc::Receiver<(usize, Box<I420>)>,
+    #[cfg(target_os = "macos")] restore_on_idle: bool,
 ) -> Result<(), String> {
     let (w, h) = (cap.width as usize, cap.height as usize);
     let mut pool: Vec<Option<Box<I420>>> = vec![
@@ -555,7 +592,7 @@ fn capture_loop(
 
     loop {
         #[cfg(target_os = "macos")]
-        if hub.display_req.lock().is_some() {
+        if hub.display_req.lock().is_some() || (restore_on_idle && hub.display_restore_due()) {
             return Ok(());
         }
         if hub.resize_req.lock().is_some() || cap.needs_rebuild() {
