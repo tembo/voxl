@@ -39,6 +39,8 @@ pub enum InputEvent {
     /// Remote clipboard update, ordered with the key events around it.
     Clipboard(super::desktop::ClipContent),
     ReleaseAll,
+    /// Finish queued input on its original geometry before selecting another display.
+    DisplayBarrier(mpsc::Sender<()>),
     /// Release everything before exit.
     Shutdown,
 }
@@ -360,6 +362,10 @@ impl Injector {
                 }
             }
             InputEvent::ReleaseAll | InputEvent::Shutdown => self.release_all(),
+            InputEvent::DisplayBarrier(done) => {
+                self.release_all();
+                let _ = done.send(());
+            }
         }
     }
 

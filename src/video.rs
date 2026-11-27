@@ -5,6 +5,10 @@ use crate::convert::I420;
 use crate::encoder::{Encoded, Encoder, EncoderConfig, Planes};
 use crate::hub::wait_any;
 use crate::hub::{Hub, Inflight, Out};
+#[cfg(target_os = "macos")]
+use crate::mac as platform;
+#[cfg(windows)]
+use crate::win as platform;
 use bytes::Bytes;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
@@ -14,7 +18,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub struct VideoConfig {
     pub display: Option<String>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub enable_resize: bool,
     pub fps: u32,
     pub preset: String,
@@ -99,9 +103,9 @@ pub fn spawn(
             }
             drop(cap);
             let _ = encode.join();
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             let display_request = hub.display_req.lock().take();
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             if let Some(request) = display_request {
                 // A resize for the old monitor must not be applied to the new one.
                 hub.resize_req.lock().take();
@@ -129,22 +133,22 @@ pub fn spawn(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn switch_display(
-    request: crate::mac::DisplayRequest,
+    request: platform::DisplayRequest,
     cfg: &VideoConfig,
     hub: &Arc<Hub>,
     screen: &mut Option<crate::screen::Screen>,
 ) -> Result<Pipeline, String> {
-    let previous = crate::mac::display();
+    let previous = platform::display();
     let mut open = |id| {
-        // Best effort: an app-only mode change is undone by macOS when voxl exits.
+        // Best effort: an app-only mode change is undone when voxl exits.
         if let Some(mut old) = screen.take() {
             if let Err(e) = old.restore() {
                 log::warn!("could not restore the previous display mode: {e}");
             }
         }
-        crate::mac::select_display(id)?;
+        platform::select_display(id)?;
         *screen = if cfg.enable_resize {
             crate::screen::Screen::open(None)
                 .inspect_err(|e| {
@@ -226,15 +230,15 @@ fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
         .name("encode".into())
         .spawn(move || encode_loop(stripes, job_rx, ret_tx, hub2, crf, po_crf))
         .unwrap();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     {
         let resizing = hub.resize_max.lock().is_some();
         let mut extra = hub.hello_extra.lock();
-        extra.insert("displays".into(), crate::mac::display_info());
+        extra.insert("displays".into(), platform::display_info());
         if resizing {
             extra.insert(
                 "resize".into(),
-                serde_json::json!({ "scale": crate::mac::resize_scale() }),
+                serde_json::json!({ "scale": platform::resize_scale() }),
             );
         } else {
             extra.remove("resize");
@@ -554,7 +558,7 @@ fn capture_loop(
     let debug_marker = std::env::var("VOXL_DEBUG_MARKER").is_ok();
 
     loop {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         if hub.display_req.lock().is_some() {
             return Ok(());
         }
