@@ -223,6 +223,9 @@ async fn handle_socket(socket: WebSocket, s: AppState) {
         s.hub.add_client(tx)
     };
     log::info!("client {} connected", client.id);
+    // A viewer arriving at a dimmed Mac sees its screen, as a local user would.
+    #[cfg(target_os = "macos")]
+    crate::mac::wake_display();
     client.send(Out::Text(s.hub.hello()));
     if let Some(c) = s.hub.cursor.lock().clone() {
         client.send(Out::Bin(c));

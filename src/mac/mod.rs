@@ -21,6 +21,7 @@ pub mod stream;
 use ffi::*;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// The captured display and how its points map to the desktop pixels voxl streams.
 #[derive(Clone, Copy, Debug)]
@@ -65,7 +66,7 @@ static SETTINGS: Mutex<Settings> = Mutex::new(Settings {
 
 /// Reads the macOS options and checks the privacy permissions voxl needs.
 pub fn init(a: &HashMap<String, String>) {
-    let display = pick_display(a.get("display").map(|s| s.as_str()));
+    let display = awake_display(a.get("display").map(|s| s.as_str()));
     let read_only = crate::truthy(a.get("read-only"), false);
     let show_cursor = crate::truthy(a.get("show-cursor"), read_only);
     {
@@ -152,6 +153,52 @@ fn pick_display(arg: Option<&str>) -> u32 {
             main
         }
         None => main,
+    }
+}
+
+/// The display to capture, as `pick_display`, woken first if it's asleep. ScreenCaptureKit
+/// can't capture a sleeping display, so voxl would exit, and under launchd start and exit
+/// again until something else woke the display. It's given 30 s, and may come back
+/// under a new ID, so the display is picked again after each try.
+fn awake_display(arg: Option<&str>) -> u32 {
+    let mut display = pick_display(arg);
+    // Without Screen Recording nothing can be captured, awake or not; init says so.
+    if !unsafe { CGPreflightScreenCaptureAccess() } {
+        return display;
+    }
+    for _ in 0..30 {
+        let Err(e) = stream::shareable_display(display) else {
+            break;
+        };
+        log::warn!("{e}; waking the display");
+        wake_display();
+        std::thread::sleep(Duration::from_secs(1));
+        display = pick_display(arg);
+    }
+    display
+}
+
+/// Declares a local user active, as `caffeinate -u` does: a sleeping display turns on
+/// (at the lock screen, if it locked) and its idle timer starts again, so it still
+/// sleeps after the usual idle time (30 s at the lock screen). At most once a second.
+pub fn wake_display() {
+    // When it was last called and the assertion it took, which later calls renew.
+    static LAST: Mutex<(Option<Instant>, u32)> = Mutex::new((None, 0));
+    let mut last = LAST.lock();
+    if last.0.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+        return;
+    }
+    last.0 = Some(Instant::now());
+    let name = objc2_core_foundation::CFString::from_static_str("voxl");
+    let r = unsafe {
+        IOPMAssertionDeclareUserActivity(
+            &*name as *const _ as CFStringRef,
+            kIOPMUserActiveLocal,
+            &mut last.1,
+        )
+    };
+    if r != 0 {
+        log::warn!("declaring user activity failed: {r:#x}");
     }
 }
 

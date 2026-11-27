@@ -200,6 +200,14 @@ extern "C" {
     pub fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
 }
 
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    pub fn IOPMAssertionDeclareUserActivity(name: CFStringRef, user_type: u32, id: *mut u32)
+        -> i32;
+}
+/// A user in front of the Mac (`kIOPMUserActiveRemote` doesn't turn the display on).
+pub const kIOPMUserActiveLocal: u32 = 0;
+
 #[link(name = "CoreVideo", kind = "framework")]
 extern "C" {
     pub fn CVPixelBufferRetain(pb: CVPixelBufferRef) -> CVPixelBufferRef;

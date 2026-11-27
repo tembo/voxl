@@ -71,7 +71,7 @@ pub struct Stream {
     pub stopped: Arc<AtomicBool>,
 }
 
-fn shareable_display(id: u32) -> Result<Retained<SCDisplay>, String> {
+pub fn shareable_display(id: u32) -> Result<Retained<SCDisplay>, String> {
     let (tx, rx) = mpsc::channel::<Result<SendBox<Retained<SCDisplay>>, String>>();
     let block = block2::RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
         let r = match unsafe { Retained::retain(content) } {
@@ -89,7 +89,13 @@ fn shareable_display(id: u32) -> Result<Retained<SCDisplay>, String> {
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&block) };
     match rx.recv_timeout(Duration::from_secs(10)) {
         Ok(r) => r.map(|b| b.0).map_err(|e| {
-            format!("{e} (is Screen Recording allowed in System Settings > Privacy & Security?)")
+            if unsafe { super::ffi::CGPreflightScreenCaptureAccess() } {
+                format!("{e} (is the display asleep or disconnected?)")
+            } else {
+                format!(
+                    "{e} (is Screen Recording allowed in System Settings > Privacy & Security?)"
+                )
+            }
         }),
         Err(_) => Err("timed out listing displays".into()),
     }
