@@ -156,6 +156,7 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 | `--files-root`                                                 | `$HOME`                            | folder the Files panel can see; nothing outside it is reachable                                                   |
 | `--upload-dir`                                                 | `Downloads`                        | folder (under the root) the panel opens and uploads into; created on first upload                                 |
 | `--max-upload-mb`                                              | `0` (no limit)                     | largest accepted upload                                                                                           |
+| `--drop-into-apps`                                             | `false`                            | files dropped on the screen also go to the app under the pointer, as a local drag would (X11 only)                |
 | `--max-record-seconds`                                         | `300`                              | longest recording (`/record`)                                                                                     |
 | `--convert-threads`, `--coalesce-us`                           | `4`, `0`                           | tuning                                                                                                            |
 

@@ -24,7 +24,12 @@ pub struct Files {
     pub default_dir: String,
     /// 0 = unlimited.
     pub max_upload_bytes: u64,
+    /// Drops uploaded files into the app under a desktop point (--drop-into-apps).
+    pub drop: Option<DropFn>,
 }
+
+/// Drops files at a desktop position; true if an app there took them. Blocking.
+pub type DropFn = Arc<dyn Fn(i16, i16, &[PathBuf]) -> Result<bool, String> + Send + Sync>;
 
 /// Uploads must carry this header. Browsers only send custom headers cross-origin
 /// after a CORS preflight, which we never answer, so other sites can't upload.
@@ -524,4 +529,56 @@ pub async fn upload(
         body.to_string(),
     )
         .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct DropRequest {
+    x: i16,
+    y: i16,
+    /// Uploaded files, as the upload responses named them.
+    paths: Vec<String>,
+}
+
+/// One drop at a time: each is a whole drag on the desktop.
+static DROPPING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Drops files that were just uploaded into the app at (x, y), as if they had been
+/// dragged there on the desktop. The files stay where the upload put them either way.
+pub async fn drop_files(
+    State(f): State<Arc<Files>>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<DropRequest>,
+) -> Response {
+    let Some(drop_at) = f.drop.clone().filter(|_| f.upload) else {
+        return err(StatusCode::FORBIDDEN, "dropping into apps is disabled");
+    };
+    // Same guard as uploads: other sites' pages can't send this header.
+    if !headers.contains_key(UPLOAD_HEADER) {
+        return err(StatusCode::FORBIDDEN, "missing upload header");
+    }
+    if req.paths.is_empty() || req.paths.len() > 100 || req.x < 0 || req.y < 0 {
+        return err(StatusCode::BAD_REQUEST, "invalid drop");
+    }
+    let mut paths = Vec::with_capacity(req.paths.len());
+    for p in &req.paths {
+        match f.resolve(p, true) {
+            Ok(p) if p.is_file() => paths.push(p),
+            Ok(_) => return err(StatusCode::BAD_REQUEST, "not a file"),
+            Err(e) => return e,
+        }
+    }
+    let _one = DROPPING.lock().await;
+    let (x, y) = (req.x, req.y);
+    match tokio::task::spawn_blocking(move || drop_at(x, y, &paths)).await {
+        Ok(Ok(dropped)) => (
+            [(header::CONTENT_TYPE, "application/json")],
+            serde_json::json!({ "dropped": dropped }).to_string(),
+        )
+            .into_response(),
+        Ok(Err(e)) => {
+            log::warn!("file drop: {e}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "the drop failed")
+        }
+        Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "the drop failed"),
+    }
 }

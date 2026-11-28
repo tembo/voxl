@@ -103,7 +103,7 @@ function main() {
 	const pointer = setupPointer(app, zoom, onInteract);
 	setupKeyboard(app, clipboard, onInteract);
 	const updateDisplays = setupToolbar(app, video.layout, pointer.setTrackpad);
-	const files = createFiles(app);
+	const files = createFiles(app, pointer.pointAt);
 	const mic = createMic(app);
 	const resize = createResize(app);
 

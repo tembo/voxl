@@ -29,6 +29,8 @@ export interface FilesConfig {
 	download: boolean;
 	/** Folder (relative to the shared root) the panel opens and uploads into. */
 	dir: string;
+	/** Files dropped on the screen also go to the app under the pointer (--drop-into-apps). */
+	drop?: boolean;
 }
 
 export interface Hello {
