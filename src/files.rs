@@ -559,7 +559,7 @@ pub async fn drop_files(
     if req.paths.is_empty() || req.paths.len() > 100 || req.x < 0 || req.y < 0 {
         return err(StatusCode::BAD_REQUEST, "invalid drop");
     }
-    let mut paths = Vec::with_capacity(req.paths.len());
+    let mut paths = Vec::new();
     for p in &req.paths {
         match f.resolve(p, true) {
             Ok(p) if p.is_file() => paths.push(p),
