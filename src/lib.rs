@@ -14,6 +14,8 @@ mod convert;
 mod corners;
 #[cfg(target_os = "linux")]
 mod desktop;
+#[cfg(target_os = "linux")]
+mod dnd;
 mod encoder;
 mod files;
 mod help;
@@ -284,10 +286,28 @@ async fn serve(a: HashMap<String, String>) {
         .or_else(|| std::env::var("USERPROFILE").ok())
         .unwrap_or_else(|| "/".into());
     let root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.into());
+    // Uploading writes to the desktop, so a read-only viewer does not get it.
+    let upload = !read_only && transfers.split(',').any(|t| t.trim() == "upload");
+    // --drop-into-apps: files dropped on the stream also go to the app under the
+    // pointer, as a drag from a file manager would. X11 only for now.
+    let drop_into_apps = upload && truthy(a.get("drop-into-apps"), false);
+    #[cfg(target_os = "linux")]
+    let drop: Option<files::DropFn> = drop_into_apps.then(|| {
+        let display = display.clone();
+        std::sync::Arc::new(move |x: i16, y: i16, paths: &[std::path::PathBuf]| {
+            dnd::drop_files(display.as_deref(), x, y, paths)
+        }) as files::DropFn
+    });
+    #[cfg(not(target_os = "linux"))]
+    let drop: Option<files::DropFn> = {
+        if drop_into_apps {
+            log::warn!("--drop-into-apps only applies to X11 desktops for now");
+        }
+        None
+    };
     let files = std::sync::Arc::new(files::Files {
         root,
-        // Uploading writes to the desktop, so a read-only viewer does not get it.
-        upload: !read_only && transfers.split(',').any(|t| t.trim() == "upload"),
+        upload,
         download: transfers.split(',').any(|t| t.trim() == "download"),
         default_dir: a
             .get("upload-dir")
@@ -296,6 +316,7 @@ async fn serve(a: HashMap<String, String>) {
             .trim_matches('/')
             .to_string(),
         max_upload_bytes: (range_max(a.get("max-upload-mb"), 0.0) * 1048576.0) as u64,
+        drop,
     });
     log::info!("file transfer: {transfers} under {}", files.root.display());
     // --microphone-enabled (as in selkies): browser microphone -> a FIFO that a
@@ -330,7 +351,7 @@ async fn serve(a: HashMap<String, String>) {
         }
         extra.insert(
             "files".into(),
-            serde_json::json!({"upload": files.upload, "download": files.download, "dir": files.default_dir}),
+            serde_json::json!({"upload": files.upload, "download": files.download, "dir": files.default_dir, "drop": files.drop.is_some()}),
         );
         if resize_on {
             extra.insert(

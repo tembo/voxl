@@ -1,6 +1,7 @@
 // Files panel: browse the shared folder and download (folders as zips), upload files
-// and folders with the buttons or by dropping them anywhere on the page. Uses the
-// server's /files HTTP API.
+// and folders with the buttons or by dropping them anywhere on the page. With
+// --drop-into-apps, files dropped on the desktop then go to the app under the pointer.
+// Uses the server's /files HTTP API.
 import type { FilesConfig } from '../protocol';
 import type { App } from './app';
 import { el } from './app';
@@ -31,13 +32,24 @@ interface Group {
 	sent: number;
 	failed: number;
 }
+/** Files dropped on an app: dropped into it at (x, y) once all are uploaded. */
+interface Batch {
+	x: number;
+	y: number;
+	left: number;
+	paths: string[];
+	failed: boolean;
+	timer: ReturnType<typeof setTimeout>;
+}
 interface Upload {
 	f: File;
 	sub: string;
 	dir: string;
 	row: HTMLElement;
 	group?: Group;
+	batch?: Batch;
 }
+type Point = { clientX: number; clientY: number };
 
 // Icons from the Tembo UI package's icon set (16px with 2px padding).
 const svg = (d: string) =>
@@ -118,7 +130,10 @@ async function walk(entry: FileSystemEntry): Promise<Picked[]> {
 	return (await Promise.all(children.map(walk))).flat();
 }
 
-export function createFiles(app: App) {
+export function createFiles(
+	app: App,
+	pointAt: (p: Point) => { x: number; y: number } | null
+) {
 	const panel = el('files');
 	const list = el('files-list');
 	const crumbs = el('files-crumbs');
@@ -156,7 +171,9 @@ export function createFiles(app: App) {
 		uploadDirBtn.style.display = cfg.upload ? '' : 'none';
 		footer.textContent = [
 			cfg.upload &&
-				'Drop files or folders anywhere on the screen to upload them here.',
+				(cfg.drop
+					? 'Files dropped on an app go to it and are saved here; drop them on this panel to only upload them.'
+					: 'Drop files or folders anywhere on the screen to upload them here.'),
 			cfg.download && 'Click a file to download it; folders download as zips.',
 		]
 			.filter(Boolean)
@@ -285,9 +302,18 @@ export function createFiles(app: App) {
 	// A folder gets one row for all of its files.
 	const queue: Upload[] = [];
 	let busy = false;
-	function upload(picked: Picked[]) {
+	function upload(picked: Picked[], at?: { x: number; y: number }) {
 		if (!cfg?.upload) return;
-		open();
+		// A drop on an app leaves the panel shut unless the upload takes a while.
+		const batch: Batch | undefined = at && {
+			x: Math.round(at.x),
+			y: Math.round(at.y),
+			left: picked.length,
+			paths: [],
+			failed: false,
+			timer: setTimeout(open, 1500),
+		};
+		if (!batch) open();
 		const groups = new Map<string, Group>();
 		for (const { f, sub } of picked) {
 			const top = sub.split('/')[0];
@@ -314,6 +340,7 @@ export function createFiles(app: App) {
 				dir: cwd,
 				row: group?.row ?? newRow(f.name),
 				group,
+				batch,
 			});
 		}
 		for (const g of groups.values()) groupStatus(g);
@@ -327,6 +354,26 @@ export function createFiles(app: App) {
 		row.querySelector('.f-name')!.textContent = name;
 		uploads.prepend(row);
 		return row;
+	}
+	/** One file of a drop on an app is uploaded (at `path`) or failed; once all are,
+	 * drop them into the app. The panel opens if any failed or no app took them. */
+	function settle(b: Batch, path?: string) {
+		if (path) b.paths.push(path);
+		else b.failed = true;
+		if (--b.left) return;
+		clearTimeout(b.timer);
+		if (b.failed || !b.paths.length) {
+			open();
+			if (!b.paths.length) return;
+		}
+		fetch(api('drop', {}), {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'X-Voxl-Upload': '1' },
+			body: JSON.stringify({ x: b.x, y: b.y, paths: b.paths }),
+		})
+			.then((r) => r.json())
+			.then((d: { dropped?: boolean }) => d.dropped || open())
+			.catch(open);
 	}
 	function groupStatus(g: Group, current = 0) {
 		const pct = g.bytes ? ((g.sent + current) / g.bytes) * 100 : 100;
@@ -390,6 +437,7 @@ export function createFiles(app: App) {
 				if (u.dir === cwd) load(cwd, true);
 				setTimeout(() => u.row.remove(), 6000);
 			} else status(u.row, d.error || `Failed (${xhr.status})`, 'err');
+			if (u.batch) settle(u.batch, xhr.status === 200 ? d.path : undefined);
 			finish();
 		});
 		xhr.addEventListener('error', () => {
@@ -397,6 +445,7 @@ export function createFiles(app: App) {
 				g.failed++;
 				groupFinished(g, u.dir);
 			} else status(u.row, 'Connection lost', 'err');
+			if (u.batch) settle(u.batch);
 			finish();
 		});
 		xhr.send(u.f);
@@ -429,17 +478,25 @@ export function createFiles(app: App) {
 			close();
 	});
 
+	/** Over the desktop itself (not the panel or toolbar), with dropping into apps on. */
+	const onApp = (e: DragEvent) =>
+		!!cfg?.drop && e.target instanceof Node && app.surface.contains(e.target);
 	// Always swallow dropped files: otherwise the browser navigates away to open them.
 	let depth = 0;
 	window.addEventListener('dragenter', (e) => {
 		if (!hasFiles(e)) return;
 		e.preventDefault();
-		if (cfg?.upload && ++depth === 1) drop.classList.add('show');
+		if (cfg?.upload && ++depth === 1) drop.classList.toggle('show', !onApp(e));
 	});
 	window.addEventListener('dragover', (e) => {
 		if (!hasFiles(e)) return;
 		e.preventDefault();
 		e.dataTransfer!.dropEffect = cfg?.upload ? 'copy' : 'none';
+		if (!cfg?.upload) return;
+		// Over an app, the remote pointer follows the drag instead of the upload card.
+		const toApp = onApp(e);
+		drop.classList.toggle('show', !toApp);
+		if (toApp) pointAt(e);
 	});
 	window.addEventListener('dragleave', (e) => {
 		if (hasFiles(e) && --depth <= 0) {
@@ -453,6 +510,7 @@ export function createFiles(app: App) {
 		depth = 0;
 		drop.classList.remove('show');
 		if (!cfg?.upload) return;
+		const at = onApp(e) ? pointAt(e) : null;
 		// Entries must be taken during the event; the walk can finish afterwards.
 		const entries: FileSystemEntry[] = [];
 		const plain: Picked[] = [];
@@ -465,7 +523,8 @@ export function createFiles(app: App) {
 				if (f) plain.push({ f, sub: '' });
 			}
 		}
-		if (!entries.length) return upload(plain);
+		// Plain files go to the app; folders are only uploaded, as before.
+		if (!entries.length) return upload(plain, at ?? undefined);
 		void Promise.all(entries.map(walk)).then((found) =>
 			upload([...plain, ...found.flat()])
 		);

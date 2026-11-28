@@ -137,6 +137,7 @@ pub fn router(state: AppState) -> Router {
         .route("/files/list", get(files::list))
         .route("/files/download", get(files::download))
         .route("/files/upload", axum::routing::put(files::upload))
+        .route("/files/drop", axum::routing::post(files::drop_files))
         .with_state(state.files.clone());
     use crate::record;
     let record_routes = Router::new()
@@ -502,6 +503,7 @@ mod tests {
                 download: false,
                 default_dir: String::new(),
                 max_upload_bytes: 0,
+                drop: None,
             }),
             mic: Some(mic_tx),
             resize: true,

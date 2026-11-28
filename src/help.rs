@@ -120,6 +120,8 @@ Files and recordings:
   --upload-dir                  folder under the root that uploads go to
                                 (default Downloads)
   --max-upload-mb               largest upload, 0 for no limit (default 0)
+  --drop-into-apps              files dropped on the screen also go to the app
+                                under the pointer, X11 only (default false)
   --max-record-seconds          longest recording (default 300)
 
   -h, --help                    print this and exit

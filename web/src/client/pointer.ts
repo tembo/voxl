@@ -159,6 +159,11 @@ export function setupPointer(app: App, zoom: Zoom, onInteract: () => void) {
 	);
 
 	return {
+		/** Moves the remote pointer to a spot on the page; its desktop position, if known. */
+		pointAt(p: { clientX: number; clientY: number }) {
+			if (!app.desk.w) return null;
+			return moveDesk(...toDesk(p));
+		},
 		/** Touch moves a cursor like a laptop's trackpad (touch.ts) instead of pointing. */
 		setTrackpad(on: boolean) {
 			trackpad = on;
